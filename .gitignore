@@ -1,0 +1,7 @@
+*.rpx
+*.o
+# Build folder
+build/
+build_wsl/
+# Generated files
+*.log
