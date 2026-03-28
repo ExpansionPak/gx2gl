@@ -3,10 +3,14 @@
 #include "core/gl_shader.h"
 #include "core/gl_texture.h"
 #include "core/gl_vao.h"
+#include "endian/endian.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
+#include <coreinit/cache.h>
+#include <gx2/clear.h>
 #include <gx2/enum.h>
+#include <gx2/mem.h>
 #include <gx2/registers.h>
 #include <gx2/state.h>
 #ifdef __cplusplus
@@ -16,7 +20,27 @@ extern "C" {
 #ifdef __cplusplus
 extern "C" {
 #endif
-// TODO: explain what's going on here (besides the obvious)
+static GLfloat clamp_float(GLfloat value, GLfloat min_value, GLfloat max_value) {
+  if (value < min_value) {
+    return min_value;
+  }
+  if (value > max_value) {
+    return max_value;
+  }
+  return value;
+}
+
+static GLdouble clamp_double(GLdouble value, GLdouble min_value,
+                             GLdouble max_value) {
+  if (value < min_value) {
+    return min_value;
+  }
+  if (value > max_value) {
+    return max_value;
+  }
+  return value;
+}
+
 static GX2BlendMode map_blend_factor(GLenum factor, bool *valid) {
   *valid = true;
   switch (factor) {
@@ -138,6 +162,318 @@ static GX2PolygonMode map_polygon_mode(GLenum mode, bool *valid) {
   }
 }
 
+static GX2FrontFace map_front_face(GLenum mode) {
+  return mode == GL_CW ? GX2_FRONT_FACE_CW : GX2_FRONT_FACE_CCW;
+}
+
+static bool stencil_face_range(GLenum face, uint32_t *first, uint32_t *last) {
+  if (!first || !last) {
+    return false;
+  }
+
+  switch (face) {
+  case GL_FRONT:
+    *first = 0;
+    *last = 0;
+    return true;
+  case GL_BACK:
+    *first = 1;
+    *last = 1;
+    return true;
+  case GL_FRONT_AND_BACK:
+    *first = 0;
+    *last = 1;
+    return true;
+  default:
+    return false;
+  }
+}
+
+static bool is_polygon_offset_enabled(void) {
+  if (!g_gl_context) {
+    return false;
+  }
+
+  switch (g_gl_context->polygon_mode) {
+  case GL_POINT:
+    return g_gl_context->polygon_offset_point_enabled == GL_TRUE;
+  case GL_LINE:
+    return g_gl_context->polygon_offset_line_enabled == GL_TRUE;
+  case GL_FILL:
+  default:
+    return g_gl_context->polygon_offset_fill_enabled == GL_TRUE;
+  }
+}
+
+static uint16_t float_to_half(float value) {
+  uint32_t bits;
+  uint32_t sign;
+  int32_t exponent;
+  uint32_t mantissa;
+
+  memcpy(&bits, &value, sizeof(bits));
+  sign = (bits >> 16) & 0x8000u;
+  exponent = (int32_t)((bits >> 23) & 0xFFu) - 127 + 15;
+  mantissa = bits & 0x7FFFFFu;
+
+  if (exponent <= 0) {
+    if (exponent < -10) {
+      return (uint16_t)sign;
+    }
+    mantissa = (mantissa | 0x800000u) >> (uint32_t)(1 - exponent);
+    if (mantissa & 0x00001000u) {
+      mantissa += 0x00002000u;
+    }
+    return (uint16_t)(sign | (mantissa >> 13));
+  }
+
+  if (exponent >= 31) {
+    return (uint16_t)(sign | 0x7C00u);
+  }
+
+  if (mantissa & 0x00001000u) {
+    mantissa += 0x00002000u;
+    if (mantissa & 0x00800000u) {
+      mantissa = 0;
+      ++exponent;
+      if (exponent >= 31) {
+        return (uint16_t)(sign | 0x7C00u);
+      }
+    }
+  }
+
+  return (uint16_t)(sign | ((uint32_t)exponent << 10) | (mantissa >> 13));
+}
+
+static void cpu_clear_color_buffer(GX2ColorBuffer *color_buffer) {
+  GX2Surface *surface;
+  uint8_t *image;
+  uint32_t row_bytes;
+
+  if (!g_gl_context || !color_buffer) {
+    return;
+  }
+
+  surface = &color_buffer->surface;
+  if (!surface->image || surface->tileMode != GX2_TILE_MODE_LINEAR_ALIGNED) {
+    return;
+  }
+
+  image = (uint8_t *)surface->image;
+
+  switch (surface->format) {
+  case GX2_SURFACE_FORMAT_UNORM_R8: {
+    uint8_t clear_r =
+        (uint8_t)(g_gl_context->clear_color[0] * 255.0f + 0.5f);
+    row_bytes = surface->pitch;
+    for (uint32_t y = 0; y < surface->height; ++y) {
+      uint8_t *row = image + y * row_bytes;
+      for (uint32_t x = 0; x < surface->width; ++x) {
+        if (g_gl_context->color_mask[0]) {
+          row[x] = clear_r;
+        }
+      }
+    }
+    break;
+  }
+  case GX2_SURFACE_FORMAT_UNORM_R8_G8: {
+    uint8_t clear_r =
+        (uint8_t)(g_gl_context->clear_color[0] * 255.0f + 0.5f);
+    uint8_t clear_g =
+        (uint8_t)(g_gl_context->clear_color[1] * 255.0f + 0.5f);
+    row_bytes = surface->pitch * 2u;
+    for (uint32_t y = 0; y < surface->height; ++y) {
+      uint8_t *row = image + y * row_bytes;
+      for (uint32_t x = 0; x < surface->width; ++x) {
+        uint8_t *pixel = row + x * 2u;
+        if (g_gl_context->color_mask[0]) {
+          pixel[0] = clear_r;
+        }
+        if (g_gl_context->color_mask[1]) {
+          pixel[1] = clear_g;
+        }
+      }
+    }
+    break;
+  }
+  case GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8: {
+    uint8_t clear_rgba[4] = {
+        (uint8_t)(g_gl_context->clear_color[0] * 255.0f + 0.5f),
+        (uint8_t)(g_gl_context->clear_color[1] * 255.0f + 0.5f),
+        (uint8_t)(g_gl_context->clear_color[2] * 255.0f + 0.5f),
+        (uint8_t)(g_gl_context->clear_color[3] * 255.0f + 0.5f)};
+    row_bytes = surface->pitch * 4u;
+    for (uint32_t y = 0; y < surface->height; ++y) {
+      uint8_t *row = image + y * row_bytes;
+      for (uint32_t x = 0; x < surface->width; ++x) {
+        uint8_t *pixel = row + x * 4u;
+        for (uint32_t c = 0; c < 4; ++c) {
+          if (g_gl_context->color_mask[c]) {
+            pixel[c] = clear_rgba[c];
+          }
+        }
+      }
+    }
+    break;
+  }
+  case GX2_SURFACE_FORMAT_FLOAT_R16_G16_B16_A16: {
+    uint16_t clear_rgba[4] = {
+        CPU_TO_GPU_16(float_to_half(g_gl_context->clear_color[0])),
+        CPU_TO_GPU_16(float_to_half(g_gl_context->clear_color[1])),
+        CPU_TO_GPU_16(float_to_half(g_gl_context->clear_color[2])),
+        CPU_TO_GPU_16(float_to_half(g_gl_context->clear_color[3]))};
+    row_bytes = surface->pitch * 8u;
+    for (uint32_t y = 0; y < surface->height; ++y) {
+      uint16_t *row = (uint16_t *)(image + y * row_bytes);
+      for (uint32_t x = 0; x < surface->width; ++x) {
+        uint16_t *pixel = row + x * 4u;
+        for (uint32_t c = 0; c < 4; ++c) {
+          if (g_gl_context->color_mask[c]) {
+            pixel[c] = clear_rgba[c];
+          }
+        }
+      }
+    }
+    break;
+  }
+  case GX2_SURFACE_FORMAT_FLOAT_R32: {
+    uint32_t clear_r_bits;
+    memcpy(&clear_r_bits, &g_gl_context->clear_color[0], sizeof(clear_r_bits));
+    clear_r_bits = CPU_TO_GPU_32(clear_r_bits);
+    row_bytes = surface->pitch * 4u;
+    for (uint32_t y = 0; y < surface->height; ++y) {
+      uint32_t *row = (uint32_t *)(image + y * row_bytes);
+      for (uint32_t x = 0; x < surface->width; ++x) {
+        if (g_gl_context->color_mask[0]) {
+          row[x] = clear_r_bits;
+        }
+      }
+    }
+    break;
+  }
+  case GX2_SURFACE_FORMAT_FLOAT_R32_G32_B32_A32: {
+    uint32_t clear_rgba[4];
+    row_bytes = surface->pitch * 16u;
+    for (uint32_t c = 0; c < 4; ++c) {
+      memcpy(&clear_rgba[c], &g_gl_context->clear_color[c],
+             sizeof(clear_rgba[c]));
+      clear_rgba[c] = CPU_TO_GPU_32(clear_rgba[c]);
+    }
+    for (uint32_t y = 0; y < surface->height; ++y) {
+      uint32_t *row = (uint32_t *)(image + y * row_bytes);
+      for (uint32_t x = 0; x < surface->width; ++x) {
+        uint32_t *pixel = row + x * 4u;
+        for (uint32_t c = 0; c < 4; ++c) {
+          if (g_gl_context->color_mask[c]) {
+            pixel[c] = clear_rgba[c];
+          }
+        }
+      }
+    }
+    break;
+  }
+  default:
+    return;
+  }
+
+  DCFlushRange(image, surface->imageSize);
+  GX2Invalidate((GX2InvalidateMode)(GX2_INVALIDATE_MODE_CPU_TEXTURE |
+                                    GX2_INVALIDATE_MODE_COLOR_BUFFER),
+                image, surface->imageSize);
+}
+
+void _gl_ClearColor(GLclampf red, GLclampf green, GLclampf blue,
+                    GLclampf alpha) {
+  if (!g_gl_context) {
+    return;
+  }
+
+  g_gl_context->clear_color[0] = clamp_float(red, 0.0f, 1.0f);
+  g_gl_context->clear_color[1] = clamp_float(green, 0.0f, 1.0f);
+  g_gl_context->clear_color[2] = clamp_float(blue, 0.0f, 1.0f);
+  g_gl_context->clear_color[3] = clamp_float(alpha, 0.0f, 1.0f);
+}
+
+void _gl_ClearDepth(GLclampd depth) {
+  if (!g_gl_context) {
+    return;
+  }
+
+  g_gl_context->clear_depth = (GLfloat)clamp_double(depth, 0.0, 1.0);
+}
+
+void _gl_ClearStencil(GLint s) {
+  if (!g_gl_context) {
+    return;
+  }
+
+  g_gl_context->clear_stencil = s;
+}
+
+void _gl_Clear(GLbitfield mask) {
+  const GLbitfield valid_mask =
+      GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT;
+  GX2DepthBuffer *depth_buffer;
+
+  if (!g_gl_context) {
+    return;
+  }
+  if (mask & ~valid_mask) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+
+  gl_flush_state();
+
+  if (mask & GL_COLOR_BUFFER_BIT) {
+    for (GLuint i = 0; i < 8; ++i) {
+      GX2ColorBuffer *color_buffer;
+
+      if (!gl_is_draw_color_buffer_enabled(i)) {
+        continue;
+      }
+
+      color_buffer = gl_get_draw_color_buffer(i);
+      if (!color_buffer) {
+        continue;
+      }
+
+      GX2ClearColor(color_buffer, g_gl_context->clear_color[0],
+                    g_gl_context->clear_color[1], g_gl_context->clear_color[2],
+                    g_gl_context->clear_color[3]);
+      cpu_clear_color_buffer(color_buffer);
+    }
+  }
+
+  if (!(mask & (GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT))) {
+    return;
+  }
+
+  depth_buffer = gl_get_draw_depth_buffer();
+  if (!depth_buffer) {
+    return;
+  }
+
+  GX2ClearFlags clear_flags = (GX2ClearFlags)0;
+  if ((mask & GL_DEPTH_BUFFER_BIT) && g_gl_context->depth_mask) {
+    clear_flags = (GX2ClearFlags)(clear_flags | GX2_CLEAR_FLAGS_DEPTH);
+  }
+  if ((mask & GL_STENCIL_BUFFER_BIT) &&
+      (g_gl_context->stencil_write_mask[0] != 0 ||
+       g_gl_context->stencil_write_mask[1] != 0)) {
+    clear_flags = (GX2ClearFlags)(clear_flags | GX2_CLEAR_FLAGS_STENCIL);
+  }
+
+  if (clear_flags == 0) {
+    return;
+  }
+
+  depth_buffer->depthClear = g_gl_context->clear_depth;
+  depth_buffer->stencilClear = (uint8_t)g_gl_context->clear_stencil;
+  GX2ClearDepthStencilEx(depth_buffer, g_gl_context->clear_depth,
+                         (uint8_t)g_gl_context->clear_stencil, clear_flags);
+}
+
 void _gl_Enable(GLenum cap) {
   if (!g_gl_context)
     return;
@@ -150,6 +486,10 @@ void _gl_Enable(GLenum cap) {
     g_gl_context->depth_test_enabled = GL_TRUE;
     g_gl_context->dirty_flags |= GL_DIRTY_DEPTH_STENCIL;
     break;
+  case GL_STENCIL_TEST:
+    g_gl_context->stencil_test_enabled = GL_TRUE;
+    g_gl_context->dirty_flags |= GL_DIRTY_DEPTH_STENCIL;
+    break;
   case GL_CULL_FACE:
     g_gl_context->cull_face_enabled = GL_TRUE;
     g_gl_context->dirty_flags |= GL_DIRTY_CULL;
@@ -157,6 +497,18 @@ void _gl_Enable(GLenum cap) {
   case GL_SCISSOR_TEST:
     g_gl_context->scissor_test_enabled = GL_TRUE;
     g_gl_context->dirty_flags |= GL_DIRTY_SCISSOR;
+    break;
+  case GL_POLYGON_OFFSET_POINT:
+    g_gl_context->polygon_offset_point_enabled = GL_TRUE;
+    g_gl_context->dirty_flags |= GL_DIRTY_POLYGON_MODE;
+    break;
+  case GL_POLYGON_OFFSET_LINE:
+    g_gl_context->polygon_offset_line_enabled = GL_TRUE;
+    g_gl_context->dirty_flags |= GL_DIRTY_POLYGON_MODE;
+    break;
+  case GL_POLYGON_OFFSET_FILL:
+    g_gl_context->polygon_offset_fill_enabled = GL_TRUE;
+    g_gl_context->dirty_flags |= GL_DIRTY_POLYGON_MODE;
     break;
   default:
     _gl_set_error(GL_INVALID_ENUM);
@@ -176,6 +528,10 @@ void _gl_Disable(GLenum cap) {
     g_gl_context->depth_test_enabled = GL_FALSE;
     g_gl_context->dirty_flags |= GL_DIRTY_DEPTH_STENCIL;
     break;
+  case GL_STENCIL_TEST:
+    g_gl_context->stencil_test_enabled = GL_FALSE;
+    g_gl_context->dirty_flags |= GL_DIRTY_DEPTH_STENCIL;
+    break;
   case GL_CULL_FACE:
     g_gl_context->cull_face_enabled = GL_FALSE;
     g_gl_context->dirty_flags |= GL_DIRTY_CULL;
@@ -184,9 +540,49 @@ void _gl_Disable(GLenum cap) {
     g_gl_context->scissor_test_enabled = GL_FALSE;
     g_gl_context->dirty_flags |= GL_DIRTY_SCISSOR;
     break;
+  case GL_POLYGON_OFFSET_POINT:
+    g_gl_context->polygon_offset_point_enabled = GL_FALSE;
+    g_gl_context->dirty_flags |= GL_DIRTY_POLYGON_MODE;
+    break;
+  case GL_POLYGON_OFFSET_LINE:
+    g_gl_context->polygon_offset_line_enabled = GL_FALSE;
+    g_gl_context->dirty_flags |= GL_DIRTY_POLYGON_MODE;
+    break;
+  case GL_POLYGON_OFFSET_FILL:
+    g_gl_context->polygon_offset_fill_enabled = GL_FALSE;
+    g_gl_context->dirty_flags |= GL_DIRTY_POLYGON_MODE;
+    break;
   default:
     _gl_set_error(GL_INVALID_ENUM);
     break;
+  }
+}
+
+GLboolean _gl_IsEnabled(GLenum cap) {
+  if (!g_gl_context) {
+    return GL_FALSE;
+  }
+
+  switch (cap) {
+  case GL_BLEND:
+    return g_gl_context->blend_enabled;
+  case GL_DEPTH_TEST:
+    return g_gl_context->depth_test_enabled;
+  case GL_STENCIL_TEST:
+    return g_gl_context->stencil_test_enabled;
+  case GL_CULL_FACE:
+    return g_gl_context->cull_face_enabled;
+  case GL_SCISSOR_TEST:
+    return g_gl_context->scissor_test_enabled;
+  case GL_POLYGON_OFFSET_POINT:
+    return g_gl_context->polygon_offset_point_enabled;
+  case GL_POLYGON_OFFSET_LINE:
+    return g_gl_context->polygon_offset_line_enabled;
+  case GL_POLYGON_OFFSET_FILL:
+    return g_gl_context->polygon_offset_fill_enabled;
+  default:
+    _gl_set_error(GL_INVALID_ENUM);
+    return GL_FALSE;
   }
 }
 
@@ -215,16 +611,35 @@ void _gl_BlendFuncSeparate(GLenum sfactorRGB, GLenum dfactorRGB,
 }
 
 void _gl_BlendEquation(GLenum mode) {
+  _gl_BlendEquationSeparate(mode, mode);
+}
+
+void _gl_BlendEquationSeparate(GLenum modeRGB, GLenum modeAlpha) {
   if (!g_gl_context)
     return;
-  bool v;
-  map_blend_eq(mode, &v);
-  if (!v) {
+  bool rgb_valid;
+  bool alpha_valid;
+  map_blend_eq(modeRGB, &rgb_valid);
+  map_blend_eq(modeAlpha, &alpha_valid);
+  if (!rgb_valid || !alpha_valid) {
     _gl_set_error(GL_INVALID_ENUM);
     return;
   }
-  g_gl_context->blend_eq_rgb = mode;
-  g_gl_context->blend_eq_alpha = mode;
+  g_gl_context->blend_eq_rgb = modeRGB;
+  g_gl_context->blend_eq_alpha = modeAlpha;
+  g_gl_context->dirty_flags |= GL_DIRTY_BLEND;
+}
+
+void _gl_BlendColor(GLclampf red, GLclampf green, GLclampf blue,
+                    GLclampf alpha) {
+  if (!g_gl_context) {
+    return;
+  }
+
+  g_gl_context->blend_color[0] = clamp_float(red, 0.0f, 1.0f);
+  g_gl_context->blend_color[1] = clamp_float(green, 0.0f, 1.0f);
+  g_gl_context->blend_color[2] = clamp_float(blue, 0.0f, 1.0f);
+  g_gl_context->blend_color[3] = clamp_float(alpha, 0.0f, 1.0f);
   g_gl_context->dirty_flags |= GL_DIRTY_BLEND;
 }
 
@@ -248,41 +663,86 @@ void _gl_DepthMask(GLboolean flag) {
   g_gl_context->dirty_flags |= GL_DIRTY_DEPTH_STENCIL;
 }
 
+void _gl_DepthRange(GLclampd nearVal, GLclampd farVal) {
+  if (!g_gl_context) {
+    return;
+  }
+
+  g_gl_context->viewport.near_z = (GLfloat)clamp_double(nearVal, 0.0, 1.0);
+  g_gl_context->viewport.far_z = (GLfloat)clamp_double(farVal, 0.0, 1.0);
+  g_gl_context->dirty_flags |= GL_DIRTY_VIEWPORT;
+}
+
 void _gl_StencilFunc(GLenum func, GLint ref, GLuint mask) {
+  _gl_StencilFuncSeparate(GL_FRONT_AND_BACK, func, ref, mask);
+}
+
+void _gl_StencilFuncSeparate(GLenum face, GLenum func, GLint ref, GLuint mask) {
+  uint32_t first;
+  uint32_t last;
+
   if (!g_gl_context)
     return;
   bool v;
   map_compare_func(func, &v);
-  if (!v) {
+  if (!v || !stencil_face_range(face, &first, &last)) {
     _gl_set_error(GL_INVALID_ENUM);
     return;
   }
-  g_gl_context->stencil_func[0] = func;
-  g_gl_context->stencil_func[1] = func;
-  g_gl_context->stencil_ref[0] = ref;
-  g_gl_context->stencil_ref[1] = ref;
-  g_gl_context->stencil_mask[0] = mask;
-  g_gl_context->stencil_mask[1] = mask;
+  for (uint32_t i = first; i <= last; ++i) {
+    g_gl_context->stencil_func[i] = func;
+    g_gl_context->stencil_ref[i] = ref;
+    g_gl_context->stencil_compare_mask[i] = mask;
+  }
   g_gl_context->dirty_flags |= GL_DIRTY_DEPTH_STENCIL;
 }
 
 void _gl_StencilOp(GLenum fail, GLenum zfail, GLenum zpass) {
+  _gl_StencilOpSeparate(GL_FRONT_AND_BACK, fail, zfail, zpass);
+}
+
+void _gl_StencilOpSeparate(GLenum face, GLenum fail, GLenum zfail,
+                           GLenum zpass) {
+  uint32_t first;
+  uint32_t last;
+
   if (!g_gl_context)
     return;
   bool v1, v2, v3;
   map_stencil_op(fail, &v1);
   map_stencil_op(zfail, &v2);
   map_stencil_op(zpass, &v3);
-  if (!v1 || !v2 || !v3) {
+  if (!v1 || !v2 || !v3 || !stencil_face_range(face, &first, &last)) {
     _gl_set_error(GL_INVALID_ENUM);
     return;
   }
-  g_gl_context->stencil_fail[0] = fail;
-  g_gl_context->stencil_fail[1] = fail;
-  g_gl_context->stencil_zfail[0] = zfail;
-  g_gl_context->stencil_zfail[1] = zfail;
-  g_gl_context->stencil_zpass[0] = zpass;
-  g_gl_context->stencil_zpass[1] = zpass;
+  for (uint32_t i = first; i <= last; ++i) {
+    g_gl_context->stencil_fail[i] = fail;
+    g_gl_context->stencil_zfail[i] = zfail;
+    g_gl_context->stencil_zpass[i] = zpass;
+  }
+  g_gl_context->dirty_flags |= GL_DIRTY_DEPTH_STENCIL;
+}
+
+void _gl_StencilMask(GLuint mask) {
+  _gl_StencilMaskSeparate(GL_FRONT_AND_BACK, mask);
+}
+
+void _gl_StencilMaskSeparate(GLenum face, GLuint mask) {
+  uint32_t first;
+  uint32_t last;
+
+  if (!g_gl_context) {
+    return;
+  }
+  if (!stencil_face_range(face, &first, &last)) {
+    _gl_set_error(GL_INVALID_ENUM);
+    return;
+  }
+
+  for (uint32_t i = first; i <= last; ++i) {
+    g_gl_context->stencil_write_mask[i] = mask;
+  }
   g_gl_context->dirty_flags |= GL_DIRTY_DEPTH_STENCIL;
 }
 
@@ -319,6 +779,16 @@ void _gl_PolygonMode(GLenum face, GLenum mode) {
     return;
   }
   g_gl_context->polygon_mode = mode;
+  g_gl_context->dirty_flags |= GL_DIRTY_POLYGON_MODE;
+}
+
+void _gl_PolygonOffset(GLfloat factor, GLfloat units) {
+  if (!g_gl_context) {
+    return;
+  }
+
+  g_gl_context->polygon_offset_factor = factor;
+  g_gl_context->polygon_offset_units = units;
   g_gl_context->dirty_flags |= GL_DIRTY_POLYGON_MODE;
 }
 
@@ -392,35 +862,108 @@ void gl_flush_state(void) {
           (GX2BlendCombineMode)map_blend_eq(g_gl_context->blend_eq_alpha, &ignored));
       GX2SetBlendControlReg(&blendReg);
     }
+
+    GX2SetBlendConstantColor(g_gl_context->blend_color[0],
+                             g_gl_context->blend_color[1],
+                             g_gl_context->blend_color[2],
+                             g_gl_context->blend_color[3]);
   }
 
   if (g_gl_context->dirty_flags & GL_DIRTY_DEPTH_STENCIL) {
     GX2DepthStencilControlReg dsReg;
+    GX2CompareFunction front_func =
+        map_compare_func(g_gl_context->stencil_func[0], &ignored);
+    GX2CompareFunction back_func =
+        map_compare_func(g_gl_context->stencil_func[1], &ignored);
+    GX2StencilFunction front_fail =
+        map_stencil_op(g_gl_context->stencil_fail[0], &ignored);
+    GX2StencilFunction front_zfail =
+        map_stencil_op(g_gl_context->stencil_zfail[0], &ignored);
+    GX2StencilFunction front_zpass =
+        map_stencil_op(g_gl_context->stencil_zpass[0], &ignored);
+    GX2StencilFunction back_fail =
+        map_stencil_op(g_gl_context->stencil_fail[1], &ignored);
+    GX2StencilFunction back_zfail =
+        map_stencil_op(g_gl_context->stencil_zfail[1], &ignored);
+    GX2StencilFunction back_zpass =
+        map_stencil_op(g_gl_context->stencil_zpass[1], &ignored);
+
     GX2InitDepthStencilControlReg(&dsReg,
-                                  g_gl_context->depth_test_enabled ? GX2_ENABLE : GX2_DISABLE,
-                                  g_gl_context->depth_mask ? GX2_ENABLE : GX2_DISABLE,
-                                  (GX2CompareFunction)map_compare_func(g_gl_context->depth_func, &ignored),
-                                  GX2_DISABLE, GX2_DISABLE,
-                                  (GX2CompareFunction)0, (GX2StencilFunction)0, (GX2StencilFunction)0, (GX2StencilFunction)0,
-                                  (GX2CompareFunction)0, (GX2StencilFunction)0, (GX2StencilFunction)0, (GX2StencilFunction)0);
+                                  g_gl_context->depth_test_enabled ? GX2_ENABLE
+                                                                   : GX2_DISABLE,
+                                  g_gl_context->depth_mask ? GX2_ENABLE
+                                                           : GX2_DISABLE,
+                                  (GX2CompareFunction)map_compare_func(
+                                      g_gl_context->depth_func, &ignored),
+                                  g_gl_context->stencil_test_enabled
+                                      ? GX2_ENABLE
+                                      : GX2_DISABLE,
+                                  g_gl_context->stencil_test_enabled
+                                      ? GX2_ENABLE
+                                      : GX2_DISABLE,
+                                  front_func, front_zpass, front_zfail,
+                                  front_fail, back_func, back_zpass,
+                                  back_zfail, back_fail);
     GX2SetDepthStencilControlReg(&dsReg);
+    GX2SetStencilMask((uint8_t)g_gl_context->stencil_compare_mask[0],
+                      (uint8_t)g_gl_context->stencil_write_mask[0],
+                      (uint8_t)g_gl_context->stencil_ref[0],
+                      (uint8_t)g_gl_context->stencil_compare_mask[1],
+                      (uint8_t)g_gl_context->stencil_write_mask[1],
+                      (uint8_t)g_gl_context->stencil_ref[1]);
   }
 
   if (g_gl_context->dirty_flags & GL_DIRTY_VIEWPORT) {
     GX2SetViewport(g_gl_context->viewport.x, g_gl_context->viewport.y,
                    g_gl_context->viewport.width, g_gl_context->viewport.height,
-                   0.0f, 1.0f);
+                   g_gl_context->viewport.near_z,
+                   g_gl_context->viewport.far_z);
   }
 
-  if (g_gl_context->dirty_flags & GL_DIRTY_SCISSOR) {
+  if (g_gl_context->dirty_flags & (GL_DIRTY_SCISSOR | GL_DIRTY_VIEWPORT)) {
     if (g_gl_context->scissor_test_enabled) {
       GX2SetScissor(g_gl_context->scissor.x, g_gl_context->scissor.y,
                     g_gl_context->scissor.width, g_gl_context->scissor.height);
+    } else {
+      GX2SetScissor(0, 0, g_gl_context->viewport.width,
+                    g_gl_context->viewport.height);
     }
   }
 
   if (g_gl_context->dirty_flags & GL_DIRTY_LINE_WIDTH) {
     GX2SetLineWidth(g_gl_context->line_width);
+  }
+
+  if (g_gl_context->dirty_flags &
+      (GL_DIRTY_CULL | GL_DIRTY_FRONT_FACE | GL_DIRTY_POLYGON_MODE)) {
+    GX2PolygonMode gx2_polygon_mode =
+        map_polygon_mode(g_gl_context->polygon_mode, &ignored);
+    bool polygon_offset_enabled = is_polygon_offset_enabled();
+    BOOL cull_front = GX2_FALSE;
+    BOOL cull_back = GX2_FALSE;
+
+    if (g_gl_context->cull_face_enabled) {
+      if (g_gl_context->cull_face_mode == GL_FRONT ||
+          g_gl_context->cull_face_mode == GL_FRONT_AND_BACK) {
+        cull_front = GX2_TRUE;
+      }
+      if (g_gl_context->cull_face_mode == GL_BACK ||
+          g_gl_context->cull_face_mode == GL_FRONT_AND_BACK) {
+        cull_back = GX2_TRUE;
+      }
+    }
+
+    GX2SetPolygonControl(
+        map_front_face(g_gl_context->front_face), cull_front, cull_back,
+        g_gl_context->polygon_mode != GL_FILL ? GX2_TRUE : GX2_FALSE,
+        gx2_polygon_mode, gx2_polygon_mode,
+        polygon_offset_enabled ? GX2_TRUE : GX2_FALSE,
+        polygon_offset_enabled ? GX2_TRUE : GX2_FALSE,
+        polygon_offset_enabled ? GX2_TRUE : GX2_FALSE);
+    GX2SetPolygonOffset(g_gl_context->polygon_offset_units,
+                        g_gl_context->polygon_offset_factor,
+                        g_gl_context->polygon_offset_units,
+                        g_gl_context->polygon_offset_factor, 0.0f);
   }
 
   if (g_gl_context->dirty_flags &

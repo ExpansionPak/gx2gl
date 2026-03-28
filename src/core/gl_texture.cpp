@@ -1287,6 +1287,14 @@ GX2Texture *gl_get_gx2_texture(GLuint id) {
   return NULL;
 }
 
+GLint gl_get_texture_internal_format(GLuint id) {
+  if (id > 0 && id < MAX_TEXTURES && g_textures[id].in_use &&
+      g_textures[id].complete) {
+    return g_textures[id].internal_format;
+  }
+  return 0;
+}
+
 GX2Sampler *gl_get_gx2_sampler(GLuint id) {
   if (id > 0 && id < MAX_TEXTURES && g_textures[id].in_use &&
       g_textures[id].complete) {

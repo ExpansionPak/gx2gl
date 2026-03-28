@@ -76,6 +76,88 @@ int main(int argc, char **argv) {
     glGetIntegerv(GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT, &ubo_alignment);
     check_gl_error("glGetIntegerv(GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT)");
 
+    OSReport("-> Testing Legacy State & Clears (Phase 1/2)...\n");
+    glClearColor(0.25f, 0.5f, 0.75f, 1.0f);
+    check_gl_error("glClearColor");
+    glClearDepth(0.5);
+    check_gl_error("glClearDepth");
+    glClearStencil(7);
+    check_gl_error("glClearStencil");
+    glBlendColor(0.1f, 0.2f, 0.3f, 0.4f);
+    check_gl_error("glBlendColor");
+    glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_REVERSE_SUBTRACT);
+    check_gl_error("glBlendEquationSeparate");
+    glDepthRange(0.2, 0.8);
+    check_gl_error("glDepthRange");
+    GLfloat legacy_depth_range[2] = {0.0f, 0.0f};
+    glGetFloatv(GL_DEPTH_RANGE, legacy_depth_range);
+    check_gl_error("glGetFloatv(GL_DEPTH_RANGE)");
+    GLdouble legacy_depth_range_double[2] = {0.0, 0.0};
+    glGetDoublev(GL_DEPTH_RANGE, legacy_depth_range_double);
+    check_gl_error("glGetDoublev(GL_DEPTH_RANGE)");
+    if (legacy_depth_range_double[0] == 0.2 && legacy_depth_range_double[1] == 0.8) {
+        OSReport("[PASS] glGetDoublev(GL_DEPTH_RANGE) returned expected values.\n");
+    } else {
+        OSReport("[FAIL] glGetDoublev(GL_DEPTH_RANGE) returned {%f, %f}\n",
+                 legacy_depth_range_double[0], legacy_depth_range_double[1]);
+    }
+    GLfloat legacy_blend_color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    glGetFloatv(GL_BLEND_COLOR, legacy_blend_color);
+    check_gl_error("glGetFloatv(GL_BLEND_COLOR)");
+    glEnable(GL_STENCIL_TEST);
+    check_gl_error("glEnable(GL_STENCIL_TEST)");
+    if (glIsEnabled(GL_STENCIL_TEST) == GL_TRUE) {
+        OSReport("[PASS] glIsEnabled(GL_STENCIL_TEST) returned enabled.\n");
+    } else {
+        OSReport("[FAIL] glIsEnabled(GL_STENCIL_TEST) returned disabled.\n");
+    }
+    check_gl_error("glIsEnabled(GL_STENCIL_TEST)");
+    glStencilFuncSeparate(GL_FRONT, GL_LEQUAL, 1, 0x0F);
+    check_gl_error("glStencilFuncSeparate(GL_FRONT)");
+    glStencilOpSeparate(GL_BACK, GL_KEEP, GL_INCR, GL_REPLACE);
+    check_gl_error("glStencilOpSeparate(GL_BACK)");
+    glStencilMask(0x3F);
+    check_gl_error("glStencilMask");
+    glStencilMaskSeparate(GL_FRONT, 0x0F);
+    check_gl_error("glStencilMaskSeparate(GL_FRONT)");
+    glPolygonOffset(1.5f, 2.0f);
+    check_gl_error("glPolygonOffset");
+    glEnable(GL_POLYGON_OFFSET_FILL);
+    check_gl_error("glEnable(GL_POLYGON_OFFSET_FILL)");
+    GLboolean legacy_depth_write_mask = GL_FALSE;
+    glGetBooleanv(GL_DEPTH_WRITEMASK, &legacy_depth_write_mask);
+    check_gl_error("glGetBooleanv(GL_DEPTH_WRITEMASK)");
+    if (legacy_depth_write_mask == GL_TRUE) {
+        OSReport("[PASS] glGetBooleanv(GL_DEPTH_WRITEMASK) returned enabled.\n");
+    } else {
+        OSReport("[FAIL] glGetBooleanv(GL_DEPTH_WRITEMASK) returned disabled.\n");
+    }
+    glColorMask(GL_TRUE, GL_FALSE, GL_TRUE, GL_FALSE);
+    check_gl_error("glColorMask(custom)");
+    GLboolean legacy_color_mask[4] = {GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE};
+    glGetBooleanv(GL_COLOR_WRITEMASK, legacy_color_mask);
+    check_gl_error("glGetBooleanv(GL_COLOR_WRITEMASK)");
+    if (legacy_color_mask[0] == GL_TRUE && legacy_color_mask[1] == GL_FALSE &&
+        legacy_color_mask[2] == GL_TRUE && legacy_color_mask[3] == GL_FALSE) {
+        OSReport("[PASS] glGetBooleanv(GL_COLOR_WRITEMASK) returned expected values.\n");
+    } else {
+        OSReport("[FAIL] glGetBooleanv(GL_COLOR_WRITEMASK) returned {%u, %u, %u, %u}\n",
+                 legacy_color_mask[0], legacy_color_mask[1],
+                 legacy_color_mask[2], legacy_color_mask[3]);
+    }
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    check_gl_error("glColorMask(restore)");
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+    check_gl_error("glClear");
+    glClear(0x80000000u);
+    expect_error("glClear(invalid_mask)", GL_INVALID_VALUE);
+    glIsEnabled(GL_INVALID_ENUM);
+    expect_error("glIsEnabled(GL_INVALID_ENUM)", GL_INVALID_ENUM);
+    glDisable(GL_POLYGON_OFFSET_FILL);
+    check_gl_error("glDisable(GL_POLYGON_OFFSET_FILL)");
+    glDisable(GL_STENCIL_TEST);
+    check_gl_error("glDisable(GL_STENCIL_TEST)");
+
     OSReport("-> Testing Buffer Objects (Phase 4)...\n");
     GLuint buffers[2];
     glGenBuffers(2, buffers);
@@ -228,6 +310,29 @@ int main(int argc, char **argv) {
 
     glCompileShader(vshader);
     check_gl_error("glCompileShader(vertex)");
+    GLint vshader_compile_status = GL_FALSE;
+    glGetShaderiv(vshader, GL_COMPILE_STATUS, &vshader_compile_status);
+    check_gl_error("glGetShaderiv(vertex, GL_COMPILE_STATUS)");
+    if (vshader_compile_status == GL_TRUE) {
+        OSReport("[PASS] glGetShaderiv(vertex, GL_COMPILE_STATUS) returned compiled.\n");
+    } else {
+        OSReport("[FAIL] glGetShaderiv(vertex, GL_COMPILE_STATUS) returned %d\n",
+                 vshader_compile_status);
+    }
+    GLint vshader_source_length = 0;
+    glGetShaderiv(vshader, GL_SHADER_SOURCE_LENGTH, &vshader_source_length);
+    check_gl_error("glGetShaderiv(vertex, GL_SHADER_SOURCE_LENGTH)");
+    if (vshader_source_length > 0) {
+        OSReport("[PASS] glGetShaderiv(vertex, GL_SHADER_SOURCE_LENGTH) returned %d.\n",
+                 vshader_source_length);
+    } else {
+        OSReport("[FAIL] glGetShaderiv(vertex, GL_SHADER_SOURCE_LENGTH) returned %d\n",
+                 vshader_source_length);
+    }
+    GLchar shader_info_log[128];
+    GLsizei shader_info_log_length = 0;
+    glGetShaderInfoLog(vshader, sizeof(shader_info_log), &shader_info_log_length, shader_info_log);
+    check_gl_error("glGetShaderInfoLog(vertex)");
 
     glCompileShader(pshader);
     check_gl_error("glCompileShader(fragment)");
@@ -240,6 +345,15 @@ int main(int argc, char **argv) {
 
     glAttachShader(prog, pshader);
     check_gl_error("glAttachShader(fragment)");
+    GLint attached_shader_count = 0;
+    glGetProgramiv(prog, GL_ATTACHED_SHADERS, &attached_shader_count);
+    check_gl_error("glGetProgramiv(GL_ATTACHED_SHADERS)");
+    if (attached_shader_count == 2) {
+        OSReport("[PASS] glGetProgramiv(GL_ATTACHED_SHADERS) returned 2.\n");
+    } else {
+        OSReport("[FAIL] glGetProgramiv(GL_ATTACHED_SHADERS) returned %d\n",
+                 attached_shader_count);
+    }
     
     // Attach to 0 (invalid program ID)
     glAttachShader(0, vshader);
@@ -247,6 +361,32 @@ int main(int argc, char **argv) {
     
     glLinkProgram(prog);
     expect_error("glLinkProgram(source_only)", GL_INVALID_OPERATION);
+    GLint program_link_status = GL_TRUE;
+    glGetProgramiv(prog, GL_LINK_STATUS, &program_link_status);
+    check_gl_error("glGetProgramiv(GL_LINK_STATUS)");
+    if (program_link_status == GL_FALSE) {
+        OSReport("[PASS] glGetProgramiv(GL_LINK_STATUS) returned unlinked.\n");
+    } else {
+        OSReport("[FAIL] glGetProgramiv(GL_LINK_STATUS) returned %d\n",
+                 program_link_status);
+    }
+    GLchar program_info_log[256];
+    GLsizei program_info_log_length = 0;
+    glGetProgramInfoLog(prog, sizeof(program_info_log), &program_info_log_length, program_info_log);
+    check_gl_error("glGetProgramInfoLog");
+
+    glDetachShader(prog, pshader);
+    check_gl_error("glDetachShader(fragment)");
+    glGetProgramiv(prog, GL_ATTACHED_SHADERS, &attached_shader_count);
+    check_gl_error("glGetProgramiv(GL_ATTACHED_SHADERS after detach)");
+    if (attached_shader_count == 1) {
+        OSReport("[PASS] glGetProgramiv(GL_ATTACHED_SHADERS after detach) returned 1.\n");
+    } else {
+        OSReport("[FAIL] glGetProgramiv(GL_ATTACHED_SHADERS after detach) returned %d\n",
+                 attached_shader_count);
+    }
+    glAttachShader(prog, pshader);
+    check_gl_error("glAttachShader(fragment restore)");
 
     glUseProgram(prog);
     expect_error("glUseProgram(source_only)", GL_INVALID_OPERATION);
@@ -266,6 +406,32 @@ int main(int argc, char **argv) {
     expect_error("glUniform4f(unbound_prog)", GL_INVALID_OPERATION);
     glUniform1i(0, 0);
     expect_error("glUniform1i(unbound_prog)", GL_INVALID_OPERATION);
+
+    GLuint temp_shader = glCreateShader(GL_VERTEX_SHADER);
+    check_gl_error("glCreateShader(temp_vertex)");
+    glShaderSource(temp_shader, 1, &vsrc, NULL);
+    check_gl_error("glShaderSource(temp_vertex)");
+    glCompileShader(temp_shader);
+    check_gl_error("glCompileShader(temp_vertex)");
+    GLuint temp_prog = glCreateProgram();
+    check_gl_error("glCreateProgram(temp)");
+    glAttachShader(temp_prog, temp_shader);
+    check_gl_error("glAttachShader(temp)");
+    glDeleteShader(temp_shader);
+    check_gl_error("glDeleteShader(attached)");
+    GLint temp_shader_delete_status = GL_FALSE;
+    glGetShaderiv(temp_shader, GL_DELETE_STATUS, &temp_shader_delete_status);
+    check_gl_error("glGetShaderiv(temp, GL_DELETE_STATUS)");
+    if (temp_shader_delete_status == GL_TRUE) {
+        OSReport("[PASS] glGetShaderiv(temp, GL_DELETE_STATUS) returned deleted.\n");
+    } else {
+        OSReport("[FAIL] glGetShaderiv(temp, GL_DELETE_STATUS) returned %d\n",
+                 temp_shader_delete_status);
+    }
+    glDetachShader(temp_prog, temp_shader);
+    check_gl_error("glDetachShader(temp)");
+    glDeleteProgram(temp_prog);
+    check_gl_error("glDeleteProgram(temp)");
 
     OSReport("-> Testing Vertex Arrays (Phase 7)...\n");
     GLuint vao;
@@ -321,6 +487,11 @@ int main(int argc, char **argv) {
     glDrawBuffers(2, mrt_bufs);
     check_gl_error("glDrawBuffers(MRT)");
 
+    glDrawBuffer(GL_COLOR_ATTACHMENT0);
+    check_gl_error("glDrawBuffer(GL_COLOR_ATTACHMENT0)");
+    glDrawBuffers(2, mrt_bufs);
+    check_gl_error("glDrawBuffers(MRT restore)");
+
     GLenum remap_bufs[2] = { GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT0 };
     glDrawBuffers(2, remap_bufs);
     expect_error("glDrawBuffers(remap_unsupported)", GL_INVALID_OPERATION);
@@ -332,8 +503,35 @@ int main(int argc, char **argv) {
     // Binding FB on unbound context or invalid target
     glBindFramebuffer(GL_INVALID_ENUM, fbo);
     expect_error("glBindFramebuffer(GL_INVALID_ENUM)", GL_INVALID_ENUM);
+
+    glReadBuffer(GL_COLOR_ATTACHMENT1);
+    check_gl_error("glReadBuffer(GL_COLOR_ATTACHMENT1)");
+    glClearColor(0.2f, 0.4f, 0.6f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    check_gl_error("glClear(FBO color)");
+    GLubyte readback_rgba[4] = {0, 0, 0, 0};
+    glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, readback_rgba);
+    if (readback_rgba[0] == 51 && readback_rgba[1] == 102 &&
+        readback_rgba[2] == 153 && readback_rgba[3] == 255) {
+        OSReport("[PASS] glReadPixels(FBO rgba8) returned expected data.\n");
+    } else {
+        OSReport("[FAIL] glReadPixels(FBO rgba8) returned {%u, %u, %u, %u}\n",
+                 readback_rgba[0], readback_rgba[1], readback_rgba[2],
+                 readback_rgba[3]);
+    }
+    check_gl_error("glReadPixels(FBO rgba8)");
+    glReadPixels(4, 4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, readback_rgba);
+    expect_error("glReadPixels(out_of_bounds)", GL_INVALID_VALUE);
+    glReadBuffer(GL_BACK);
+    expect_error("glReadBuffer(GL_BACK on FBO)", GL_INVALID_OPERATION);
+    glReadBuffer(GL_INVALID_ENUM);
+    expect_error("glReadBuffer(GL_INVALID_ENUM)", GL_INVALID_ENUM);
     
     glBindFramebuffer(GL_FRAMEBUFFER, 0); // Restore default
+    glReadBuffer(GL_BACK);
+    check_gl_error("glReadBuffer(default_back)");
+    glDrawBuffer(GL_BACK);
+    check_gl_error("glDrawBuffer(default_back)");
     GLenum back_buf = GL_BACK;
     glDrawBuffers(1, &back_buf);
     check_gl_error("glDrawBuffers(default_back)");

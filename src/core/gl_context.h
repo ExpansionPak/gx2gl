@@ -18,6 +18,11 @@ typedef struct {
     void (*glBufferSubData)(GLenum, GLintptr, GLsizeiptr, const GLvoid*);
     void (*glEnable)(GLenum);
     void (*glDisable)(GLenum);
+    GLboolean (*glIsEnabled)(GLenum);
+    void (*glClearColor)(GLclampf, GLclampf, GLclampf, GLclampf);
+    void (*glClearDepth)(GLclampd);
+    void (*glClearStencil)(GLint);
+    void (*glClear)(GLbitfield);
     void (*glDrawArrays)(GLenum, GLint, GLsizei);
     void (*glDrawArraysInstanced)(GLenum, GLint, GLsizei, GLsizei);
     void (*glDrawElements)(GLenum, GLsizei, GLenum, const GLvoid*);
@@ -43,12 +48,19 @@ typedef struct {
     void (*glGenerateMipmap)(GLenum);
     
     GLuint (*glCreateShader)(GLenum);
+    void (*glDeleteShader)(GLuint);
     void (*glShaderSource)(GLuint, GLsizei, const GLchar* const*, const GLint*);
     void (*glCompileShader)(GLuint);
     GLuint (*glCreateProgram)(void);
+    void (*glDeleteProgram)(GLuint);
     void (*glAttachShader)(GLuint, GLuint);
+    void (*glDetachShader)(GLuint, GLuint);
     void (*glLinkProgram)(GLuint);
     void (*glUseProgram)(GLuint);
+    void (*glGetShaderiv)(GLuint, GLenum, GLint *);
+    void (*glGetProgramiv)(GLuint, GLenum, GLint *);
+    void (*glGetShaderInfoLog)(GLuint, GLsizei, GLsizei *, GLchar *);
+    void (*glGetProgramInfoLog)(GLuint, GLsizei, GLsizei *, GLchar *);
     void (*glUniform1f)(GLint, GLfloat);
     void (*glUniform1fv)(GLint, GLsizei, const GLfloat*);
     void (*glUniform1i)(GLint, GLint);
@@ -60,6 +72,7 @@ typedef struct {
     void (*glUniform4fv)(GLint, GLsizei, const GLfloat*);
     void (*glUniformMatrix4fv)(GLint, GLsizei, GLboolean, const GLfloat*);
     GLint (*glGetUniformLocation)(GLuint, const GLchar*);
+    GLint (*glGetAttribLocation)(GLuint, const GLchar*);
     GLuint (*glGetUniformBlockIndex)(GLuint, const GLchar*);
     void (*glUniformBlockBinding)(GLuint, GLuint, GLuint);
     void (*glWiiULoadShaderGroup)(GLuint, const void*);
@@ -77,22 +90,36 @@ typedef struct {
     void (*glDeleteFramebuffers)(GLsizei, const GLuint*);
     void (*glBindFramebuffer)(GLenum, GLuint);
     void (*glFramebufferTexture2D)(GLenum, GLenum, GLenum, GLuint, GLint);
+    void (*glDrawBuffer)(GLenum);
     void (*glDrawBuffers)(GLsizei, const GLenum*);
+    void (*glReadBuffer)(GLenum);
+    void (*glReadPixels)(GLint, GLint, GLsizei, GLsizei, GLenum, GLenum,
+                         GLvoid*);
     
     void (*glBlendFunc)(GLenum, GLenum);
     void (*glBlendEquation)(GLenum);
+    void (*glBlendEquationSeparate)(GLenum, GLenum);
     void (*glBlendFuncSeparate)(GLenum, GLenum, GLenum, GLenum);
+    void (*glBlendColor)(GLclampf, GLclampf, GLclampf, GLclampf);
     void (*glDepthFunc)(GLenum);
     void (*glDepthMask)(GLboolean);
+    void (*glDepthRange)(GLclampd, GLclampd);
     void (*glStencilFunc)(GLenum, GLint, GLuint);
+    void (*glStencilFuncSeparate)(GLenum, GLenum, GLint, GLuint);
     void (*glStencilOp)(GLenum, GLenum, GLenum);
+    void (*glStencilOpSeparate)(GLenum, GLenum, GLenum, GLenum);
+    void (*glStencilMask)(GLuint);
+    void (*glStencilMaskSeparate)(GLenum, GLuint);
     void (*glCullFace)(GLenum);
     void (*glFrontFace)(GLenum);
     void (*glPolygonMode)(GLenum, GLenum);
+    void (*glPolygonOffset)(GLfloat, GLfloat);
     void (*glViewport)(GLint, GLint, GLsizei, GLsizei);
     void (*glScissor)(GLint, GLint, GLsizei, GLsizei);
     void (*glColorMask)(GLboolean, GLboolean, GLboolean, GLboolean);
     void (*glLineWidth)(GLfloat);
+    void (*glGetBooleanv)(GLenum, GLboolean *);
+    void (*glGetDoublev)(GLenum, GLdouble *);
 } gl_dispatch_t;
 
 #define GL_DIRTY_BLEND         (1 << 0)
@@ -139,6 +166,7 @@ typedef struct {
     struct {
         GLint x, y;
         GLsizei width, height;
+        GLfloat near_z, far_z;
     } viewport;
 
     struct {
@@ -148,21 +176,32 @@ typedef struct {
 
     GLenum blend_src_rgb, blend_dst_rgb, blend_src_alpha, blend_dst_alpha;
     GLenum blend_eq_rgb, blend_eq_alpha;
+    GLfloat blend_color[4];
     GLenum depth_func;
     GLboolean depth_mask;
+    GLuint stencil_compare_mask[2];
+    GLuint stencil_write_mask[2];
     GLenum stencil_func[2], stencil_fail[2], stencil_zfail[2], stencil_zpass[2];
     GLint stencil_ref[2];
-    GLuint stencil_mask[2];
     GLenum cull_face_mode;
     GLenum front_face;
     GLenum polygon_mode;
+    GLfloat polygon_offset_factor;
+    GLfloat polygon_offset_units;
     GLboolean color_mask[4];
     GLfloat line_width;
+    GLfloat clear_color[4];
+    GLfloat clear_depth;
+    GLint clear_stencil;
 
     GLboolean depth_test_enabled;
+    GLboolean stencil_test_enabled;
     GLboolean blend_enabled;
     GLboolean cull_face_enabled;
     GLboolean scissor_test_enabled;
+    GLboolean polygon_offset_point_enabled;
+    GLboolean polygon_offset_line_enabled;
+    GLboolean polygon_offset_fill_enabled;
     GLenum error;
 
     GLenum error_queue[GL_ERROR_QUEUE_SIZE];
@@ -181,6 +220,8 @@ void gl_context_destroy(gl_context_t *ctx);
 
 void _gl_set_error(GLenum error);
 const GLubyte* _gl_GetString(GLenum name);
+void _gl_GetBooleanv(GLenum pname, GLboolean *params);
+void _gl_GetDoublev(GLenum pname, GLdouble *params);
 void _gl_GetIntegerv(GLenum pname, GLint *params);
 void _gl_GetFloatv(GLenum pname, GLfloat *params);
 

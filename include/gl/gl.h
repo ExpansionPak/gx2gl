@@ -47,6 +47,7 @@ typedef ptrdiff_t GLsizeiptr;
 #define GL_VERSION 0x1F02
 #define GL_EXTENSIONS 0x1F03
 #define GL_SHADING_LANGUAGE_VERSION 0x8B8C
+#define GL_CURRENT_PROGRAM 0x8B8D
 
 #define GL_MAX_TEXTURE_SIZE 0x0D33
 #define GL_MAX_TEXTURE_IMAGE_UNITS 0x8872
@@ -61,9 +62,13 @@ typedef ptrdiff_t GLsizeiptr;
 
 /* State Constants */
 #define GL_DEPTH_TEST 0x0B71
+#define GL_STENCIL_TEST 0x0B90
 #define GL_BLEND 0x0BE2
 #define GL_CULL_FACE 0x0B44
 #define GL_SCISSOR_TEST 0x0C11
+#define GL_POLYGON_OFFSET_POINT 0x2A01
+#define GL_POLYGON_OFFSET_LINE 0x2A02
+#define GL_POLYGON_OFFSET_FILL 0x8037
 
 /* Enums for state */
 #define GL_ZERO 0
@@ -83,6 +88,7 @@ typedef ptrdiff_t GLsizeiptr;
 #define GL_ONE_MINUS_CONSTANT_ALPHA 0x8004
 
 #define GL_FUNC_ADD 0x8006
+#define GL_BLEND_COLOR 0x8005
 #define GL_FUNC_SUBTRACT 0x800A
 #define GL_FUNC_REVERSE_SUBTRACT 0x800B
 #define GL_MIN 0x8007
@@ -207,6 +213,27 @@ typedef ptrdiff_t GLsizeiptr;
 #define GL_WRITE_ONLY 0x88B9
 #define GL_READ_WRITE 0x88BA
 
+#define GL_DEPTH_RANGE 0x0B70
+#define GL_DEPTH_WRITEMASK 0x0B72
+#define GL_LINE_WIDTH 0x0B21
+#define GL_STENCIL_WRITEMASK 0x0B98
+#define GL_COLOR_WRITEMASK 0x0C23
+#define GL_COLOR_CLEAR_VALUE 0x0C22
+#define GL_DEPTH_CLEAR_VALUE 0x0B73
+#define GL_STENCIL_CLEAR_VALUE 0x0B91
+
+#define GL_DELETE_STATUS 0x8B80
+#define GL_COMPILE_STATUS 0x8B81
+#define GL_LINK_STATUS 0x8B82
+#define GL_INFO_LOG_LENGTH 0x8B84
+#define GL_ATTACHED_SHADERS 0x8B85
+#define GL_SHADER_SOURCE_LENGTH 0x8B88
+#define GL_SHADER_TYPE 0x8B4F
+
+#define GL_DEPTH_BUFFER_BIT 0x00000100
+#define GL_STENCIL_BUFFER_BIT 0x00000400
+#define GL_COLOR_BUFFER_BIT 0x00004000
+
 // Function Declarations
 void glGenBuffers(GLsizei n, GLuint *buffers);
 void glDeleteBuffers(GLsizei n, const GLuint *buffers);
@@ -225,6 +252,35 @@ GLboolean glUnmapBuffer(GLenum target);
 
 void glEnable(GLenum cap);
 void glDisable(GLenum cap);
+GLboolean glIsEnabled(GLenum cap);
+void glBlendFunc(GLenum sfactor, GLenum dfactor);
+void glBlendEquation(GLenum mode);
+void glBlendEquationSeparate(GLenum modeRGB, GLenum modeAlpha);
+void glBlendFuncSeparate(GLenum sfactorRGB, GLenum dfactorRGB,
+                         GLenum sfactorAlpha, GLenum dfactorAlpha);
+void glBlendColor(GLclampf red, GLclampf green, GLclampf blue, GLclampf alpha);
+void glDepthFunc(GLenum func);
+void glDepthMask(GLboolean flag);
+void glDepthRange(GLclampd nearVal, GLclampd farVal);
+void glStencilFunc(GLenum func, GLint ref, GLuint mask);
+void glStencilFuncSeparate(GLenum face, GLenum func, GLint ref, GLuint mask);
+void glStencilOp(GLenum fail, GLenum zfail, GLenum zpass);
+void glStencilOpSeparate(GLenum face, GLenum fail, GLenum zfail, GLenum zpass);
+void glStencilMask(GLuint mask);
+void glStencilMaskSeparate(GLenum face, GLuint mask);
+void glCullFace(GLenum mode);
+void glFrontFace(GLenum mode);
+void glPolygonMode(GLenum face, GLenum mode);
+void glPolygonOffset(GLfloat factor, GLfloat units);
+void glViewport(GLint x, GLint y, GLsizei width, GLsizei height);
+void glScissor(GLint x, GLint y, GLsizei width, GLsizei height);
+void glColorMask(GLboolean red, GLboolean green, GLboolean blue,
+                 GLboolean alpha);
+void glLineWidth(GLfloat width);
+void glClearColor(GLclampf red, GLclampf green, GLclampf blue, GLclampf alpha);
+void glClearDepth(GLclampd depth);
+void glClearStencil(GLint s);
+void glClear(GLbitfield mask);
 
 void glGenTextures(GLsizei n, GLuint *textures);
 void glDeleteTextures(GLsizei n, const GLuint *textures);
@@ -247,13 +303,22 @@ void glTexParameteri(GLenum target, GLenum pname, GLint param);
 void glGenerateMipmap(GLenum target);
 
 GLuint glCreateShader(GLenum type);
+void glDeleteShader(GLuint shader);
 void glShaderSource(GLuint shader, GLsizei count, const GLchar *const *string,
                     const GLint *length);
 void glCompileShader(GLuint shader);
 GLuint glCreateProgram(void);
+void glDeleteProgram(GLuint program);
 void glAttachShader(GLuint program, GLuint shader);
+void glDetachShader(GLuint program, GLuint shader);
 void glLinkProgram(GLuint program);
 void glUseProgram(GLuint program);
+void glGetShaderiv(GLuint shader, GLenum pname, GLint *params);
+void glGetProgramiv(GLuint program, GLenum pname, GLint *params);
+void glGetShaderInfoLog(GLuint shader, GLsizei maxLength, GLsizei *length,
+                        GLchar *infoLog);
+void glGetProgramInfoLog(GLuint program, GLsizei maxLength, GLsizei *length,
+                         GLchar *infoLog);
 void glUniform1f(GLint location, GLfloat v0);
 void glUniform1fv(GLint location, GLsizei count, const GLfloat *value);
 void glUniform1i(GLint location, GLint v0);
@@ -266,6 +331,7 @@ void glUniform4fv(GLint location, GLsizei count, const GLfloat *value);
 void glUniformMatrix4fv(GLint location, GLsizei count, GLboolean transpose,
                         const GLfloat *value);
 GLint glGetUniformLocation(GLuint program, const GLchar *name);
+GLint glGetAttribLocation(GLuint program, const GLchar *name);
 GLuint glGetUniformBlockIndex(GLuint program, const GLchar *uniformBlockName);
 void glUniformBlockBinding(GLuint program, GLuint uniformBlockIndex,
                            GLuint uniformBlockBinding);
@@ -287,7 +353,11 @@ void glGenFramebuffers(GLsizei n, GLuint *ids);
 void glDeleteFramebuffers(GLsizei n, const GLuint *ids);
 void glBindFramebuffer(GLenum target, GLuint framebuffer);
 void glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level);
+void glDrawBuffer(GLenum buf);
 void glDrawBuffers(GLsizei n, const GLenum *bufs);
+void glReadBuffer(GLenum src);
+void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height,
+                  GLenum format, GLenum type, GLvoid *pixels);
 
 void glDrawArrays(GLenum mode, GLint first, GLsizei count);
 void glDrawArraysInstanced(GLenum mode, GLint first, GLsizei count,
@@ -298,6 +368,8 @@ void glDrawElementsInstanced(GLenum mode, GLsizei count, GLenum type,
                              const GLvoid *indices, GLsizei instancecount);
 
 const GLubyte *glGetString(GLenum name);
+void glGetBooleanv(GLenum pname, GLboolean *data);
+void glGetDoublev(GLenum pname, GLdouble *data);
 void glGetIntegerv(GLenum pname, GLint *data);
 void glGetFloatv(GLenum pname, GLfloat *data);
 GLenum glGetError(void);

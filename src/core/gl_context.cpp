@@ -11,6 +11,7 @@
 #include <coreinit/mutex.h>
 #include <gx2/event.h>
 #include <gx2/draw.h>
+#include <whb/gfx.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -60,6 +61,82 @@ static void _gl_stub_draw_elements(GLenum m, GLsizei c, GLenum t,
   (void)i;
 }
 
+static void gl_context_init_defaults(gl_context_t *ctx) {
+  GX2ColorBuffer *tv_color;
+
+  if (!ctx) {
+    return;
+  }
+
+  ctx->active_texture = 0;
+  ctx->blend_src_rgb = GL_ONE;
+  ctx->blend_dst_rgb = GL_ZERO;
+  ctx->blend_src_alpha = GL_ONE;
+  ctx->blend_dst_alpha = GL_ZERO;
+  ctx->blend_eq_rgb = GL_FUNC_ADD;
+  ctx->blend_eq_alpha = GL_FUNC_ADD;
+  ctx->blend_color[0] = 0.0f;
+  ctx->blend_color[1] = 0.0f;
+  ctx->blend_color[2] = 0.0f;
+  ctx->blend_color[3] = 0.0f;
+  ctx->depth_func = GL_LESS;
+  ctx->depth_mask = GL_TRUE;
+  ctx->viewport.near_z = 0.0f;
+  ctx->viewport.far_z = 1.0f;
+  ctx->stencil_compare_mask[0] = 0xFFu;
+  ctx->stencil_compare_mask[1] = 0xFFu;
+  ctx->stencil_write_mask[0] = 0xFFu;
+  ctx->stencil_write_mask[1] = 0xFFu;
+  ctx->stencil_func[0] = GL_ALWAYS;
+  ctx->stencil_func[1] = GL_ALWAYS;
+  ctx->stencil_fail[0] = GL_KEEP;
+  ctx->stencil_fail[1] = GL_KEEP;
+  ctx->stencil_zfail[0] = GL_KEEP;
+  ctx->stencil_zfail[1] = GL_KEEP;
+  ctx->stencil_zpass[0] = GL_KEEP;
+  ctx->stencil_zpass[1] = GL_KEEP;
+  ctx->stencil_ref[0] = 0;
+  ctx->stencil_ref[1] = 0;
+  ctx->cull_face_mode = GL_BACK;
+  ctx->front_face = GL_CCW;
+  ctx->polygon_mode = GL_FILL;
+  ctx->polygon_offset_factor = 0.0f;
+  ctx->polygon_offset_units = 0.0f;
+  ctx->color_mask[0] = GL_TRUE;
+  ctx->color_mask[1] = GL_TRUE;
+  ctx->color_mask[2] = GL_TRUE;
+  ctx->color_mask[3] = GL_TRUE;
+  ctx->line_width = 1.0f;
+  ctx->clear_color[0] = 0.0f;
+  ctx->clear_color[1] = 0.0f;
+  ctx->clear_color[2] = 0.0f;
+  ctx->clear_color[3] = 0.0f;
+  ctx->clear_depth = 1.0f;
+  ctx->clear_stencil = 0;
+  ctx->blend_enabled = GL_FALSE;
+  ctx->depth_test_enabled = GL_FALSE;
+  ctx->stencil_test_enabled = GL_FALSE;
+  ctx->cull_face_enabled = GL_FALSE;
+  ctx->scissor_test_enabled = GL_FALSE;
+  ctx->polygon_offset_point_enabled = GL_FALSE;
+  ctx->polygon_offset_line_enabled = GL_FALSE;
+  ctx->polygon_offset_fill_enabled = GL_FALSE;
+
+  tv_color = WHBGfxGetTVColourBuffer();
+  if (tv_color) {
+    ctx->viewport.width = (GLsizei)tv_color->surface.width;
+    ctx->viewport.height = (GLsizei)tv_color->surface.height;
+    ctx->scissor.width = (GLsizei)tv_color->surface.width;
+    ctx->scissor.height = (GLsizei)tv_color->surface.height;
+  }
+
+  ctx->dirty_flags = GL_DIRTY_BLEND | GL_DIRTY_DEPTH_STENCIL | GL_DIRTY_CULL |
+                     GL_DIRTY_SCISSOR | GL_DIRTY_VIEWPORT |
+                     GL_DIRTY_COLOR_MASK |
+                     GL_DIRTY_FRONT_FACE | GL_DIRTY_POLYGON_MODE |
+                     GL_DIRTY_FRAMEBUFFER;
+}
+
 void _gl_set_error(GLenum error) {
   if (!g_gl_context)
     return;
@@ -100,6 +177,7 @@ gl_context_t *gl_context_create(void) {
 
   memset(ctx, 0, sizeof(gl_context_t));
   OSInitMutex(&ctx->error_mutex);
+  gl_context_init_defaults(ctx);
 
   gl_buffer_init();
   gl_texture_init();
@@ -119,6 +197,11 @@ gl_context_t *gl_context_create(void) {
   ctx->dispatch.glMapBufferRange = _gl_MapBufferRange;
   ctx->dispatch.glUnmapBuffer = _gl_UnmapBuffer;
 
+  ctx->dispatch.glIsEnabled = _gl_IsEnabled;
+  ctx->dispatch.glClearColor = _gl_ClearColor;
+  ctx->dispatch.glClearDepth = _gl_ClearDepth;
+  ctx->dispatch.glClearStencil = _gl_ClearStencil;
+  ctx->dispatch.glClear = _gl_Clear;
   ctx->dispatch.glGenTextures = _gl_GenTextures;
   ctx->dispatch.glDeleteTextures = _gl_DeleteTextures;
   ctx->dispatch.glBindTexture = _gl_BindTexture;
@@ -131,12 +214,19 @@ gl_context_t *gl_context_create(void) {
   ctx->dispatch.glGenerateMipmap = _gl_GenerateMipmap;
   
   ctx->dispatch.glCreateShader = _gl_CreateShader;
+  ctx->dispatch.glDeleteShader = _gl_DeleteShader;
   ctx->dispatch.glShaderSource = _gl_ShaderSource;
   ctx->dispatch.glCompileShader = _gl_CompileShader;
   ctx->dispatch.glCreateProgram = _gl_CreateProgram;
+  ctx->dispatch.glDeleteProgram = _gl_DeleteProgram;
   ctx->dispatch.glAttachShader = _gl_AttachShader;
+  ctx->dispatch.glDetachShader = _gl_DetachShader;
   ctx->dispatch.glLinkProgram = _gl_LinkProgram;
   ctx->dispatch.glUseProgram = _gl_UseProgram;
+  ctx->dispatch.glGetShaderiv = _gl_GetShaderiv;
+  ctx->dispatch.glGetProgramiv = _gl_GetProgramiv;
+  ctx->dispatch.glGetShaderInfoLog = _gl_GetShaderInfoLog;
+  ctx->dispatch.glGetProgramInfoLog = _gl_GetProgramInfoLog;
   ctx->dispatch.glUniform1f = _gl_Uniform1f;
   ctx->dispatch.glUniform1fv = _gl_Uniform1fv;
   ctx->dispatch.glUniform1i = _gl_Uniform1i;
@@ -148,6 +238,7 @@ gl_context_t *gl_context_create(void) {
   ctx->dispatch.glUniform4fv = _gl_Uniform4fv;
   ctx->dispatch.glUniformMatrix4fv = _gl_UniformMatrix4fv;
   ctx->dispatch.glGetUniformLocation = _gl_GetUniformLocation;
+  ctx->dispatch.glGetAttribLocation = _gl_GetAttribLocation;
   ctx->dispatch.glGetUniformBlockIndex = _gl_GetUniformBlockIndex;
   ctx->dispatch.glUniformBlockBinding = _gl_UniformBlockBinding;
   ctx->dispatch.glWiiULoadShaderGroup = _gl_WiiULoadShaderGroup;
@@ -165,7 +256,10 @@ gl_context_t *gl_context_create(void) {
   ctx->dispatch.glDeleteFramebuffers = _gl_DeleteFramebuffers;
   ctx->dispatch.glBindFramebuffer = _gl_BindFramebuffer;
   ctx->dispatch.glFramebufferTexture2D = _gl_FramebufferTexture2D;
+  ctx->dispatch.glDrawBuffer = _gl_DrawBuffer;
   ctx->dispatch.glDrawBuffers = _gl_DrawBuffers;
+  ctx->dispatch.glReadBuffer = _gl_ReadBuffer;
+  ctx->dispatch.glReadPixels = _gl_ReadPixels;
 
   ctx->dispatch.glDrawArrays = _gl_DrawArrays;
   ctx->dispatch.glDrawArraysInstanced = _gl_DrawArraysInstanced;
@@ -177,20 +271,30 @@ gl_context_t *gl_context_create(void) {
   ctx->dispatch.glDisable = _gl_Disable;
   ctx->dispatch.glBlendFunc = _gl_BlendFunc;
   ctx->dispatch.glBlendEquation = _gl_BlendEquation;
+  ctx->dispatch.glBlendEquationSeparate = _gl_BlendEquationSeparate;
   ctx->dispatch.glBlendFuncSeparate = _gl_BlendFuncSeparate;
+  ctx->dispatch.glBlendColor = _gl_BlendColor;
   ctx->dispatch.glDepthFunc = _gl_DepthFunc;
   ctx->dispatch.glDepthMask = _gl_DepthMask;
+  ctx->dispatch.glDepthRange = _gl_DepthRange;
   ctx->dispatch.glStencilFunc = _gl_StencilFunc;
+  ctx->dispatch.glStencilFuncSeparate = _gl_StencilFuncSeparate;
   ctx->dispatch.glStencilOp = _gl_StencilOp;
+  ctx->dispatch.glStencilOpSeparate = _gl_StencilOpSeparate;
+  ctx->dispatch.glStencilMask = _gl_StencilMask;
+  ctx->dispatch.glStencilMaskSeparate = _gl_StencilMaskSeparate;
   ctx->dispatch.glCullFace = _gl_CullFace;
   ctx->dispatch.glFrontFace = _gl_FrontFace;
   ctx->dispatch.glPolygonMode = _gl_PolygonMode;
+  ctx->dispatch.glPolygonOffset = _gl_PolygonOffset;
   ctx->dispatch.glViewport = _gl_Viewport;
   ctx->dispatch.glScissor = _gl_Scissor;
   ctx->dispatch.glColorMask = _gl_ColorMask;
   ctx->dispatch.glLineWidth = _gl_LineWidth;
   
   ctx->dispatch.glGetString = _gl_GetString;
+  ctx->dispatch.glGetBooleanv = _gl_GetBooleanv;
+  ctx->dispatch.glGetDoublev = _gl_GetDoublev;
   ctx->dispatch.glGetIntegerv = _gl_GetIntegerv;
   ctx->dispatch.glGetFloatv = _gl_GetFloatv;
 
@@ -242,6 +346,22 @@ void* glMapBufferRange(GLenum target, GLintptr offset, GLsizeiptr length, GLbitf
 GLboolean glUnmapBuffer(GLenum target) {
   return g_gl_context ? g_gl_context->dispatch.glUnmapBuffer(target) : GL_FALSE;
 }
+void glClearColor(GLclampf red, GLclampf green, GLclampf blue, GLclampf alpha) {
+  if (g_gl_context)
+    g_gl_context->dispatch.glClearColor(red, green, blue, alpha);
+}
+void glClearDepth(GLclampd depth) {
+  if (g_gl_context)
+    g_gl_context->dispatch.glClearDepth(depth);
+}
+void glClearStencil(GLint s) {
+  if (g_gl_context)
+    g_gl_context->dispatch.glClearStencil(s);
+}
+void glClear(GLbitfield mask) {
+  if (g_gl_context)
+    g_gl_context->dispatch.glClear(mask);
+}
 void glGenTextures(GLsizei n, GLuint *textures) { if(g_gl_context) g_gl_context->dispatch.glGenTextures(n, textures); }
 void glDeleteTextures(GLsizei n, const GLuint *textures) { if(g_gl_context) g_gl_context->dispatch.glDeleteTextures(n, textures); }
 void glBindTexture(GLenum target, GLuint texture) { if(g_gl_context) g_gl_context->dispatch.glBindTexture(target, texture); }
@@ -254,12 +374,19 @@ void glTexParameteri(GLenum target, GLenum pname, GLint param) { if(g_gl_context
 void glGenerateMipmap(GLenum target) { if(g_gl_context) g_gl_context->dispatch.glGenerateMipmap(target); }
 
 GLuint glCreateShader(GLenum type) { return g_gl_context ? g_gl_context->dispatch.glCreateShader(type) : 0; }
+void glDeleteShader(GLuint shader) { if(g_gl_context) g_gl_context->dispatch.glDeleteShader(shader); }
 void glShaderSource(GLuint shader, GLsizei count, const GLchar *const *string, const GLint *length) { if(g_gl_context) g_gl_context->dispatch.glShaderSource(shader, count, string, length); }
 void glCompileShader(GLuint shader) { if(g_gl_context) g_gl_context->dispatch.glCompileShader(shader); }
 GLuint glCreateProgram(void) { return g_gl_context ? g_gl_context->dispatch.glCreateProgram() : 0; }
+void glDeleteProgram(GLuint program) { if(g_gl_context) g_gl_context->dispatch.glDeleteProgram(program); }
 void glAttachShader(GLuint program, GLuint shader) { if(g_gl_context) g_gl_context->dispatch.glAttachShader(program, shader); }
+void glDetachShader(GLuint program, GLuint shader) { if(g_gl_context) g_gl_context->dispatch.glDetachShader(program, shader); }
 void glLinkProgram(GLuint program) { if(g_gl_context) g_gl_context->dispatch.glLinkProgram(program); }
 void glUseProgram(GLuint program) { if(g_gl_context) g_gl_context->dispatch.glUseProgram(program); }
+void glGetShaderiv(GLuint shader, GLenum pname, GLint *params) { if(g_gl_context) g_gl_context->dispatch.glGetShaderiv(shader, pname, params); }
+void glGetProgramiv(GLuint program, GLenum pname, GLint *params) { if(g_gl_context) g_gl_context->dispatch.glGetProgramiv(program, pname, params); }
+void glGetShaderInfoLog(GLuint shader, GLsizei maxLength, GLsizei *length, GLchar *infoLog) { if(g_gl_context) g_gl_context->dispatch.glGetShaderInfoLog(shader, maxLength, length, infoLog); }
+void glGetProgramInfoLog(GLuint program, GLsizei maxLength, GLsizei *length, GLchar *infoLog) { if(g_gl_context) g_gl_context->dispatch.glGetProgramInfoLog(program, maxLength, length, infoLog); }
 void glUniform1f(GLint location, GLfloat v0) { if(g_gl_context) g_gl_context->dispatch.glUniform1f(location, v0); }
 void glUniform1fv(GLint location, GLsizei count, const GLfloat *value) { if(g_gl_context) g_gl_context->dispatch.glUniform1fv(location, count, value); }
 void glUniform1i(GLint location, GLint v0) { if(g_gl_context) g_gl_context->dispatch.glUniform1i(location, v0); }
@@ -271,6 +398,7 @@ void glUniform4f(GLint location, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3)
 void glUniform4fv(GLint location, GLsizei count, const GLfloat *value) { if(g_gl_context) g_gl_context->dispatch.glUniform4fv(location, count, value); }
 void glUniformMatrix4fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value) { if(g_gl_context) g_gl_context->dispatch.glUniformMatrix4fv(location, count, transpose, value); }
 GLint glGetUniformLocation(GLuint program, const GLchar *name) { return g_gl_context ? g_gl_context->dispatch.glGetUniformLocation(program, name) : -1; }
+GLint glGetAttribLocation(GLuint program, const GLchar *name) { return g_gl_context ? g_gl_context->dispatch.glGetAttribLocation(program, name) : -1; }
 GLuint glGetUniformBlockIndex(GLuint program, const GLchar *uniformBlockName) { return g_gl_context ? g_gl_context->dispatch.glGetUniformBlockIndex(program, uniformBlockName) : GL_INVALID_INDEX; }
 void glUniformBlockBinding(GLuint program, GLuint uniformBlockIndex, GLuint uniformBlockBinding) { if(g_gl_context) g_gl_context->dispatch.glUniformBlockBinding(program, uniformBlockIndex, uniformBlockBinding); }
 void glWiiULoadShaderGroup(GLuint program, const void* shaderGroup) { if(g_gl_context) g_gl_context->dispatch.glWiiULoadShaderGroup(program, shaderGroup); }
@@ -288,7 +416,16 @@ void glGenFramebuffers(GLsizei n, GLuint *framebuffers) { if(g_gl_context) g_gl_
 void glDeleteFramebuffers(GLsizei n, const GLuint *framebuffers) { if(g_gl_context) g_gl_context->dispatch.glDeleteFramebuffers(n, framebuffers); }
 void glBindFramebuffer(GLenum target, GLuint framebuffer) { if(g_gl_context) g_gl_context->dispatch.glBindFramebuffer(target, framebuffer); }
 void glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level) { if(g_gl_context) g_gl_context->dispatch.glFramebufferTexture2D(target, attachment, textarget, texture, level); }
+void glDrawBuffer(GLenum buf) { if(g_gl_context) g_gl_context->dispatch.glDrawBuffer(buf); }
 void glDrawBuffers(GLsizei n, const GLenum *bufs) { if(g_gl_context) g_gl_context->dispatch.glDrawBuffers(n, bufs); }
+void glReadBuffer(GLenum src) { if(g_gl_context) g_gl_context->dispatch.glReadBuffer(src); }
+void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height,
+                  GLenum format, GLenum type, GLvoid *pixels) {
+  if (g_gl_context) {
+    g_gl_context->dispatch.glReadPixels(x, y, width, height, format, type,
+                                        pixels);
+  }
+}
 
 void glDrawArrays(GLenum mode, GLint first, GLsizei count) { if(g_gl_context) g_gl_context->dispatch.glDrawArrays(mode, first, count); }
 void glDrawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLsizei instancecount) { if(g_gl_context) g_gl_context->dispatch.glDrawArraysInstanced(mode, first, count, instancecount); }
@@ -317,6 +454,9 @@ void glDisable(GLenum cap) {
   if (g_gl_context)
     g_gl_context->dispatch.glDisable(cap);
 }
+GLboolean glIsEnabled(GLenum cap) {
+  return g_gl_context ? g_gl_context->dispatch.glIsEnabled(cap) : GL_FALSE;
+}
 
 void glBlendFunc(GLenum sfactor, GLenum dfactor) {
   if (g_gl_context)
@@ -326,11 +466,20 @@ void glBlendEquation(GLenum mode) {
   if (g_gl_context)
     g_gl_context->dispatch.glBlendEquation(mode);
 }
+void glBlendEquationSeparate(GLenum modeRGB, GLenum modeAlpha) {
+  if (g_gl_context)
+    g_gl_context->dispatch.glBlendEquationSeparate(modeRGB, modeAlpha);
+}
 void glBlendFuncSeparate(GLenum sfactorRGB, GLenum dfactorRGB,
                          GLenum sfactorAlpha, GLenum dfactorAlpha) {
   if (g_gl_context)
     g_gl_context->dispatch.glBlendFuncSeparate(sfactorRGB, dfactorRGB,
                                                sfactorAlpha, dfactorAlpha);
+}
+void glBlendColor(GLclampf red, GLclampf green, GLclampf blue,
+                  GLclampf alpha) {
+  if (g_gl_context)
+    g_gl_context->dispatch.glBlendColor(red, green, blue, alpha);
 }
 void glDepthFunc(GLenum func) {
   if (g_gl_context)
@@ -340,13 +489,34 @@ void glDepthMask(GLboolean flag) {
   if (g_gl_context)
     g_gl_context->dispatch.glDepthMask(flag);
 }
+void glDepthRange(GLclampd nearVal, GLclampd farVal) {
+  if (g_gl_context)
+    g_gl_context->dispatch.glDepthRange(nearVal, farVal);
+}
 void glStencilFunc(GLenum func, GLint ref, GLuint mask) {
   if (g_gl_context)
     g_gl_context->dispatch.glStencilFunc(func, ref, mask);
 }
+void glStencilFuncSeparate(GLenum face, GLenum func, GLint ref, GLuint mask) {
+  if (g_gl_context)
+    g_gl_context->dispatch.glStencilFuncSeparate(face, func, ref, mask);
+}
 void glStencilOp(GLenum fail, GLenum zfail, GLenum zpass) {
   if (g_gl_context)
     g_gl_context->dispatch.glStencilOp(fail, zfail, zpass);
+}
+void glStencilOpSeparate(GLenum face, GLenum fail, GLenum zfail,
+                         GLenum zpass) {
+  if (g_gl_context)
+    g_gl_context->dispatch.glStencilOpSeparate(face, fail, zfail, zpass);
+}
+void glStencilMask(GLuint mask) {
+  if (g_gl_context)
+    g_gl_context->dispatch.glStencilMask(mask);
+}
+void glStencilMaskSeparate(GLenum face, GLuint mask) {
+  if (g_gl_context)
+    g_gl_context->dispatch.glStencilMaskSeparate(face, mask);
 }
 void glCullFace(GLenum mode) {
   if (g_gl_context)
@@ -359,6 +529,10 @@ void glFrontFace(GLenum mode) {
 void glPolygonMode(GLenum face, GLenum mode) {
   if (g_gl_context)
     g_gl_context->dispatch.glPolygonMode(face, mode);
+}
+void glPolygonOffset(GLfloat factor, GLfloat units) {
+  if (g_gl_context)
+    g_gl_context->dispatch.glPolygonOffset(factor, units);
 }
 void glViewport(GLint x, GLint y, GLsizei width, GLsizei height) {
   if (g_gl_context)
@@ -380,6 +554,16 @@ void glLineWidth(GLfloat width) {
 
 const GLubyte *glGetString(GLenum name) {
     return g_gl_context ? g_gl_context->dispatch.glGetString(name) : NULL;
+}
+
+void glGetBooleanv(GLenum pname, GLboolean *data) {
+    if (g_gl_context)
+        g_gl_context->dispatch.glGetBooleanv(pname, data);
+}
+
+void glGetDoublev(GLenum pname, GLdouble *data) {
+    if (g_gl_context)
+        g_gl_context->dispatch.glGetDoublev(pname, data);
 }
 
 void glGetIntegerv(GLenum pname, GLint *data) {

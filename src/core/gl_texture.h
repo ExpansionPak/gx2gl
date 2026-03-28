@@ -33,6 +33,7 @@ void gl_bind_textures(void);
 // Used by FBO
 struct GX2Texture;
 struct GX2Texture* gl_get_gx2_texture(GLuint texture);
+GLint gl_get_texture_internal_format(GLuint texture);
 struct GX2Sampler;
 struct GX2Sampler* gl_get_gx2_sampler(GLuint texture);
 

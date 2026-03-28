@@ -25,11 +25,14 @@ extern "C" {
 
 typedef struct {
   bool in_use;
+  bool delete_pending;
   GLenum type;
   char *source;
+  char *info_log;
   uint32_t source_length;
   bool source_present;
   bool compile_requested;
+  bool compile_succeeded;
 } GLShader;
 
 typedef struct {
@@ -51,10 +54,13 @@ typedef struct {
 typedef struct {
   bool in_use;
   bool linked;
+  bool delete_pending;
 
   GLuint attached_vertex_shader;
   GLuint attached_pixel_shader;
   GLuint attached_geometry_shader;
+
+  char *info_log;
 
   const WHBGfxShaderGroup *group;
   bool owns_group;
@@ -92,6 +98,10 @@ static bool location_is_pixel(GLint location) {
   return (((uint32_t)location & GL_LOCATION_STAGE_PIXEL) != 0u);
 }
 
+static uint32_t get_log_length(const char *log) {
+  return (log && log[0] != '\0') ? ((uint32_t)strlen(log) + 1u) : 0u;
+}
+
 static void free_shader_source(GLShader *shader) {
   if (!shader || !shader->source) {
     return;
@@ -101,6 +111,15 @@ static void free_shader_source(GLShader *shader) {
   shader->source_length = 0;
   shader->source_present = false;
   shader->compile_requested = false;
+  shader->compile_succeeded = false;
+}
+
+static void free_owned_string(char **str) {
+  if (!str || !*str) {
+    return;
+  }
+  gl_mem_free(GL_MEM_TYPE_MEM2, *str);
+  *str = NULL;
 }
 
 static void free_shadow_blocks(UniformBlockShadow *blocks, uint32_t count) {
@@ -146,6 +165,28 @@ static char *copy_program_string(const char *src) {
   return copy;
 }
 
+static void set_shader_log(GLShader *shader, const char *message) {
+  if (!shader) {
+    return;
+  }
+  free_owned_string(&shader->info_log);
+  if (!message || message[0] == '\0') {
+    return;
+  }
+  shader->info_log = copy_program_string(message);
+}
+
+static void set_program_log(GLProgram *prog, const char *message) {
+  if (!prog) {
+    return;
+  }
+  free_owned_string(&prog->info_log);
+  if (!message || message[0] == '\0') {
+    return;
+  }
+  prog->info_log = copy_program_string(message);
+}
+
 static void clear_program_group(GLProgram *prog) {
   if (!prog) {
     return;
@@ -171,6 +212,109 @@ static void clear_program_group(GLProgram *prog) {
   prog->linked = false;
   memset(prog->vertex_sampler_units, 0, sizeof(prog->vertex_sampler_units));
   memset(prog->pixel_sampler_units, 0, sizeof(prog->pixel_sampler_units));
+}
+
+static uint32_t count_shader_attachments(GLuint shader) {
+  uint32_t count = 0;
+
+  if (shader == 0) {
+    return 0;
+  }
+
+  for (uint32_t i = 1; i < MAX_PROGRAMS; ++i) {
+    if (!g_programs[i].in_use) {
+      continue;
+    }
+    if (g_programs[i].attached_vertex_shader == shader) {
+      ++count;
+    }
+    if (g_programs[i].attached_pixel_shader == shader) {
+      ++count;
+    }
+    if (g_programs[i].attached_geometry_shader == shader) {
+      ++count;
+    }
+  }
+
+  return count;
+}
+
+static uint32_t count_program_attached_shaders(const GLProgram *prog) {
+  uint32_t count = 0;
+
+  if (!prog) {
+    return 0;
+  }
+  if (prog->attached_vertex_shader) {
+    ++count;
+  }
+  if (prog->attached_pixel_shader) {
+    ++count;
+  }
+  if (prog->attached_geometry_shader) {
+    ++count;
+  }
+  return count;
+}
+
+static void destroy_shader(GLuint shader_id) {
+  if (!is_valid_shader(shader_id)) {
+    return;
+  }
+
+  free_shader_source(&g_shaders[shader_id]);
+  free_owned_string(&g_shaders[shader_id].info_log);
+  memset(&g_shaders[shader_id], 0, sizeof(g_shaders[shader_id]));
+}
+
+static void maybe_destroy_shader(GLuint shader_id) {
+  if (!is_valid_shader(shader_id)) {
+    return;
+  }
+  if (!g_shaders[shader_id].delete_pending) {
+    return;
+  }
+  if (count_shader_attachments(shader_id) != 0) {
+    return;
+  }
+
+  destroy_shader(shader_id);
+}
+
+static void destroy_program(GLuint program_id) {
+  GLuint attached_vertex_shader;
+  GLuint attached_pixel_shader;
+  GLuint attached_geometry_shader;
+
+  if (!is_valid_program(program_id)) {
+    return;
+  }
+
+  attached_vertex_shader = g_programs[program_id].attached_vertex_shader;
+  attached_pixel_shader = g_programs[program_id].attached_pixel_shader;
+  attached_geometry_shader = g_programs[program_id].attached_geometry_shader;
+
+  clear_program_group(&g_programs[program_id]);
+  free_owned_string(&g_programs[program_id].info_log);
+  memset(&g_programs[program_id], 0, sizeof(g_programs[program_id]));
+
+  maybe_destroy_shader(attached_vertex_shader);
+  maybe_destroy_shader(attached_pixel_shader);
+  maybe_destroy_shader(attached_geometry_shader);
+}
+
+static void maybe_destroy_program(GLuint program_id) {
+  if (!is_valid_program(program_id)) {
+    return;
+  }
+  if (!g_programs[program_id].delete_pending) {
+    return;
+  }
+  if (g_gl_context && g_gl_context->bound_program == program_id) {
+    return;
+  }
+
+  destroy_program(program_id);
 }
 
 static int32_t find_program_uniform_block_index(const GLProgram *prog,
@@ -531,6 +675,19 @@ GLuint _gl_CreateShader(GLenum type) {
   return 0;
 }
 
+void _gl_DeleteShader(GLuint shader) {
+  if (!g_gl_context || shader == 0) {
+    return;
+  }
+  if (!is_valid_shader(shader)) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+
+  g_shaders[shader].delete_pending = true;
+  maybe_destroy_shader(shader);
+}
+
 void _gl_ShaderSource(GLuint shader, GLsizei count, const GLchar *const *string,
                       const GLint *length) {
   size_t total_length = 0;
@@ -583,10 +740,12 @@ void _gl_ShaderSource(GLuint shader, GLsizei count, const GLchar *const *string,
   *dst = '\0';
 
   free_shader_source(&g_shaders[shader]);
+  set_shader_log(&g_shaders[shader], NULL);
   g_shaders[shader].source = source;
   g_shaders[shader].source_length = (uint32_t)total_length;
   g_shaders[shader].source_present = true;
   g_shaders[shader].compile_requested = false;
+  g_shaders[shader].compile_succeeded = false;
 }
 
 void _gl_CompileShader(GLuint shader) {
@@ -598,6 +757,7 @@ void _gl_CompileShader(GLuint shader) {
     return;
   }
   if (!g_shaders[shader].source_present) {
+    set_shader_log(&g_shaders[shader], "No shader source has been provided.");
     _gl_set_error(GL_INVALID_OPERATION);
     return;
   }
@@ -605,6 +765,8 @@ void _gl_CompileShader(GLuint shader) {
   /* CafeGLSL compilation happens off-device. Runtime compile only marks the
    * source as ready for an offline pass that produces a GFD/GSH blob. */
   g_shaders[shader].compile_requested = true;
+  g_shaders[shader].compile_succeeded = true;
+  set_shader_log(&g_shaders[shader], NULL);
 }
 
 GLuint _gl_CreateProgram(void) {
@@ -624,9 +786,24 @@ GLuint _gl_CreateProgram(void) {
   return 0;
 }
 
+void _gl_DeleteProgram(GLuint program) {
+  if (!g_gl_context || program == 0) {
+    return;
+  }
+  if (!is_valid_program(program)) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+
+  g_programs[program].delete_pending = true;
+  maybe_destroy_program(program);
+}
+
 void _gl_AttachShader(GLuint program, GLuint shader) {
   GLProgram *prog;
   GLShader *src_shader;
+  GLuint *slot = NULL;
+  GLuint replaced_shader = 0;
 
   if (!g_gl_context) {
     return;
@@ -641,18 +818,52 @@ void _gl_AttachShader(GLuint program, GLuint shader) {
 
   switch (src_shader->type) {
   case GL_VERTEX_SHADER:
-    prog->attached_vertex_shader = shader;
+    slot = &prog->attached_vertex_shader;
     break;
   case GL_FRAGMENT_SHADER:
-    prog->attached_pixel_shader = shader;
+    slot = &prog->attached_pixel_shader;
     break;
   case GL_GEOMETRY_SHADER:
-    prog->attached_geometry_shader = shader;
+    slot = &prog->attached_geometry_shader;
     break;
   default:
     _gl_set_error(GL_INVALID_OPERATION);
     return;
   }
+
+  replaced_shader = *slot;
+  *slot = shader;
+  if (replaced_shader != 0 && replaced_shader != shader) {
+    maybe_destroy_shader(replaced_shader);
+  }
+}
+
+void _gl_DetachShader(GLuint program, GLuint shader) {
+  GLProgram *prog;
+  GLuint *slot = NULL;
+
+  if (!g_gl_context) {
+    return;
+  }
+  if (!is_valid_program(program) || !is_valid_shader(shader)) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+
+  prog = &g_programs[program];
+  if (prog->attached_vertex_shader == shader) {
+    slot = &prog->attached_vertex_shader;
+  } else if (prog->attached_pixel_shader == shader) {
+    slot = &prog->attached_pixel_shader;
+  } else if (prog->attached_geometry_shader == shader) {
+    slot = &prog->attached_geometry_shader;
+  } else {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
+
+  *slot = 0;
+  maybe_destroy_shader(shader);
 }
 
 void _gl_LinkProgram(GLuint program) {
@@ -669,12 +880,16 @@ void _gl_LinkProgram(GLuint program) {
   prog = &g_programs[program];
   if (prog->group) {
     prog->linked = true;
+    set_program_log(prog, NULL);
     return;
   }
 
   if (!prog->attached_vertex_shader || !prog->attached_pixel_shader ||
       !g_shaders[prog->attached_vertex_shader].compile_requested ||
       !g_shaders[prog->attached_pixel_shader].compile_requested) {
+    set_program_log(
+        prog,
+        "Program must have compiled vertex and fragment shaders before link.");
     _gl_set_error(GL_INVALID_OPERATION);
     return;
   }
@@ -682,10 +897,16 @@ void _gl_LinkProgram(GLuint program) {
   /* Runtime GLSL-to-GX2 compilation is intentionally unsupported. Applications
    * must compile with CafeGLSL on the host and load the resulting GFD/GSH blob
    * through glWiiULoadShaderGroupGFD or glWiiULoadShaderGroup. */
+  set_program_log(
+      prog,
+      "Runtime GLSL linking is unsupported. Compile with CafeGLSL and load a "
+      "precompiled GFD/GSH shader group.");
   _gl_set_error(GL_INVALID_OPERATION);
 }
 
 void _gl_UseProgram(GLuint program) {
+  GLuint old_program;
+
   if (!g_gl_context) {
     return;
   }
@@ -698,8 +919,12 @@ void _gl_UseProgram(GLuint program) {
     return;
   }
 
+  old_program = g_gl_context->bound_program;
   g_gl_context->bound_program = program;
   g_gl_context->dirty_flags |= GL_DIRTY_PROGRAM;
+  if (old_program != program) {
+    maybe_destroy_program(old_program);
+  }
 }
 
 void _gl_WiiULoadShaderGroup(GLuint program, const void *shaderGroup) {
@@ -716,6 +941,7 @@ void _gl_WiiULoadShaderGroup(GLuint program, const void *shaderGroup) {
     return;
   }
 
+  set_program_log(prog, NULL);
   g_gl_context->dirty_flags |= GL_DIRTY_PROGRAM;
 }
 
@@ -733,16 +959,135 @@ void _gl_WiiULoadShaderGroupGFD(GLuint program, GLuint index,
   memset(&prog->owned_group, 0, sizeof(prog->owned_group));
 
   if (!WHBGfxLoadGFDShaderGroup(&prog->owned_group, index, gfdData)) {
+    set_program_log(prog, "Failed to load CafeGLSL GFD shader group.");
     _gl_set_error(GL_INVALID_OPERATION);
     return;
   }
 
   if (!attach_program_group(prog, &prog->owned_group, true)) {
+    set_program_log(prog, "Failed to attach loaded CafeGLSL shader group.");
     _gl_set_error(GL_OUT_OF_MEMORY);
     return;
   }
 
+  set_program_log(prog, NULL);
   g_gl_context->dirty_flags |= GL_DIRTY_PROGRAM;
+}
+
+void _gl_GetShaderiv(GLuint shader, GLenum pname, GLint *params) {
+  if (!g_gl_context || !params) {
+    return;
+  }
+  if (!is_valid_shader(shader)) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+
+  switch (pname) {
+  case GL_DELETE_STATUS:
+    *params = g_shaders[shader].delete_pending ? GL_TRUE : GL_FALSE;
+    break;
+  case GL_COMPILE_STATUS:
+    *params = g_shaders[shader].compile_succeeded ? GL_TRUE : GL_FALSE;
+    break;
+  case GL_INFO_LOG_LENGTH:
+    *params = (GLint)get_log_length(g_shaders[shader].info_log);
+    break;
+  case GL_SHADER_SOURCE_LENGTH:
+    *params = g_shaders[shader].source_present
+                  ? (GLint)(g_shaders[shader].source_length + 1u)
+                  : 0;
+    break;
+  case GL_SHADER_TYPE:
+    *params = (GLint)g_shaders[shader].type;
+    break;
+  default:
+    _gl_set_error(GL_INVALID_ENUM);
+    break;
+  }
+}
+
+void _gl_GetProgramiv(GLuint program, GLenum pname, GLint *params) {
+  if (!g_gl_context || !params) {
+    return;
+  }
+  if (!is_valid_program(program)) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+
+  switch (pname) {
+  case GL_DELETE_STATUS:
+    *params = g_programs[program].delete_pending ? GL_TRUE : GL_FALSE;
+    break;
+  case GL_LINK_STATUS:
+    *params = g_programs[program].linked ? GL_TRUE : GL_FALSE;
+    break;
+  case GL_INFO_LOG_LENGTH:
+    *params = (GLint)get_log_length(g_programs[program].info_log);
+    break;
+  case GL_ATTACHED_SHADERS:
+    *params = (GLint)count_program_attached_shaders(&g_programs[program]);
+    break;
+  default:
+    _gl_set_error(GL_INVALID_ENUM);
+    break;
+  }
+}
+
+static void copy_info_log_text(const char *source, GLsizei maxLength,
+                               GLsizei *length, GLchar *infoLog) {
+  GLsizei copied = 0;
+
+  if (length) {
+    *length = 0;
+  }
+  if (maxLength < 0) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+  if (!infoLog || maxLength == 0) {
+    return;
+  }
+
+  if (source && source[0] != '\0') {
+    copied = (GLsizei)strlen(source);
+    if (copied >= maxLength) {
+      copied = maxLength - 1;
+    }
+    memcpy(infoLog, source, (size_t)copied);
+  }
+
+  infoLog[copied] = '\0';
+  if (length) {
+    *length = copied;
+  }
+}
+
+void _gl_GetShaderInfoLog(GLuint shader, GLsizei maxLength, GLsizei *length,
+                          GLchar *infoLog) {
+  if (!g_gl_context) {
+    return;
+  }
+  if (!is_valid_shader(shader)) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+
+  copy_info_log_text(g_shaders[shader].info_log, maxLength, length, infoLog);
+}
+
+void _gl_GetProgramInfoLog(GLuint program, GLsizei maxLength, GLsizei *length,
+                           GLchar *infoLog) {
+  if (!g_gl_context) {
+    return;
+  }
+  if (!is_valid_program(program)) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+
+  copy_info_log_text(g_programs[program].info_log, maxLength, length, infoLog);
 }
 
 /* Encoding: bit 31 = is_pixel, bits 16-30 = block_index, bits 0-15 = offset */
@@ -788,6 +1133,28 @@ GLint _gl_GetUniformLocation(GLuint program, const GLchar *name) {
         return (GLint)(GL_LOCATION_STAGE_PIXEL | GL_LOCATION_KIND_SAMPLER |
                        (sampler->location & 0xFFFFu));
       }
+    }
+  }
+
+  return -1;
+}
+
+GLint _gl_GetAttribLocation(GLuint program, const GLchar *name) {
+  GLProgram *prog;
+
+  if (!g_gl_context || !is_valid_program(program) || !name) {
+    return -1;
+  }
+
+  prog = &g_programs[program];
+  if (!prog->group || !prog->group->vertexShader) {
+    return -1;
+  }
+
+  for (uint32_t i = 0; i < prog->group->vertexShader->attribVarCount; ++i) {
+    const GX2AttribVar *attrib = &prog->group->vertexShader->attribVars[i];
+    if (attrib->name && strcmp(name, attrib->name) == 0) {
+      return (GLint)attrib->location;
     }
   }
 
