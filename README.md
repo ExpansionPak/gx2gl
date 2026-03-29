@@ -2,7 +2,7 @@
 
 Work-In-Progress OpenGL implementation for the Nintendo Wii U. 
 
-Name inspired by https://github.com/snickerbockers/gx2gl
+inspired by https://github.com/snickerbockers/gx2gl (we take some pointers from snickerbockers)
 
 CafeGLSL: https://github.com/Exzap/CafeGLSL
 
