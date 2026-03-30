@@ -12,6 +12,8 @@ extern "C" {
 #endif
 #include <gx2/enum.h>
 #include <gx2/draw.h>
+#include <gx2/event.h>
+#include <gx2/surface.h>
 #include <gx2/registers.h>
 #ifdef __cplusplus
 }
@@ -19,6 +21,7 @@ extern "C" {
 
 #include "gl/gl.h"
 #include "core/gl_context.h"
+#include "core/gl_texture.h"
 #include "mem/gl_mem.h"
 
 static int g_pass_count = 0;
@@ -175,6 +178,143 @@ static void draw_diag_rect(GLsizei screen_width, GLsizei screen_height, int x,
     glClear(GL_COLOR_BUFFER_BIT);
 }
 
+typedef struct {
+    char ch;
+    uint8_t rows[7];
+} diag_glyph_t;
+
+static const diag_glyph_t g_diag_glyphs[] = {
+    {' ', {0, 0, 0, 0, 0, 0, 0}},
+    {'-', {0, 0, 0, 31, 0, 0, 0}},
+    {'0', {14, 17, 19, 21, 25, 17, 14}},
+    {'1', {4, 12, 4, 4, 4, 4, 14}},
+    {'2', {14, 17, 1, 2, 4, 8, 31}},
+    {'3', {30, 1, 1, 14, 1, 1, 30}},
+    {'4', {2, 6, 10, 18, 31, 2, 2}},
+    {'5', {31, 16, 16, 30, 1, 1, 30}},
+    {'6', {14, 16, 16, 30, 17, 17, 14}},
+    {'7', {31, 1, 2, 4, 8, 8, 8}},
+    {'8', {14, 17, 17, 14, 17, 17, 14}},
+    {'9', {14, 17, 17, 15, 1, 1, 14}},
+    {'A', {14, 17, 17, 31, 17, 17, 17}},
+    {'D', {30, 17, 17, 17, 17, 17, 30}},
+    {'E', {31, 16, 16, 30, 16, 16, 31}},
+    {'F', {31, 16, 16, 30, 16, 16, 16}},
+    {'G', {14, 17, 16, 23, 17, 17, 14}},
+    {'I', {31, 4, 4, 4, 4, 4, 31}},
+    {'L', {16, 16, 16, 16, 16, 16, 31}},
+    {'N', {17, 25, 21, 19, 17, 17, 17}},
+    {'P', {30, 17, 17, 30, 16, 16, 16}},
+    {'R', {30, 17, 17, 30, 20, 18, 17}},
+    {'S', {15, 16, 16, 14, 1, 1, 30}},
+    {'T', {31, 4, 4, 4, 4, 4, 4}},
+    {'U', {17, 17, 17, 17, 17, 17, 14}},
+};
+
+static const uint8_t *diag_glyph_rows(char ch) {
+    for (size_t i = 0; i < sizeof(g_diag_glyphs) / sizeof(g_diag_glyphs[0]); ++i) {
+        if (g_diag_glyphs[i].ch == ch) {
+            return g_diag_glyphs[i].rows;
+        }
+    }
+    return g_diag_glyphs[0].rows;
+}
+
+static int diag_text_width(const char *text, int scale) {
+    int width = 0;
+
+    if (!text || scale <= 0) {
+        return 0;
+    }
+    while (*text != '\0') {
+        width += 6 * scale;
+        ++text;
+    }
+    if (width > 0) {
+        width -= scale;
+    }
+    return width;
+}
+
+static void draw_diag_text(GLsizei screen_width, GLsizei screen_height, int x,
+                           int y, int scale, const char *text, float r,
+                           float g, float b, float a) {
+    int pen_x = x;
+
+    if (!text || scale <= 0) {
+        return;
+    }
+
+    while (*text != '\0') {
+        const uint8_t *rows = diag_glyph_rows(*text);
+        for (int row = 0; row < 7; ++row) {
+            for (int col = 0; col < 5; ++col) {
+                if ((rows[row] & (1u << (4 - col))) == 0) {
+                    continue;
+                }
+                draw_diag_rect(screen_width, screen_height,
+                               pen_x + col * scale, y + row * scale, scale,
+                               scale, r, g, b, a);
+            }
+        }
+        pen_x += 6 * scale;
+        ++text;
+    }
+}
+
+static void draw_diag_text_shadow(GLsizei screen_width, GLsizei screen_height,
+                                  int x, int y, int scale, const char *text,
+                                  float r, float g, float b, float a) {
+    draw_diag_text(screen_width, screen_height, x + scale / 2, y + scale / 2,
+                   scale, text, 0.02f, 0.03f, 0.04f, a);
+    draw_diag_text(screen_width, screen_height, x, y, scale, text, r, g, b, a);
+}
+
+static void draw_diag_card(GLsizei screen_width, GLsizei screen_height, int x,
+                           int y, int width, int height, const char *label,
+                           const char *value, float accent_r, float accent_g,
+                           float accent_b) {
+    int label_scale;
+    int value_scale;
+    int strip_height;
+    int label_x;
+    int label_y;
+    int value_x;
+    int value_y;
+
+    if (width <= 0 || height <= 0) {
+        return;
+    }
+
+    label_scale = height / 14;
+    if (label_scale < 3) {
+        label_scale = 3;
+    }
+    value_scale = height / 8;
+    if (value_scale < 6) {
+        value_scale = 6;
+    }
+    strip_height = height / 3;
+    if (strip_height < label_scale * 8) {
+        strip_height = label_scale * 8;
+    }
+
+    draw_diag_rect(screen_width, screen_height, x, y, width, height, 0.11f,
+                   0.12f, 0.15f, 1.0f);
+    draw_diag_rect(screen_width, screen_height, x + 2, y + 2, width - 4,
+                   strip_height, accent_r, accent_g, accent_b, 1.0f);
+
+    label_x = x + (width - diag_text_width(label, label_scale)) / 2;
+    label_y = y + (strip_height - label_scale * 7) / 2;
+    value_x = x + (width - diag_text_width(value, value_scale)) / 2;
+    value_y = y + strip_height + (height - strip_height - value_scale * 7) / 2;
+
+    draw_diag_text_shadow(screen_width, screen_height, label_x, label_y,
+                          label_scale, label, 0.05f, 0.06f, 0.08f, 1.0f);
+    draw_diag_text_shadow(screen_width, screen_height, value_x, value_y,
+                          value_scale, value, 0.96f, 0.97f, 0.99f, 1.0f);
+}
+
 static void draw_diagnostic_screen(void) {
     static const char *phase_names[DIAG_PHASE_COUNT] = {
         "Limits",
@@ -199,8 +339,12 @@ static void draw_diagnostic_screen(void) {
         {0.72f, 0.72f, 0.72f},
     };
     GX2ColorBuffer *tv_color;
+    GX2Texture *diag_gx2_texture = NULL;
     GLsizei screen_width;
     GLsizei screen_height;
+    GLuint diag_texture = 0;
+    GLuint diag_fbo = 0;
+    GLboolean use_offscreen = GL_FALSE;
     char legend[256];
 
     if (!g_gl_context) {
@@ -212,6 +356,36 @@ static void draw_diagnostic_screen(void) {
     }
     screen_width = (GLsizei)tv_color->surface.width;
     screen_height = (GLsizei)tv_color->surface.height;
+
+    glGenTextures(1, &diag_texture);
+    if (diag_texture != 0) {
+        glBindTexture(GL_TEXTURE_2D, diag_texture);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, screen_width, screen_height, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        if (glGetError() == GL_NO_ERROR) {
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glGenFramebuffers(1, &diag_fbo);
+            if (diag_fbo != 0) {
+                glBindFramebuffer(GL_FRAMEBUFFER, diag_fbo);
+                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                       GL_TEXTURE_2D, diag_texture, 0);
+                glDrawBuffer(GL_COLOR_ATTACHMENT0);
+                glReadBuffer(GL_COLOR_ATTACHMENT0);
+                if (glCheckFramebufferStatus(GL_FRAMEBUFFER) ==
+                    GL_FRAMEBUFFER_COMPLETE) {
+                    diag_gx2_texture = gl_get_gx2_texture(diag_texture);
+                    if (diag_gx2_texture) {
+                        use_offscreen = GL_TRUE;
+                    }
+                }
+            }
+        }
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
     snprintf(legend, sizeof(legend),
              "Diagnostic tiles order: %s, %s, %s, %s, %s, %s, %s, %s, %s.\n",
              phase_names[0], phase_names[1], phase_names[2], phase_names[3],
@@ -222,7 +396,7 @@ static void draw_diagnostic_screen(void) {
     while (WHBProcIsRunning()) {
         int margin = screen_width / 24;
         int gap = margin / 2;
-        int header_height = screen_height / 8;
+        int header_height = screen_height / 4;
         int totals_height = screen_height / 16;
         int grid_top;
         int tile_width;
@@ -232,6 +406,16 @@ static void draw_diagnostic_screen(void) {
         int bar_y;
         int bar_width;
         int status_height;
+        int cards_x;
+        int cards_y;
+        int card_width;
+        int card_height;
+        int label_scale;
+        int value_scale;
+        char pass_text[16];
+        char neg_text[16];
+        char fail_text[16];
+        const char *status_text;
 
         if (margin < 18) {
             margin = 18;
@@ -243,7 +427,7 @@ static void draw_diagnostic_screen(void) {
         WHBGfxBeginRender();
         WHBGfxBeginRenderTV();
 
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glBindFramebuffer(GL_FRAMEBUFFER, use_offscreen ? diag_fbo : 0);
         glViewport(0, 0, screen_width, screen_height);
         glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
         glDisable(GL_SCISSOR_TEST);
@@ -263,6 +447,32 @@ static void draw_diagnostic_screen(void) {
                        g_fail_count == 0 ? 0.32f : 0.88f,
                        g_fail_count == 0 ? 0.88f : 0.30f,
                        g_fail_count == 0 ? 0.44f : 0.30f, 1.0f);
+
+        cards_x = margin + gap;
+        cards_y = margin + gap * 2;
+        card_width = (screen_width - margin * 2 - gap * 5) / 4;
+        card_height = status_height - gap * 2;
+        if (card_height < 72) {
+            card_height = 72;
+        }
+        snprintf(pass_text, sizeof(pass_text), "%d", g_pass_count);
+        snprintf(neg_text, sizeof(neg_text), "%d", g_negative_pass_count);
+        snprintf(fail_text, sizeof(fail_text), "%d", g_fail_count);
+        status_text = g_fail_count == 0 ? "GREEN" : "RED";
+        draw_diag_card(screen_width, screen_height, cards_x, cards_y, card_width,
+                       card_height, "STATUS", status_text,
+                       g_fail_count == 0 ? 0.28f : 0.84f,
+                       g_fail_count == 0 ? 0.74f : 0.28f,
+                       g_fail_count == 0 ? 0.42f : 0.28f);
+        draw_diag_card(screen_width, screen_height,
+                       cards_x + (card_width + gap) * 1, cards_y, card_width,
+                       card_height, "PASS", pass_text, 0.22f, 0.82f, 0.33f);
+        draw_diag_card(screen_width, screen_height,
+                       cards_x + (card_width + gap) * 2, cards_y, card_width,
+                       card_height, "NEG", neg_text, 0.18f, 0.62f, 0.95f);
+        draw_diag_card(screen_width, screen_height,
+                       cards_x + (card_width + gap) * 3, cards_y, card_width,
+                       card_height, "FAIL", fail_text, 0.92f, 0.22f, 0.22f);
 
         total_events = g_pass_count + g_negative_pass_count + g_fail_count;
         if (total_events <= 0) {
@@ -310,6 +520,21 @@ static void draw_diagnostic_screen(void) {
             ((bar_width - gap) * g_fail_count) /
                 (g_negative_pass_count + g_fail_count + 1),
             totals_height - gap, 0.88f, 0.18f, 0.18f, 1.0f);
+
+        label_scale = totals_height / 5;
+        value_scale = totals_height / 4;
+        if (label_scale < 2) {
+            label_scale = 2;
+        }
+        if (value_scale < 2) {
+            value_scale = 2;
+        }
+        draw_diag_text(screen_width, screen_height, bar_x + gap,
+                       margin + header_height + gap / 2, label_scale, "PASS",
+                       0.88f, 0.92f, 0.90f, 1.0f);
+        draw_diag_text(screen_width, screen_height, bar_x + gap,
+                       margin + header_height + gap / 2 + label_scale * 8,
+                       label_scale, "NEG", 0.88f, 0.92f, 0.96f, 1.0f);
 
         grid_top = bar_y + totals_height + gap * 2;
         tile_width = (screen_width - margin * 2 - gap * 2) / 3;
@@ -378,8 +603,31 @@ static void draw_diagnostic_screen(void) {
 
         glDisable(GL_SCISSOR_TEST);
         glFinish();
+        if (use_offscreen && diag_gx2_texture) {
+            GX2Rect copy_rect;
+            GX2Point copy_point;
+
+            copy_rect.left = 0;
+            copy_rect.top = 0;
+            copy_rect.right = screen_width;
+            copy_rect.bottom = screen_height;
+            copy_point.x = 0;
+            copy_point.y = 0;
+            GX2CopySurfaceEx(&diag_gx2_texture->surface, 0, 0,
+                             &tv_color->surface, 0, 0, 1, &copy_rect,
+                             &copy_point);
+            GX2DrawDone();
+        }
         WHBGfxFinishRenderTV();
         WHBGfxFinishRender();
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    if (diag_fbo != 0) {
+        glDeleteFramebuffers(1, &diag_fbo);
+    }
+    if (diag_texture != 0) {
+        glDeleteTextures(1, &diag_texture);
     }
 }
 

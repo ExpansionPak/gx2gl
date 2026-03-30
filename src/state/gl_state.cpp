@@ -249,6 +249,10 @@ static void cpu_clear_color_buffer(GX2ColorBuffer *color_buffer) {
   GX2Surface *surface;
   uint8_t *image;
   uint32_t row_bytes;
+  uint32_t clear_x0;
+  uint32_t clear_y0;
+  uint32_t clear_x1;
+  uint32_t clear_y1;
 
   if (!g_gl_context || !color_buffer) {
     return;
@@ -260,15 +264,43 @@ static void cpu_clear_color_buffer(GX2ColorBuffer *color_buffer) {
   }
 
   image = (uint8_t *)surface->image;
+  clear_x0 = 0;
+  clear_y0 = 0;
+  clear_x1 = surface->width;
+  clear_y1 = surface->height;
+
+  if (g_gl_context->scissor_test_enabled) {
+    int64_t scissor_x0 = g_gl_context->scissor.x;
+    int64_t scissor_y0 = g_gl_context->scissor.y;
+    int64_t scissor_x1 = scissor_x0 + (int64_t)g_gl_context->scissor.width;
+    int64_t scissor_y1 = scissor_y0 + (int64_t)g_gl_context->scissor.height;
+
+    if (scissor_x0 > (int64_t)clear_x0) {
+      clear_x0 = (uint32_t)scissor_x0;
+    }
+    if (scissor_y0 > (int64_t)clear_y0) {
+      clear_y0 = (uint32_t)scissor_y0;
+    }
+    if (scissor_x1 < (int64_t)clear_x1) {
+      clear_x1 = scissor_x1 <= 0 ? 0u : (uint32_t)scissor_x1;
+    }
+    if (scissor_y1 < (int64_t)clear_y1) {
+      clear_y1 = scissor_y1 <= 0 ? 0u : (uint32_t)scissor_y1;
+    }
+  }
+
+  if (clear_x1 <= clear_x0 || clear_y1 <= clear_y0) {
+    return;
+  }
 
   switch (surface->format) {
   case GX2_SURFACE_FORMAT_UNORM_R8: {
     uint8_t clear_r =
         (uint8_t)(g_gl_context->clear_color[0] * 255.0f + 0.5f);
     row_bytes = surface->pitch;
-    for (uint32_t y = 0; y < surface->height; ++y) {
+    for (uint32_t y = clear_y0; y < clear_y1; ++y) {
       uint8_t *row = image + y * row_bytes;
-      for (uint32_t x = 0; x < surface->width; ++x) {
+      for (uint32_t x = clear_x0; x < clear_x1; ++x) {
         if (g_gl_context->color_mask[0]) {
           row[x] = clear_r;
         }
@@ -282,9 +314,9 @@ static void cpu_clear_color_buffer(GX2ColorBuffer *color_buffer) {
     uint8_t clear_g =
         (uint8_t)(g_gl_context->clear_color[1] * 255.0f + 0.5f);
     row_bytes = surface->pitch * 2u;
-    for (uint32_t y = 0; y < surface->height; ++y) {
+    for (uint32_t y = clear_y0; y < clear_y1; ++y) {
       uint8_t *row = image + y * row_bytes;
-      for (uint32_t x = 0; x < surface->width; ++x) {
+      for (uint32_t x = clear_x0; x < clear_x1; ++x) {
         uint8_t *pixel = row + x * 2u;
         if (g_gl_context->color_mask[0]) {
           pixel[0] = clear_r;
@@ -303,9 +335,9 @@ static void cpu_clear_color_buffer(GX2ColorBuffer *color_buffer) {
         (uint8_t)(g_gl_context->clear_color[2] * 255.0f + 0.5f),
         (uint8_t)(g_gl_context->clear_color[3] * 255.0f + 0.5f)};
     row_bytes = surface->pitch * 4u;
-    for (uint32_t y = 0; y < surface->height; ++y) {
+    for (uint32_t y = clear_y0; y < clear_y1; ++y) {
       uint8_t *row = image + y * row_bytes;
-      for (uint32_t x = 0; x < surface->width; ++x) {
+      for (uint32_t x = clear_x0; x < clear_x1; ++x) {
         uint8_t *pixel = row + x * 4u;
         for (uint32_t c = 0; c < 4; ++c) {
           if (g_gl_context->color_mask[c]) {
@@ -323,9 +355,9 @@ static void cpu_clear_color_buffer(GX2ColorBuffer *color_buffer) {
         CPU_TO_GPU_16(float_to_half(g_gl_context->clear_color[2])),
         CPU_TO_GPU_16(float_to_half(g_gl_context->clear_color[3]))};
     row_bytes = surface->pitch * 8u;
-    for (uint32_t y = 0; y < surface->height; ++y) {
+    for (uint32_t y = clear_y0; y < clear_y1; ++y) {
       uint16_t *row = (uint16_t *)(image + y * row_bytes);
-      for (uint32_t x = 0; x < surface->width; ++x) {
+      for (uint32_t x = clear_x0; x < clear_x1; ++x) {
         uint16_t *pixel = row + x * 4u;
         for (uint32_t c = 0; c < 4; ++c) {
           if (g_gl_context->color_mask[c]) {
@@ -341,9 +373,9 @@ static void cpu_clear_color_buffer(GX2ColorBuffer *color_buffer) {
     memcpy(&clear_r_bits, &g_gl_context->clear_color[0], sizeof(clear_r_bits));
     clear_r_bits = CPU_TO_GPU_32(clear_r_bits);
     row_bytes = surface->pitch * 4u;
-    for (uint32_t y = 0; y < surface->height; ++y) {
+    for (uint32_t y = clear_y0; y < clear_y1; ++y) {
       uint32_t *row = (uint32_t *)(image + y * row_bytes);
-      for (uint32_t x = 0; x < surface->width; ++x) {
+      for (uint32_t x = clear_x0; x < clear_x1; ++x) {
         if (g_gl_context->color_mask[0]) {
           row[x] = clear_r_bits;
         }
@@ -359,9 +391,9 @@ static void cpu_clear_color_buffer(GX2ColorBuffer *color_buffer) {
              sizeof(clear_rgba[c]));
       clear_rgba[c] = CPU_TO_GPU_32(clear_rgba[c]);
     }
-    for (uint32_t y = 0; y < surface->height; ++y) {
+    for (uint32_t y = clear_y0; y < clear_y1; ++y) {
       uint32_t *row = (uint32_t *)(image + y * row_bytes);
-      for (uint32_t x = 0; x < surface->width; ++x) {
+      for (uint32_t x = clear_x0; x < clear_x1; ++x) {
         uint32_t *pixel = row + x * 4u;
         for (uint32_t c = 0; c < 4; ++c) {
           if (g_gl_context->color_mask[c]) {
