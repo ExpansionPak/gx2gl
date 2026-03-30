@@ -377,9 +377,7 @@ static void cpu_clear_color_buffer(GX2ColorBuffer *color_buffer) {
   }
 
   DCFlushRange(image, surface->imageSize);
-  GX2Invalidate((GX2InvalidateMode)(GX2_INVALIDATE_MODE_CPU_TEXTURE |
-                                    GX2_INVALIDATE_MODE_COLOR_BUFFER),
-                image, surface->imageSize);
+  GX2Invalidate(GX2_INVALIDATE_MODE_CPU_TEXTURE, image, surface->imageSize);
 }
 
 void _gl_ClearColor(GLclampf red, GLclampf green, GLclampf blue,
@@ -498,6 +496,9 @@ void _gl_Enable(GLenum cap) {
     g_gl_context->scissor_test_enabled = GL_TRUE;
     g_gl_context->dirty_flags |= GL_DIRTY_SCISSOR;
     break;
+  case GL_SAMPLE_COVERAGE:
+    g_gl_context->sample_coverage_enabled = GL_TRUE;
+    break;
   case GL_POLYGON_OFFSET_POINT:
     g_gl_context->polygon_offset_point_enabled = GL_TRUE;
     g_gl_context->dirty_flags |= GL_DIRTY_POLYGON_MODE;
@@ -540,6 +541,9 @@ void _gl_Disable(GLenum cap) {
     g_gl_context->scissor_test_enabled = GL_FALSE;
     g_gl_context->dirty_flags |= GL_DIRTY_SCISSOR;
     break;
+  case GL_SAMPLE_COVERAGE:
+    g_gl_context->sample_coverage_enabled = GL_FALSE;
+    break;
   case GL_POLYGON_OFFSET_POINT:
     g_gl_context->polygon_offset_point_enabled = GL_FALSE;
     g_gl_context->dirty_flags |= GL_DIRTY_POLYGON_MODE;
@@ -574,6 +578,8 @@ GLboolean _gl_IsEnabled(GLenum cap) {
     return g_gl_context->cull_face_enabled;
   case GL_SCISSOR_TEST:
     return g_gl_context->scissor_test_enabled;
+  case GL_SAMPLE_COVERAGE:
+    return g_gl_context->sample_coverage_enabled;
   case GL_POLYGON_OFFSET_POINT:
     return g_gl_context->polygon_offset_point_enabled;
   case GL_POLYGON_OFFSET_LINE:
@@ -842,6 +848,125 @@ void _gl_LineWidth(GLfloat width) {
   g_gl_context->dirty_flags |= GL_DIRTY_LINE_WIDTH;
 }
 
+void _gl_Hint(GLenum target, GLenum mode) {
+  if (!g_gl_context) {
+    return;
+  }
+  if (target != GL_GENERATE_MIPMAP_HINT) {
+    _gl_set_error(GL_INVALID_ENUM);
+    return;
+  }
+  if (mode != GL_DONT_CARE && mode != GL_FASTEST && mode != GL_NICEST) {
+    _gl_set_error(GL_INVALID_ENUM);
+    return;
+  }
+  g_gl_context->generate_mipmap_hint = mode;
+}
+
+void _gl_SampleCoverage(GLclampf value, GLboolean invert) {
+  if (!g_gl_context) {
+    return;
+  }
+  g_gl_context->sample_coverage_value = clamp_float(value, 0.0f, 1.0f);
+  g_gl_context->sample_coverage_invert = invert ? GL_TRUE : GL_FALSE;
+}
+
+void _gl_PixelStorei(GLenum pname, GLint param) {
+  if (!g_gl_context) {
+    return;
+  }
+
+  switch (pname) {
+  case GL_PACK_ALIGNMENT:
+    if (param != 1 && param != 2 && param != 4 && param != 8) {
+      _gl_set_error(GL_INVALID_VALUE);
+      return;
+    }
+    g_gl_context->pack_alignment = param;
+    return;
+  case GL_UNPACK_ALIGNMENT:
+    if (param != 1 && param != 2 && param != 4 && param != 8) {
+      _gl_set_error(GL_INVALID_VALUE);
+      return;
+    }
+    g_gl_context->unpack_alignment = param;
+    return;
+  case GL_PACK_ROW_LENGTH:
+    if (param < 0) {
+      _gl_set_error(GL_INVALID_VALUE);
+      return;
+    }
+    g_gl_context->pack_row_length = param;
+    return;
+  case GL_PACK_SKIP_ROWS:
+    if (param < 0) {
+      _gl_set_error(GL_INVALID_VALUE);
+      return;
+    }
+    g_gl_context->pack_skip_rows = param;
+    return;
+  case GL_PACK_SKIP_PIXELS:
+    if (param < 0) {
+      _gl_set_error(GL_INVALID_VALUE);
+      return;
+    }
+    g_gl_context->pack_skip_pixels = param;
+    return;
+  case GL_PACK_IMAGE_HEIGHT:
+    if (param < 0) {
+      _gl_set_error(GL_INVALID_VALUE);
+      return;
+    }
+    g_gl_context->pack_image_height = param;
+    return;
+  case GL_PACK_SKIP_IMAGES:
+    if (param < 0) {
+      _gl_set_error(GL_INVALID_VALUE);
+      return;
+    }
+    g_gl_context->pack_skip_images = param;
+    return;
+  case GL_UNPACK_ROW_LENGTH:
+    if (param < 0) {
+      _gl_set_error(GL_INVALID_VALUE);
+      return;
+    }
+    g_gl_context->unpack_row_length = param;
+    return;
+  case GL_UNPACK_SKIP_ROWS:
+    if (param < 0) {
+      _gl_set_error(GL_INVALID_VALUE);
+      return;
+    }
+    g_gl_context->unpack_skip_rows = param;
+    return;
+  case GL_UNPACK_SKIP_PIXELS:
+    if (param < 0) {
+      _gl_set_error(GL_INVALID_VALUE);
+      return;
+    }
+    g_gl_context->unpack_skip_pixels = param;
+    return;
+  case GL_UNPACK_IMAGE_HEIGHT:
+    if (param < 0) {
+      _gl_set_error(GL_INVALID_VALUE);
+      return;
+    }
+    g_gl_context->unpack_image_height = param;
+    return;
+  case GL_UNPACK_SKIP_IMAGES:
+    if (param < 0) {
+      _gl_set_error(GL_INVALID_VALUE);
+      return;
+    }
+    g_gl_context->unpack_skip_images = param;
+    return;
+  default:
+    _gl_set_error(GL_INVALID_ENUM);
+    return;
+  }
+}
+
 void gl_flush_state(void) {
   if (!g_gl_context || !g_gl_context->dirty_flags)
     return;
@@ -850,9 +975,8 @@ void gl_flush_state(void) {
 
   if (g_gl_context->dirty_flags & GL_DIRTY_BLEND) {
     for (uint32_t rt = 0; rt < 8; ++rt) {
-      GX2BlendControlReg blendReg;
-      GX2InitBlendControlReg(
-          &blendReg, (GX2RenderTarget)rt,
+      GX2SetBlendControl(
+          (GX2RenderTarget)rt,
           (GX2BlendMode)map_blend_factor(g_gl_context->blend_src_rgb, &ignored),
           (GX2BlendMode)map_blend_factor(g_gl_context->blend_dst_rgb, &ignored),
           (GX2BlendCombineMode)map_blend_eq(g_gl_context->blend_eq_rgb, &ignored),
@@ -860,7 +984,6 @@ void gl_flush_state(void) {
           (GX2BlendMode)map_blend_factor(g_gl_context->blend_src_alpha, &ignored),
           (GX2BlendMode)map_blend_factor(g_gl_context->blend_dst_alpha, &ignored),
           (GX2BlendCombineMode)map_blend_eq(g_gl_context->blend_eq_alpha, &ignored));
-      GX2SetBlendControlReg(&blendReg);
     }
 
     GX2SetBlendConstantColor(g_gl_context->blend_color[0],

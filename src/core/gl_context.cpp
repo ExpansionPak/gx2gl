@@ -21,7 +21,7 @@ extern "C" {
 
 gl_context_t *g_gl_context = NULL;
 
-// Stub functions for dispatch table
+// Default no-op dispatch
 static void _gl_stub_void() {}
 static void _gl_stub_gen(GLsizei n, GLuint *ids) {
   (void)n;
@@ -83,6 +83,8 @@ static void gl_context_init_defaults(gl_context_t *ctx) {
   ctx->depth_mask = GL_TRUE;
   ctx->viewport.near_z = 0.0f;
   ctx->viewport.far_z = 1.0f;
+  ctx->pack_alignment = 4;
+  ctx->unpack_alignment = 4;
   ctx->stencil_compare_mask[0] = 0xFFu;
   ctx->stencil_compare_mask[1] = 0xFFu;
   ctx->stencil_write_mask[0] = 0xFFu;
@@ -107,6 +109,12 @@ static void gl_context_init_defaults(gl_context_t *ctx) {
   ctx->color_mask[2] = GL_TRUE;
   ctx->color_mask[3] = GL_TRUE;
   ctx->line_width = 1.0f;
+  for (uint32_t i = 0; i < GL33_MAX_VERTEX_ATTRIBS; ++i) {
+    ctx->current_vertex_attrib[i][0] = 0.0f;
+    ctx->current_vertex_attrib[i][1] = 0.0f;
+    ctx->current_vertex_attrib[i][2] = 0.0f;
+    ctx->current_vertex_attrib[i][3] = 1.0f;
+  }
   ctx->clear_color[0] = 0.0f;
   ctx->clear_color[1] = 0.0f;
   ctx->clear_color[2] = 0.0f;
@@ -118,9 +126,13 @@ static void gl_context_init_defaults(gl_context_t *ctx) {
   ctx->stencil_test_enabled = GL_FALSE;
   ctx->cull_face_enabled = GL_FALSE;
   ctx->scissor_test_enabled = GL_FALSE;
+  ctx->sample_coverage_enabled = GL_FALSE;
   ctx->polygon_offset_point_enabled = GL_FALSE;
   ctx->polygon_offset_line_enabled = GL_FALSE;
   ctx->polygon_offset_fill_enabled = GL_FALSE;
+  ctx->sample_coverage_invert = GL_FALSE;
+  ctx->sample_coverage_value = 1.0f;
+  ctx->generate_mipmap_hint = GL_DONT_CARE;
 
   tv_color = WHBGfxGetTVColourBuffer();
   if (tv_color) {
@@ -169,7 +181,7 @@ GLenum glGetError(void) {
 }
 
 gl_context_t *gl_context_create(void) {
-  // Allocate context from MEM2
+  // Allocate context storage
   gl_context_t *ctx =
       (gl_context_t *)gl_mem_alloc(GL_MEM_TYPE_MEM2, sizeof(gl_context_t), 4);
   if (!ctx)
@@ -185,14 +197,17 @@ gl_context_t *gl_context_create(void) {
   gl_vao_init();
   gl_framebuffer_init();
 
-  // Populate dispatch table with stubs
+  // Wire core dispatch
   ctx->dispatch.glGenBuffers = _gl_GenBuffers;
   ctx->dispatch.glDeleteBuffers = _gl_DeleteBuffers;
+  ctx->dispatch.glIsBuffer = _gl_IsBuffer;
   ctx->dispatch.glBindBuffer = _gl_BindBuffer;
   ctx->dispatch.glBindBufferBase = _gl_BindBufferBase;
   ctx->dispatch.glBindBufferRange = _gl_BindBufferRange;
   ctx->dispatch.glBufferData = _gl_BufferData;
   ctx->dispatch.glBufferSubData = _gl_BufferSubData;
+  ctx->dispatch.glGetBufferParameteriv = _gl_GetBufferParameteriv;
+  ctx->dispatch.glGetBufferPointerv = _gl_GetBufferPointerv;
   ctx->dispatch.glMapBuffer = _gl_MapBuffer;
   ctx->dispatch.glMapBufferRange = _gl_MapBufferRange;
   ctx->dispatch.glUnmapBuffer = _gl_UnmapBuffer;
@@ -204,24 +219,48 @@ gl_context_t *gl_context_create(void) {
   ctx->dispatch.glClear = _gl_Clear;
   ctx->dispatch.glGenTextures = _gl_GenTextures;
   ctx->dispatch.glDeleteTextures = _gl_DeleteTextures;
+  ctx->dispatch.glIsTexture = _gl_IsTexture;
+  ctx->dispatch.glGenSamplers = _gl_GenSamplers;
+  ctx->dispatch.glDeleteSamplers = _gl_DeleteSamplers;
+  ctx->dispatch.glIsSampler = _gl_IsSampler;
   ctx->dispatch.glBindTexture = _gl_BindTexture;
+  ctx->dispatch.glBindSampler = _gl_BindSampler;
   ctx->dispatch.glActiveTexture = _gl_ActiveTexture;
   ctx->dispatch.glTexImage2D = _gl_TexImage2D;
   ctx->dispatch.glTexImage3D = _gl_TexImage3D;
   ctx->dispatch.glTexSubImage2D = _gl_TexSubImage2D;
   ctx->dispatch.glTexSubImage3D = _gl_TexSubImage3D;
   ctx->dispatch.glTexParameteri = _gl_TexParameteri;
+  ctx->dispatch.glTexParameterf = _gl_TexParameterf;
+  ctx->dispatch.glTexParameteriv = _gl_TexParameteriv;
+  ctx->dispatch.glTexParameterfv = _gl_TexParameterfv;
+  ctx->dispatch.glGetTexParameteriv = _gl_GetTexParameteriv;
+  ctx->dispatch.glGetTexParameterfv = _gl_GetTexParameterfv;
+  ctx->dispatch.glSamplerParameteriv = _gl_SamplerParameteriv;
+  ctx->dispatch.glSamplerParameterfv = _gl_SamplerParameterfv;
+  ctx->dispatch.glSamplerParameteri = _gl_SamplerParameteri;
+  ctx->dispatch.glSamplerParameterf = _gl_SamplerParameterf;
+  ctx->dispatch.glGetSamplerParameteriv = _gl_GetSamplerParameteriv;
+  ctx->dispatch.glGetSamplerParameterfv = _gl_GetSamplerParameterfv;
   ctx->dispatch.glGenerateMipmap = _gl_GenerateMipmap;
   
   ctx->dispatch.glCreateShader = _gl_CreateShader;
   ctx->dispatch.glDeleteShader = _gl_DeleteShader;
+  ctx->dispatch.glIsShader = _gl_IsShader;
   ctx->dispatch.glShaderSource = _gl_ShaderSource;
+  ctx->dispatch.glGetShaderSource = _gl_GetShaderSource;
   ctx->dispatch.glCompileShader = _gl_CompileShader;
   ctx->dispatch.glCreateProgram = _gl_CreateProgram;
   ctx->dispatch.glDeleteProgram = _gl_DeleteProgram;
+  ctx->dispatch.glIsProgram = _gl_IsProgram;
   ctx->dispatch.glAttachShader = _gl_AttachShader;
   ctx->dispatch.glDetachShader = _gl_DetachShader;
+  ctx->dispatch.glBindAttribLocation = _gl_BindAttribLocation;
+  ctx->dispatch.glGetAttachedShaders = _gl_GetAttachedShaders;
+  ctx->dispatch.glGetActiveAttrib = _gl_GetActiveAttrib;
+  ctx->dispatch.glGetActiveUniform = _gl_GetActiveUniform;
   ctx->dispatch.glLinkProgram = _gl_LinkProgram;
+  ctx->dispatch.glValidateProgram = _gl_ValidateProgram;
   ctx->dispatch.glUseProgram = _gl_UseProgram;
   ctx->dispatch.glGetShaderiv = _gl_GetShaderiv;
   ctx->dispatch.glGetProgramiv = _gl_GetProgramiv;
@@ -246,16 +285,30 @@ gl_context_t *gl_context_create(void) {
   
   ctx->dispatch.glGenVertexArrays = _gl_GenVertexArrays;
   ctx->dispatch.glDeleteVertexArrays = _gl_DeleteVertexArrays;
+  ctx->dispatch.glIsVertexArray = _gl_IsVertexArray;
   ctx->dispatch.glBindVertexArray = _gl_BindVertexArray;
   ctx->dispatch.glEnableVertexAttribArray = _gl_EnableVertexAttribArray;
   ctx->dispatch.glDisableVertexAttribArray = _gl_DisableVertexAttribArray;
+  ctx->dispatch.glGetVertexAttribiv = _gl_GetVertexAttribiv;
+  ctx->dispatch.glGetVertexAttribPointerv = _gl_GetVertexAttribPointerv;
   ctx->dispatch.glVertexAttribPointer = _gl_VertexAttribPointer;
   ctx->dispatch.glVertexAttribDivisor = _gl_VertexAttribDivisor;
 
   ctx->dispatch.glGenFramebuffers = _gl_GenFramebuffers;
   ctx->dispatch.glDeleteFramebuffers = _gl_DeleteFramebuffers;
+  ctx->dispatch.glIsFramebuffer = _gl_IsFramebuffer;
+  ctx->dispatch.glGenRenderbuffers = _gl_GenRenderbuffers;
+  ctx->dispatch.glDeleteRenderbuffers = _gl_DeleteRenderbuffers;
+  ctx->dispatch.glIsRenderbuffer = _gl_IsRenderbuffer;
   ctx->dispatch.glBindFramebuffer = _gl_BindFramebuffer;
+  ctx->dispatch.glBindRenderbuffer = _gl_BindRenderbuffer;
+  ctx->dispatch.glCheckFramebufferStatus = _gl_CheckFramebufferStatus;
   ctx->dispatch.glFramebufferTexture2D = _gl_FramebufferTexture2D;
+  ctx->dispatch.glFramebufferRenderbuffer = _gl_FramebufferRenderbuffer;
+  ctx->dispatch.glRenderbufferStorage = _gl_RenderbufferStorage;
+  ctx->dispatch.glGetRenderbufferParameteriv = _gl_GetRenderbufferParameteriv;
+  ctx->dispatch.glGetFramebufferAttachmentParameteriv =
+      _gl_GetFramebufferAttachmentParameteriv;
   ctx->dispatch.glDrawBuffer = _gl_DrawBuffer;
   ctx->dispatch.glDrawBuffers = _gl_DrawBuffers;
   ctx->dispatch.glReadBuffer = _gl_ReadBuffer;
@@ -266,7 +319,7 @@ gl_context_t *gl_context_create(void) {
   ctx->dispatch.glDrawElements = _gl_DrawElements;
   ctx->dispatch.glDrawElementsInstanced = _gl_DrawElementsInstanced;
 
-  // State Pointers
+  // Wire state dispatch
   ctx->dispatch.glEnable = _gl_Enable;
   ctx->dispatch.glDisable = _gl_Disable;
   ctx->dispatch.glBlendFunc = _gl_BlendFunc;
@@ -291,8 +344,10 @@ gl_context_t *gl_context_create(void) {
   ctx->dispatch.glScissor = _gl_Scissor;
   ctx->dispatch.glColorMask = _gl_ColorMask;
   ctx->dispatch.glLineWidth = _gl_LineWidth;
+  ctx->dispatch.glPixelStorei = _gl_PixelStorei;
   
   ctx->dispatch.glGetString = _gl_GetString;
+  ctx->dispatch.glGetStringi = _gl_GetStringi;
   ctx->dispatch.glGetBooleanv = _gl_GetBooleanv;
   ctx->dispatch.glGetDoublev = _gl_GetDoublev;
   ctx->dispatch.glGetIntegerv = _gl_GetIntegerv;
@@ -307,7 +362,7 @@ void gl_context_destroy(gl_context_t *ctx) {
   gl_mem_free(GL_MEM_TYPE_MEM2, ctx);
 }
 
-// Public entry points for dispatched functions
+// Public API wrappers
 void glGenBuffers(GLsizei n, GLuint *buffers) {
   if (g_gl_context)
     g_gl_context->dispatch.glGenBuffers(n, buffers);
@@ -315,6 +370,9 @@ void glGenBuffers(GLsizei n, GLuint *buffers) {
 void glDeleteBuffers(GLsizei n, const GLuint *buffers) {
   if (g_gl_context)
     g_gl_context->dispatch.glDeleteBuffers(n, buffers);
+}
+GLboolean glIsBuffer(GLuint buffer) {
+  return g_gl_context ? g_gl_context->dispatch.glIsBuffer(buffer) : GL_FALSE;
 }
 void glBindBuffer(GLenum target, GLuint buffer) {
   if (g_gl_context)
@@ -337,6 +395,14 @@ void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const GLvo
   if (g_gl_context)
     g_gl_context->dispatch.glBufferSubData(target, offset, size, data);
 }
+void glGetBufferParameteriv(GLenum target, GLenum pname, GLint *params) {
+  if (g_gl_context)
+    g_gl_context->dispatch.glGetBufferParameteriv(target, pname, params);
+}
+void glGetBufferPointerv(GLenum target, GLenum pname, GLvoid **params) {
+  if (g_gl_context)
+    g_gl_context->dispatch.glGetBufferPointerv(target, pname, params);
+}
 void* glMapBuffer(GLenum target, GLenum access) {
   return g_gl_context ? g_gl_context->dispatch.glMapBuffer(target, access) : NULL;
 }
@@ -354,6 +420,7 @@ void glClearDepth(GLclampd depth) {
   if (g_gl_context)
     g_gl_context->dispatch.glClearDepth(depth);
 }
+void glClearDepthf(GLclampf depth) { glClearDepth((GLclampd)depth); }
 void glClearStencil(GLint s) {
   if (g_gl_context)
     g_gl_context->dispatch.glClearStencil(s);
@@ -364,38 +431,73 @@ void glClear(GLbitfield mask) {
 }
 void glGenTextures(GLsizei n, GLuint *textures) { if(g_gl_context) g_gl_context->dispatch.glGenTextures(n, textures); }
 void glDeleteTextures(GLsizei n, const GLuint *textures) { if(g_gl_context) g_gl_context->dispatch.glDeleteTextures(n, textures); }
+GLboolean glIsTexture(GLuint texture) { return g_gl_context ? g_gl_context->dispatch.glIsTexture(texture) : GL_FALSE; }
+void glGenSamplers(GLsizei n, GLuint *samplers) { if(g_gl_context) g_gl_context->dispatch.glGenSamplers(n, samplers); }
+void glDeleteSamplers(GLsizei n, const GLuint *samplers) { if(g_gl_context) g_gl_context->dispatch.glDeleteSamplers(n, samplers); }
+GLboolean glIsSampler(GLuint sampler) { return g_gl_context ? g_gl_context->dispatch.glIsSampler(sampler) : GL_FALSE; }
 void glBindTexture(GLenum target, GLuint texture) { if(g_gl_context) g_gl_context->dispatch.glBindTexture(target, texture); }
+void glBindSampler(GLuint unit, GLuint sampler) { if(g_gl_context) g_gl_context->dispatch.glBindSampler(unit, sampler); }
 void glActiveTexture(GLenum texture) { if(g_gl_context) g_gl_context->dispatch.glActiveTexture(texture); }
 void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const GLvoid *pixels) { if(g_gl_context) g_gl_context->dispatch.glTexImage2D(target, level, internalformat, width, height, border, format, type, pixels); }
 void glTexImage3D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLsizei depth, GLint border, GLenum format, GLenum type, const GLvoid *pixels) { if(g_gl_context) g_gl_context->dispatch.glTexImage3D(target, level, internalformat, width, height, depth, border, format, type, pixels); }
 void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLenum type, const GLvoid *pixels) { if(g_gl_context) g_gl_context->dispatch.glTexSubImage2D(target, level, xoffset, yoffset, width, height, format, type, pixels); }
 void glTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, const GLvoid *pixels) { if(g_gl_context) g_gl_context->dispatch.glTexSubImage3D(target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, pixels); }
 void glTexParameteri(GLenum target, GLenum pname, GLint param) { if(g_gl_context) g_gl_context->dispatch.glTexParameteri(target, pname, param); }
+void glTexParameterf(GLenum target, GLenum pname, GLfloat param) { if(g_gl_context) g_gl_context->dispatch.glTexParameterf(target, pname, param); }
+void glTexParameteriv(GLenum target, GLenum pname, const GLint *params) { if(g_gl_context) g_gl_context->dispatch.glTexParameteriv(target, pname, params); }
+void glTexParameterfv(GLenum target, GLenum pname, const GLfloat *params) { if(g_gl_context) g_gl_context->dispatch.glTexParameterfv(target, pname, params); }
+void glGetTexParameteriv(GLenum target, GLenum pname, GLint *params) { if(g_gl_context) g_gl_context->dispatch.glGetTexParameteriv(target, pname, params); }
+void glGetTexParameterfv(GLenum target, GLenum pname, GLfloat *params) { if(g_gl_context) g_gl_context->dispatch.glGetTexParameterfv(target, pname, params); }
+void glSamplerParameteriv(GLuint sampler, GLenum pname, const GLint *param) { if(g_gl_context) g_gl_context->dispatch.glSamplerParameteriv(sampler, pname, param); }
+void glSamplerParameterfv(GLuint sampler, GLenum pname, const GLfloat *param) { if(g_gl_context) g_gl_context->dispatch.glSamplerParameterfv(sampler, pname, param); }
+void glSamplerParameteri(GLuint sampler, GLenum pname, GLint param) { if(g_gl_context) g_gl_context->dispatch.glSamplerParameteri(sampler, pname, param); }
+void glSamplerParameterf(GLuint sampler, GLenum pname, GLfloat param) { if(g_gl_context) g_gl_context->dispatch.glSamplerParameterf(sampler, pname, param); }
+void glGetSamplerParameteriv(GLuint sampler, GLenum pname, GLint *params) { if(g_gl_context) g_gl_context->dispatch.glGetSamplerParameteriv(sampler, pname, params); }
+void glGetSamplerParameterfv(GLuint sampler, GLenum pname, GLfloat *params) { if(g_gl_context) g_gl_context->dispatch.glGetSamplerParameterfv(sampler, pname, params); }
 void glGenerateMipmap(GLenum target) { if(g_gl_context) g_gl_context->dispatch.glGenerateMipmap(target); }
 
 GLuint glCreateShader(GLenum type) { return g_gl_context ? g_gl_context->dispatch.glCreateShader(type) : 0; }
 void glDeleteShader(GLuint shader) { if(g_gl_context) g_gl_context->dispatch.glDeleteShader(shader); }
+GLboolean glIsShader(GLuint shader) { return g_gl_context ? g_gl_context->dispatch.glIsShader(shader) : GL_FALSE; }
 void glShaderSource(GLuint shader, GLsizei count, const GLchar *const *string, const GLint *length) { if(g_gl_context) g_gl_context->dispatch.glShaderSource(shader, count, string, length); }
+void glGetShaderSource(GLuint shader, GLsizei bufSize, GLsizei *length, GLchar *source) { if(g_gl_context) g_gl_context->dispatch.glGetShaderSource(shader, bufSize, length, source); }
 void glCompileShader(GLuint shader) { if(g_gl_context) g_gl_context->dispatch.glCompileShader(shader); }
 GLuint glCreateProgram(void) { return g_gl_context ? g_gl_context->dispatch.glCreateProgram() : 0; }
 void glDeleteProgram(GLuint program) { if(g_gl_context) g_gl_context->dispatch.glDeleteProgram(program); }
+GLboolean glIsProgram(GLuint program) { return g_gl_context ? g_gl_context->dispatch.glIsProgram(program) : GL_FALSE; }
 void glAttachShader(GLuint program, GLuint shader) { if(g_gl_context) g_gl_context->dispatch.glAttachShader(program, shader); }
 void glDetachShader(GLuint program, GLuint shader) { if(g_gl_context) g_gl_context->dispatch.glDetachShader(program, shader); }
+void glBindAttribLocation(GLuint program, GLuint index, const GLchar *name) { if(g_gl_context) g_gl_context->dispatch.glBindAttribLocation(program, index, name); }
+void glGetAttachedShaders(GLuint program, GLsizei maxCount, GLsizei *count, GLuint *shaders) { if(g_gl_context) g_gl_context->dispatch.glGetAttachedShaders(program, maxCount, count, shaders); }
+void glGetActiveAttrib(GLuint program, GLuint index, GLsizei bufSize, GLsizei *length, GLint *size, GLenum *type, GLchar *name) { if(g_gl_context) g_gl_context->dispatch.glGetActiveAttrib(program, index, bufSize, length, size, type, name); }
+void glGetActiveUniform(GLuint program, GLuint index, GLsizei bufSize, GLsizei *length, GLint *size, GLenum *type, GLchar *name) { if(g_gl_context) g_gl_context->dispatch.glGetActiveUniform(program, index, bufSize, length, size, type, name); }
 void glLinkProgram(GLuint program) { if(g_gl_context) g_gl_context->dispatch.glLinkProgram(program); }
+void glValidateProgram(GLuint program) { if(g_gl_context) g_gl_context->dispatch.glValidateProgram(program); }
 void glUseProgram(GLuint program) { if(g_gl_context) g_gl_context->dispatch.glUseProgram(program); }
 void glGetShaderiv(GLuint shader, GLenum pname, GLint *params) { if(g_gl_context) g_gl_context->dispatch.glGetShaderiv(shader, pname, params); }
 void glGetProgramiv(GLuint program, GLenum pname, GLint *params) { if(g_gl_context) g_gl_context->dispatch.glGetProgramiv(program, pname, params); }
 void glGetShaderInfoLog(GLuint shader, GLsizei maxLength, GLsizei *length, GLchar *infoLog) { if(g_gl_context) g_gl_context->dispatch.glGetShaderInfoLog(shader, maxLength, length, infoLog); }
 void glGetProgramInfoLog(GLuint program, GLsizei maxLength, GLsizei *length, GLchar *infoLog) { if(g_gl_context) g_gl_context->dispatch.glGetProgramInfoLog(program, maxLength, length, infoLog); }
+void glGetUniformfv(GLuint program, GLint location, GLfloat *params) { if(g_gl_context) _gl_GetUniformfv(program, location, params); }
+void glGetUniformiv(GLuint program, GLint location, GLint *params) { if(g_gl_context) _gl_GetUniformiv(program, location, params); }
 void glUniform1f(GLint location, GLfloat v0) { if(g_gl_context) g_gl_context->dispatch.glUniform1f(location, v0); }
 void glUniform1fv(GLint location, GLsizei count, const GLfloat *value) { if(g_gl_context) g_gl_context->dispatch.glUniform1fv(location, count, value); }
 void glUniform1i(GLint location, GLint v0) { if(g_gl_context) g_gl_context->dispatch.glUniform1i(location, v0); }
+void glUniform1iv(GLint location, GLsizei count, const GLint *value) { if(g_gl_context) _gl_Uniform1iv(location, count, value); }
 void glUniform2f(GLint location, GLfloat v0, GLfloat v1) { if(g_gl_context) g_gl_context->dispatch.glUniform2f(location, v0, v1); }
 void glUniform2fv(GLint location, GLsizei count, const GLfloat *value) { if(g_gl_context) g_gl_context->dispatch.glUniform2fv(location, count, value); }
+void glUniform2i(GLint location, GLint v0, GLint v1) { if(g_gl_context) _gl_Uniform2i(location, v0, v1); }
+void glUniform2iv(GLint location, GLsizei count, const GLint *value) { if(g_gl_context) _gl_Uniform2iv(location, count, value); }
 void glUniform3f(GLint location, GLfloat v0, GLfloat v1, GLfloat v2) { if(g_gl_context) g_gl_context->dispatch.glUniform3f(location, v0, v1, v2); }
 void glUniform3fv(GLint location, GLsizei count, const GLfloat *value) { if(g_gl_context) g_gl_context->dispatch.glUniform3fv(location, count, value); }
+void glUniform3i(GLint location, GLint v0, GLint v1, GLint v2) { if(g_gl_context) _gl_Uniform3i(location, v0, v1, v2); }
+void glUniform3iv(GLint location, GLsizei count, const GLint *value) { if(g_gl_context) _gl_Uniform3iv(location, count, value); }
 void glUniform4f(GLint location, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3) { if(g_gl_context) g_gl_context->dispatch.glUniform4f(location, v0, v1, v2, v3); }
 void glUniform4fv(GLint location, GLsizei count, const GLfloat *value) { if(g_gl_context) g_gl_context->dispatch.glUniform4fv(location, count, value); }
+void glUniform4i(GLint location, GLint v0, GLint v1, GLint v2, GLint v3) { if(g_gl_context) _gl_Uniform4i(location, v0, v1, v2, v3); }
+void glUniform4iv(GLint location, GLsizei count, const GLint *value) { if(g_gl_context) _gl_Uniform4iv(location, count, value); }
+void glUniformMatrix2fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value) { _gl_UniformMatrix2fv(location, count, transpose, value); }
+void glUniformMatrix3fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value) { _gl_UniformMatrix3fv(location, count, transpose, value); }
 void glUniformMatrix4fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value) { if(g_gl_context) g_gl_context->dispatch.glUniformMatrix4fv(location, count, transpose, value); }
 GLint glGetUniformLocation(GLuint program, const GLchar *name) { return g_gl_context ? g_gl_context->dispatch.glGetUniformLocation(program, name) : -1; }
 GLint glGetAttribLocation(GLuint program, const GLchar *name) { return g_gl_context ? g_gl_context->dispatch.glGetAttribLocation(program, name) : -1; }
@@ -406,16 +508,38 @@ void glWiiULoadShaderGroupGFD(GLuint program, GLuint index, const void* gfdData)
 
 void glGenVertexArrays(GLsizei n, GLuint *arrays) { if(g_gl_context) g_gl_context->dispatch.glGenVertexArrays(n, arrays); }
 void glDeleteVertexArrays(GLsizei n, const GLuint *arrays) { if(g_gl_context) g_gl_context->dispatch.glDeleteVertexArrays(n, arrays); }
+GLboolean glIsVertexArray(GLuint array) { return g_gl_context ? g_gl_context->dispatch.glIsVertexArray(array) : GL_FALSE; }
 void glBindVertexArray(GLuint array) { if(g_gl_context) g_gl_context->dispatch.glBindVertexArray(array); }
 void glEnableVertexAttribArray(GLuint index) { if(g_gl_context) g_gl_context->dispatch.glEnableVertexAttribArray(index); }
 void glDisableVertexAttribArray(GLuint index) { if(g_gl_context) g_gl_context->dispatch.glDisableVertexAttribArray(index); }
+void glGetVertexAttribfv(GLuint index, GLenum pname, GLfloat *params) { if(g_gl_context) _gl_GetVertexAttribfv(index, pname, params); }
+void glGetVertexAttribiv(GLuint index, GLenum pname, GLint *params) { if(g_gl_context) g_gl_context->dispatch.glGetVertexAttribiv(index, pname, params); }
+void glGetVertexAttribPointerv(GLuint index, GLenum pname, GLvoid **pointer) { if(g_gl_context) g_gl_context->dispatch.glGetVertexAttribPointerv(index, pname, pointer); }
+void glVertexAttrib1f(GLuint index, GLfloat x) { if(g_gl_context) _gl_VertexAttrib1f(index, x); }
+void glVertexAttrib1fv(GLuint index, const GLfloat *v) { if(g_gl_context) _gl_VertexAttrib1fv(index, v); }
+void glVertexAttrib2f(GLuint index, GLfloat x, GLfloat y) { if(g_gl_context) _gl_VertexAttrib2f(index, x, y); }
+void glVertexAttrib2fv(GLuint index, const GLfloat *v) { if(g_gl_context) _gl_VertexAttrib2fv(index, v); }
+void glVertexAttrib3f(GLuint index, GLfloat x, GLfloat y, GLfloat z) { if(g_gl_context) _gl_VertexAttrib3f(index, x, y, z); }
+void glVertexAttrib3fv(GLuint index, const GLfloat *v) { if(g_gl_context) _gl_VertexAttrib3fv(index, v); }
+void glVertexAttrib4f(GLuint index, GLfloat x, GLfloat y, GLfloat z, GLfloat w) { if(g_gl_context) _gl_VertexAttrib4f(index, x, y, z, w); }
+void glVertexAttrib4fv(GLuint index, const GLfloat *v) { if(g_gl_context) _gl_VertexAttrib4fv(index, v); }
 void glVertexAttribPointer(GLuint index, GLint size, GLenum type, GLboolean normalized, GLsizei stride, const GLvoid *pointer) { if(g_gl_context) g_gl_context->dispatch.glVertexAttribPointer(index, size, type, normalized, stride, pointer); }
 void glVertexAttribDivisor(GLuint index, GLuint divisor) { if(g_gl_context) g_gl_context->dispatch.glVertexAttribDivisor(index, divisor); }
 
 void glGenFramebuffers(GLsizei n, GLuint *framebuffers) { if(g_gl_context) g_gl_context->dispatch.glGenFramebuffers(n, framebuffers); }
 void glDeleteFramebuffers(GLsizei n, const GLuint *framebuffers) { if(g_gl_context) g_gl_context->dispatch.glDeleteFramebuffers(n, framebuffers); }
+GLboolean glIsFramebuffer(GLuint framebuffer) { return g_gl_context ? g_gl_context->dispatch.glIsFramebuffer(framebuffer) : GL_FALSE; }
+void glGenRenderbuffers(GLsizei n, GLuint *renderbuffers) { if(g_gl_context) g_gl_context->dispatch.glGenRenderbuffers(n, renderbuffers); }
+void glDeleteRenderbuffers(GLsizei n, const GLuint *renderbuffers) { if(g_gl_context) g_gl_context->dispatch.glDeleteRenderbuffers(n, renderbuffers); }
+GLboolean glIsRenderbuffer(GLuint renderbuffer) { return g_gl_context ? g_gl_context->dispatch.glIsRenderbuffer(renderbuffer) : GL_FALSE; }
 void glBindFramebuffer(GLenum target, GLuint framebuffer) { if(g_gl_context) g_gl_context->dispatch.glBindFramebuffer(target, framebuffer); }
+void glBindRenderbuffer(GLenum target, GLuint renderbuffer) { if(g_gl_context) g_gl_context->dispatch.glBindRenderbuffer(target, renderbuffer); }
+GLenum glCheckFramebufferStatus(GLenum target) { return g_gl_context ? g_gl_context->dispatch.glCheckFramebufferStatus(target) : GL_FRAMEBUFFER_UNSUPPORTED; }
 void glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level) { if(g_gl_context) g_gl_context->dispatch.glFramebufferTexture2D(target, attachment, textarget, texture, level); }
+void glFramebufferRenderbuffer(GLenum target, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer) { if(g_gl_context) g_gl_context->dispatch.glFramebufferRenderbuffer(target, attachment, renderbuffertarget, renderbuffer); }
+void glRenderbufferStorage(GLenum target, GLenum internalformat, GLsizei width, GLsizei height) { if(g_gl_context) g_gl_context->dispatch.glRenderbufferStorage(target, internalformat, width, height); }
+void glGetRenderbufferParameteriv(GLenum target, GLenum pname, GLint *params) { if(g_gl_context) g_gl_context->dispatch.glGetRenderbufferParameteriv(target, pname, params); }
+void glGetFramebufferAttachmentParameteriv(GLenum target, GLenum attachment, GLenum pname, GLint *params) { if(g_gl_context) g_gl_context->dispatch.glGetFramebufferAttachmentParameteriv(target, attachment, pname, params); }
 void glDrawBuffer(GLenum buf) { if(g_gl_context) g_gl_context->dispatch.glDrawBuffer(buf); }
 void glDrawBuffers(GLsizei n, const GLenum *bufs) { if(g_gl_context) g_gl_context->dispatch.glDrawBuffers(n, bufs); }
 void glReadBuffer(GLenum src) { if(g_gl_context) g_gl_context->dispatch.glReadBuffer(src); }
@@ -493,6 +617,9 @@ void glDepthRange(GLclampd nearVal, GLclampd farVal) {
   if (g_gl_context)
     g_gl_context->dispatch.glDepthRange(nearVal, farVal);
 }
+void glDepthRangef(GLclampf nearVal, GLclampf farVal) {
+  glDepthRange((GLclampd)nearVal, (GLclampd)farVal);
+}
 void glStencilFunc(GLenum func, GLint ref, GLuint mask) {
   if (g_gl_context)
     g_gl_context->dispatch.glStencilFunc(func, ref, mask);
@@ -551,9 +678,21 @@ void glLineWidth(GLfloat width) {
   if (g_gl_context)
     g_gl_context->dispatch.glLineWidth(width);
 }
+void glHint(GLenum target, GLenum mode) { _gl_Hint(target, mode); }
+void glSampleCoverage(GLclampf value, GLboolean invert) {
+  _gl_SampleCoverage(value, invert);
+}
+void glPixelStorei(GLenum pname, GLint param) {
+  if (g_gl_context)
+    g_gl_context->dispatch.glPixelStorei(pname, param);
+}
 
 const GLubyte *glGetString(GLenum name) {
     return g_gl_context ? g_gl_context->dispatch.glGetString(name) : NULL;
+}
+
+const GLubyte *glGetStringi(GLenum name, GLuint index) {
+    return g_gl_context ? g_gl_context->dispatch.glGetStringi(name, index) : NULL;
 }
 
 void glGetBooleanv(GLenum pname, GLboolean *data) {
@@ -574,6 +713,46 @@ void glGetIntegerv(GLenum pname, GLint *data) {
 void glGetFloatv(GLenum pname, GLfloat *data) {
     if (g_gl_context)
         g_gl_context->dispatch.glGetFloatv(pname, data);
+}
+
+void glReleaseShaderCompiler(void) { _gl_ReleaseShaderCompiler(); }
+
+void glShaderBinary(GLsizei count, const GLuint *shaders, GLenum binaryFormat,
+                    const GLvoid *binary, GLsizei length) {
+  _gl_ShaderBinary(count, shaders, binaryFormat, binary, length);
+}
+
+void glGetShaderPrecisionFormat(GLenum shadertype, GLenum precisiontype,
+                                GLint *range, GLint *precision) {
+  _gl_GetShaderPrecisionFormat(shadertype, precisiontype, range, precision);
+}
+
+void glCompressedTexImage2D(GLenum target, GLint level, GLenum internalformat,
+                            GLsizei width, GLsizei height, GLint border,
+                            GLsizei imageSize, const GLvoid *data) {
+  _gl_CompressedTexImage2D(target, level, internalformat, width, height,
+                           border, imageSize, data);
+}
+
+void glCopyTexImage2D(GLenum target, GLint level, GLenum internalformat,
+                      GLint x, GLint y, GLsizei width, GLsizei height,
+                      GLint border) {
+  _gl_CopyTexImage2D(target, level, internalformat, x, y, width, height,
+                     border);
+}
+
+void glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset,
+                         GLint yoffset, GLint x, GLint y, GLsizei width,
+                         GLsizei height) {
+  _gl_CopyTexSubImage2D(target, level, xoffset, yoffset, x, y, width, height);
+}
+
+void glCompressedTexSubImage2D(GLenum target, GLint level, GLint xoffset,
+                               GLint yoffset, GLsizei width, GLsizei height,
+                               GLenum format, GLsizei imageSize,
+                               const GLvoid *data) {
+  _gl_CompressedTexSubImage2D(target, level, xoffset, yoffset, width, height,
+                              format, imageSize, data);
 }
 
 #ifdef __cplusplus

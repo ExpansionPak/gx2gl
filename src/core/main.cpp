@@ -4,23 +4,21 @@
 #include "mem/gl_mem.h"
 
 int main(int argc, char **argv) {
-    /* Initialize Wii U Homebrew help procedures */
+    // Start process hooks
     WHBProcInit();
 
-    /* Initialize Custom Memory Allocators */
+    // Init heap pools
     gl_mem_init();
 
-    /* Initialize GX2 with default attributes */
+    // Start GX2 core
     GX2Init(NULL);
 
-    /* Main Loop */
+    // Wait for exit
     while (WHBProcIsRunning()) {
-        /*
-         *   PHASE 9 - Draw calls will go here
-         */
+        // Pump system loop
     }
 
-    /* Shutdown Procedure */
+    // Shut things down
     GX2Shutdown();
     gl_mem_shutdown();
     WHBProcShutdown();

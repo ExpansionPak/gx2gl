@@ -11,11 +11,14 @@ extern "C" {
 typedef struct {
     void (*glGenBuffers)(GLsizei, GLuint*);
     void (*glDeleteBuffers)(GLsizei, const GLuint*);
+    GLboolean (*glIsBuffer)(GLuint);
     void (*glBindBuffer)(GLenum, GLuint);
     void (*glBindBufferBase)(GLenum, GLuint, GLuint);
     void (*glBindBufferRange)(GLenum, GLuint, GLuint, GLintptr, GLsizeiptr);
     void (*glBufferData)(GLenum, GLsizeiptr, const GLvoid*, GLenum);
     void (*glBufferSubData)(GLenum, GLintptr, GLsizeiptr, const GLvoid*);
+    void (*glGetBufferParameteriv)(GLenum, GLenum, GLint *);
+    void (*glGetBufferPointerv)(GLenum, GLenum, GLvoid **);
     void (*glEnable)(GLenum);
     void (*glDisable)(GLenum);
     GLboolean (*glIsEnabled)(GLenum);
@@ -31,6 +34,7 @@ typedef struct {
     void (*glGetIntegerv)(GLenum, GLint*);
     void (*glGetFloatv)(GLenum, GLfloat*);
     const GLubyte* (*glGetString)(GLenum);
+    const GLubyte* (*glGetStringi)(GLenum, GLuint);
     
     void* (*glMapBuffer)(GLenum, GLenum);
     void* (*glMapBufferRange)(GLenum, GLintptr, GLsizeiptr, GLbitfield);
@@ -38,24 +42,50 @@ typedef struct {
     
     void (*glGenTextures)(GLsizei, GLuint*);
     void (*glDeleteTextures)(GLsizei, const GLuint*);
+    GLboolean (*glIsTexture)(GLuint);
+    void (*glGenSamplers)(GLsizei, GLuint*);
+    void (*glDeleteSamplers)(GLsizei, const GLuint*);
+    GLboolean (*glIsSampler)(GLuint);
     void (*glBindTexture)(GLenum, GLuint);
+    void (*glBindSampler)(GLuint, GLuint);
     void (*glActiveTexture)(GLenum);
     void (*glTexImage2D)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const GLvoid*);
     void (*glTexImage3D)(GLenum, GLint, GLint, GLsizei, GLsizei, GLsizei, GLint, GLenum, GLenum, const GLvoid*);
     void (*glTexSubImage2D)(GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, const GLvoid*);
     void (*glTexSubImage3D)(GLenum, GLint, GLint, GLint, GLint, GLsizei, GLsizei, GLsizei, GLenum, GLenum, const GLvoid*);
     void (*glTexParameteri)(GLenum, GLenum, GLint);
+    void (*glTexParameterf)(GLenum, GLenum, GLfloat);
+    void (*glTexParameteriv)(GLenum, GLenum, const GLint *);
+    void (*glTexParameterfv)(GLenum, GLenum, const GLfloat *);
+    void (*glGetTexParameteriv)(GLenum, GLenum, GLint *);
+    void (*glGetTexParameterfv)(GLenum, GLenum, GLfloat *);
+    void (*glSamplerParameteriv)(GLuint, GLenum, const GLint *);
+    void (*glSamplerParameterfv)(GLuint, GLenum, const GLfloat *);
+    void (*glSamplerParameteri)(GLuint, GLenum, GLint);
+    void (*glSamplerParameterf)(GLuint, GLenum, GLfloat);
+    void (*glGetSamplerParameteriv)(GLuint, GLenum, GLint *);
+    void (*glGetSamplerParameterfv)(GLuint, GLenum, GLfloat *);
     void (*glGenerateMipmap)(GLenum);
     
     GLuint (*glCreateShader)(GLenum);
     void (*glDeleteShader)(GLuint);
+    GLboolean (*glIsShader)(GLuint);
     void (*glShaderSource)(GLuint, GLsizei, const GLchar* const*, const GLint*);
+    void (*glGetShaderSource)(GLuint, GLsizei, GLsizei *, GLchar *);
     void (*glCompileShader)(GLuint);
     GLuint (*glCreateProgram)(void);
     void (*glDeleteProgram)(GLuint);
+    GLboolean (*glIsProgram)(GLuint);
     void (*glAttachShader)(GLuint, GLuint);
     void (*glDetachShader)(GLuint, GLuint);
+    void (*glBindAttribLocation)(GLuint, GLuint, const GLchar *);
+    void (*glGetAttachedShaders)(GLuint, GLsizei, GLsizei *, GLuint *);
+    void (*glGetActiveAttrib)(GLuint, GLuint, GLsizei, GLsizei *, GLint *,
+                              GLenum *, GLchar *);
+    void (*glGetActiveUniform)(GLuint, GLuint, GLsizei, GLsizei *, GLint *,
+                               GLenum *, GLchar *);
     void (*glLinkProgram)(GLuint);
+    void (*glValidateProgram)(GLuint);
     void (*glUseProgram)(GLuint);
     void (*glGetShaderiv)(GLuint, GLenum, GLint *);
     void (*glGetProgramiv)(GLuint, GLenum, GLint *);
@@ -80,16 +110,30 @@ typedef struct {
     
     void (*glGenVertexArrays)(GLsizei, GLuint*);
     void (*glDeleteVertexArrays)(GLsizei, const GLuint*);
+    GLboolean (*glIsVertexArray)(GLuint);
     void (*glBindVertexArray)(GLuint);
     void (*glEnableVertexAttribArray)(GLuint);
     void (*glDisableVertexAttribArray)(GLuint);
+    void (*glGetVertexAttribiv)(GLuint, GLenum, GLint *);
+    void (*glGetVertexAttribPointerv)(GLuint, GLenum, GLvoid **);
     void (*glVertexAttribPointer)(GLuint, GLint, GLenum, GLboolean, GLsizei, const GLvoid*);
     void (*glVertexAttribDivisor)(GLuint, GLuint);
     
     void (*glGenFramebuffers)(GLsizei, GLuint*);
     void (*glDeleteFramebuffers)(GLsizei, const GLuint*);
+    GLboolean (*glIsFramebuffer)(GLuint);
+    void (*glGenRenderbuffers)(GLsizei, GLuint*);
+    void (*glDeleteRenderbuffers)(GLsizei, const GLuint*);
+    GLboolean (*glIsRenderbuffer)(GLuint);
     void (*glBindFramebuffer)(GLenum, GLuint);
+    void (*glBindRenderbuffer)(GLenum, GLuint);
+    GLenum (*glCheckFramebufferStatus)(GLenum);
     void (*glFramebufferTexture2D)(GLenum, GLenum, GLenum, GLuint, GLint);
+    void (*glFramebufferRenderbuffer)(GLenum, GLenum, GLenum, GLuint);
+    void (*glRenderbufferStorage)(GLenum, GLenum, GLsizei, GLsizei);
+    void (*glGetRenderbufferParameteriv)(GLenum, GLenum, GLint *);
+    void (*glGetFramebufferAttachmentParameteriv)(GLenum, GLenum, GLenum,
+                                                  GLint *);
     void (*glDrawBuffer)(GLenum);
     void (*glDrawBuffers)(GLsizei, const GLenum*);
     void (*glReadBuffer)(GLenum);
@@ -118,6 +162,7 @@ typedef struct {
     void (*glScissor)(GLint, GLint, GLsizei, GLsizei);
     void (*glColorMask)(GLboolean, GLboolean, GLboolean, GLboolean);
     void (*glLineWidth)(GLfloat);
+    void (*glPixelStorei)(GLenum, GLint);
     void (*glGetBooleanv)(GLenum, GLboolean *);
     void (*glGetDoublev)(GLenum, GLdouble *);
 } gl_dispatch_t;
@@ -138,6 +183,7 @@ typedef struct {
 #define GL_DIRTY_UNIFORM_BINDINGS (1 << 13)
 
 #define GL_ERROR_QUEUE_SIZE 8
+#define GL33_MAX_VERTEX_ATTRIBS 16
 #define GL33_MAX_UNIFORM_BUFFER_BINDINGS 36
 
 typedef struct {
@@ -157,6 +203,8 @@ typedef struct {
     GLuint bound_texture_2d[32];
     GLuint bound_texture_3d[32];
     GLuint bound_texture_cube[32];
+    GLuint bound_sampler[32];
+    GLuint bound_renderbuffer;
     
     GLuint bound_framebuffer;
     GLuint bound_read_framebuffer;
@@ -174,6 +222,20 @@ typedef struct {
         GLsizei width, height;
     } scissor;
 
+    GLint pack_alignment;
+    GLint pack_row_length;
+    GLint pack_skip_rows;
+    GLint pack_skip_pixels;
+    GLint pack_image_height;
+    GLint pack_skip_images;
+
+    GLint unpack_alignment;
+    GLint unpack_row_length;
+    GLint unpack_skip_rows;
+    GLint unpack_skip_pixels;
+    GLint unpack_image_height;
+    GLint unpack_skip_images;
+
     GLenum blend_src_rgb, blend_dst_rgb, blend_src_alpha, blend_dst_alpha;
     GLenum blend_eq_rgb, blend_eq_alpha;
     GLfloat blend_color[4];
@@ -190,6 +252,7 @@ typedef struct {
     GLfloat polygon_offset_units;
     GLboolean color_mask[4];
     GLfloat line_width;
+    GLfloat current_vertex_attrib[GL33_MAX_VERTEX_ATTRIBS][4];
     GLfloat clear_color[4];
     GLfloat clear_depth;
     GLint clear_stencil;
@@ -199,9 +262,13 @@ typedef struct {
     GLboolean blend_enabled;
     GLboolean cull_face_enabled;
     GLboolean scissor_test_enabled;
+    GLboolean sample_coverage_enabled;
     GLboolean polygon_offset_point_enabled;
     GLboolean polygon_offset_line_enabled;
     GLboolean polygon_offset_fill_enabled;
+    GLboolean sample_coverage_invert;
+    GLfloat sample_coverage_value;
+    GLenum generate_mipmap_hint;
     GLenum error;
 
     GLenum error_queue[GL_ERROR_QUEUE_SIZE];
@@ -220,6 +287,7 @@ void gl_context_destroy(gl_context_t *ctx);
 
 void _gl_set_error(GLenum error);
 const GLubyte* _gl_GetString(GLenum name);
+const GLubyte* _gl_GetStringi(GLenum name, GLuint index);
 void _gl_GetBooleanv(GLenum pname, GLboolean *params);
 void _gl_GetDoublev(GLenum pname, GLdouble *params);
 void _gl_GetIntegerv(GLenum pname, GLint *params);
@@ -229,4 +297,4 @@ void _gl_GetFloatv(GLenum pname, GLfloat *params);
 }
 #endif
 
-#endif /* GL33_CONTEXT_H */
+#endif // Context header guard

@@ -9,14 +9,14 @@ void gl_mem_init(void) {
     uint32_t mem1_start = 0, mem1_end = 0;
     uint32_t mem2_start = 0, mem2_end = 0;
 
-    /* Get MEM1 bounds (type 1) */
+    // Grab MEM1 bounds
     OSGetMemBound(OS_MEM1, &mem1_start, &mem1_end);
     if (mem1_start != 0 && mem1_end != 0) {
         uint32_t size = mem1_end - mem1_start;
         mem1_heap = MEMCreateExpHeapEx((void*)mem1_start, size, 0);
     }
 
-    /* Get MEM2 bounds (type 2) */
+    // Grab MEM2 bounds
     OSGetMemBound(OS_MEM2, &mem2_start, &mem2_end);
     if (mem2_start != 0 && mem2_end != 0) {
         uint32_t size = mem2_end - mem2_start;

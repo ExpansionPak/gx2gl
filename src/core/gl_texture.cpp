@@ -1,5 +1,6 @@
 #include "gl_texture.h"
 #include "gl_context.h"
+#include "gl_framebuffer.h"
 #include "state/gl_state.h"
 #include "endian/endian.h"
 #include "mem/gl_mem.h"
@@ -21,6 +22,7 @@ extern "C" {
 #endif
 
 #define MAX_TEXTURES 2048
+#define MAX_SAMPLER_OBJECTS 512
 
 typedef struct {
   GX2Texture gx2_texture;
@@ -65,6 +67,18 @@ typedef struct {
 } TextureLevelLayout;
 
 static GLTexture g_textures[MAX_TEXTURES];
+
+typedef struct {
+  GX2Sampler gx2_sampler;
+  bool in_use;
+  GLenum min_filter;
+  GLenum mag_filter;
+  GLenum wrap_s;
+  GLenum wrap_t;
+  GLenum wrap_r;
+} GLSampler;
+
+static GLSampler g_samplers[MAX_SAMPLER_OBJECTS];
 
 static uint32_t min_u32(uint32_t a, uint32_t b) { return a < b ? a : b; }
 
@@ -183,6 +197,57 @@ static bool get_texture_format_info(GLint internalformat, GLenum format,
   memset(info, 0, sizeof(*info));
 
   switch (internalformat) {
+  case GL_ALPHA:
+    info->gx2_format = GX2_SURFACE_FORMAT_UNORM_R8;
+    info->surface_use =
+        (GX2SurfaceUse)(GX2_SURFACE_USE_TEXTURE | GX2_SURFACE_USE_COLOR_BUFFER);
+    info->comp_map =
+        GX2_COMP_MAP(GX2_SQ_SEL_0, GX2_SQ_SEL_0, GX2_SQ_SEL_0, GX2_SQ_SEL_R);
+    info->src_components = 1;
+    info->dst_components = 1;
+    info->bytes_per_component = 1;
+    info->src_bytes_per_texel = 1;
+    info->dst_bytes_per_texel = 1;
+    info->mipmap_supported = true;
+    if (validate_upload &&
+        (format != GL_ALPHA || type != GL_UNSIGNED_BYTE)) {
+      return false;
+    }
+    return true;
+  case GL_LUMINANCE:
+    info->gx2_format = GX2_SURFACE_FORMAT_UNORM_R8;
+    info->surface_use =
+        (GX2SurfaceUse)(GX2_SURFACE_USE_TEXTURE | GX2_SURFACE_USE_COLOR_BUFFER);
+    info->comp_map =
+        GX2_COMP_MAP(GX2_SQ_SEL_R, GX2_SQ_SEL_R, GX2_SQ_SEL_R, GX2_SQ_SEL_1);
+    info->src_components = 1;
+    info->dst_components = 1;
+    info->bytes_per_component = 1;
+    info->src_bytes_per_texel = 1;
+    info->dst_bytes_per_texel = 1;
+    info->mipmap_supported = true;
+    if (validate_upload &&
+        (format != GL_LUMINANCE || type != GL_UNSIGNED_BYTE)) {
+      return false;
+    }
+    return true;
+  case GL_LUMINANCE_ALPHA:
+    info->gx2_format = GX2_SURFACE_FORMAT_UNORM_R8_G8;
+    info->surface_use =
+        (GX2SurfaceUse)(GX2_SURFACE_USE_TEXTURE | GX2_SURFACE_USE_COLOR_BUFFER);
+    info->comp_map =
+        GX2_COMP_MAP(GX2_SQ_SEL_R, GX2_SQ_SEL_R, GX2_SQ_SEL_R, GX2_SQ_SEL_G);
+    info->src_components = 2;
+    info->dst_components = 2;
+    info->bytes_per_component = 1;
+    info->src_bytes_per_texel = 2;
+    info->dst_bytes_per_texel = 2;
+    info->mipmap_supported = true;
+    if (validate_upload &&
+        (format != GL_LUMINANCE_ALPHA || type != GL_UNSIGNED_BYTE)) {
+      return false;
+    }
+    return true;
   case 1:
   case GL_RED:
   case GL_R8:
@@ -394,14 +459,27 @@ static uint8_t *get_texture_level_ptr(const GLTexture *tex, uint32_t level) {
   return get_texture_level_ptr_from_gx2(&tex->gx2_texture, level);
 }
 
-static void init_texture_sampler(GLTexture *tex) {
-  GX2InitSamplerXYFilter(&tex->gx2_sampler, map_xy_filter(tex->mag_filter),
-                         map_xy_filter(tex->min_filter),
+static void init_sampler_state(GX2Sampler *sampler, GLenum min_filter,
+                               GLenum mag_filter, GLenum wrap_s,
+                               GLenum wrap_t, GLenum wrap_r) {
+  GX2InitSamplerXYFilter(sampler, map_xy_filter(mag_filter),
+                         map_xy_filter(min_filter),
                          GX2_TEX_ANISO_RATIO_NONE);
-  GX2InitSamplerZMFilter(&tex->gx2_sampler, GX2_TEX_Z_FILTER_MODE_NONE,
-                         map_mip_filter(tex->min_filter));
-  GX2InitSamplerClamping(&tex->gx2_sampler, map_wrap(tex->wrap_s),
-                         map_wrap(tex->wrap_t), map_wrap(tex->wrap_r));
+  GX2InitSamplerZMFilter(sampler, GX2_TEX_Z_FILTER_MODE_NONE,
+                         map_mip_filter(min_filter));
+  GX2InitSamplerClamping(sampler, map_wrap(wrap_s), map_wrap(wrap_t),
+                         map_wrap(wrap_r));
+}
+
+static void init_texture_sampler(GLTexture *tex) {
+  init_sampler_state(&tex->gx2_sampler, tex->min_filter, tex->mag_filter,
+                     tex->wrap_s, tex->wrap_t, tex->wrap_r);
+}
+
+static void init_sampler_object(GLSampler *sampler) {
+  init_sampler_state(&sampler->gx2_sampler, sampler->min_filter,
+                     sampler->mag_filter, sampler->wrap_s, sampler->wrap_t,
+                     sampler->wrap_r);
 }
 
 static bool rebuild_texture_storage(GLTexture *tex, GLsizei width,
@@ -496,6 +574,7 @@ static bool rebuild_texture_storage(GLTexture *tex, GLsizei width,
   tex->max_level = (GLint)(mip_levels - 1);
 
   GX2InitTextureRegs(&tex->gx2_texture);
+  gl_framebuffer_mark_texture_dirty((GLuint)(tex - g_textures));
   return true;
 }
 
@@ -549,6 +628,41 @@ static void copy_texture_row(uint8_t *dst, const uint8_t *src,
   }
 }
 
+static uint32_t align_transfer_row_bytes(uint32_t row_bytes, GLint alignment) {
+  uint32_t align = (uint32_t)alignment;
+  if (align <= 1u) {
+    return row_bytes;
+  }
+  return (row_bytes + align - 1u) & ~(align - 1u);
+}
+
+static bool get_unpack_layout(const TextureFormatInfo *info, GLsizei width,
+                              GLsizei height, uint32_t *row_bytes,
+                              uint32_t *image_bytes, size_t *base_offset) {
+  GLint row_length;
+  GLint image_height;
+
+  if (!g_gl_context || !info || !row_bytes || !image_bytes || !base_offset) {
+    return false;
+  }
+
+  row_length = g_gl_context->unpack_row_length > 0 ? g_gl_context->unpack_row_length
+                                                   : width;
+  image_height = g_gl_context->unpack_image_height > 0
+                     ? g_gl_context->unpack_image_height
+                     : height;
+
+  *row_bytes = align_transfer_row_bytes(
+      (uint32_t)row_length * info->src_bytes_per_texel,
+      g_gl_context->unpack_alignment);
+  *image_bytes = *row_bytes * (uint32_t)image_height;
+  *base_offset =
+      (size_t)g_gl_context->unpack_skip_images * (*image_bytes) +
+      (size_t)g_gl_context->unpack_skip_rows * (*row_bytes) +
+      (size_t)g_gl_context->unpack_skip_pixels * info->src_bytes_per_texel;
+  return true;
+}
+
 static bool upload_texture_level(GLTexture *tex, GLint level, GLsizei width,
                                  GLsizei height, GLsizei depth,
                                  const TextureFormatInfo *info,
@@ -557,7 +671,9 @@ static bool upload_texture_level(GLTexture *tex, GLint level, GLsizei width,
   uint8_t *dst;
   const uint8_t *src;
   uint32_t src_row_bytes;
+  uint32_t src_image_bytes;
   uint32_t dst_row_bytes;
+  size_t src_base_offset;
 
   if (!pixels) {
     return true;
@@ -575,13 +691,16 @@ static bool upload_texture_level(GLTexture *tex, GLint level, GLsizei width,
 
   memset(dst, 0, layout.image_size);
 
-  src = (const uint8_t *)pixels;
-  src_row_bytes = (uint32_t)width * info->src_bytes_per_texel;
+  if (!get_unpack_layout(info, width, height, &src_row_bytes, &src_image_bytes,
+                         &src_base_offset)) {
+    return false;
+  }
+  src = (const uint8_t *)pixels + src_base_offset;
   dst_row_bytes = layout.pitch * info->dst_bytes_per_texel;
 
   for (GLsizei z = 0; z < depth; ++z) {
     uint8_t *dst_slice = dst + (uint32_t)z * layout.slice_size;
-    const uint8_t *src_slice = src + (size_t)z * src_row_bytes * height;
+    const uint8_t *src_slice = src + (size_t)z * src_image_bytes;
     for (GLsizei y = 0; y < height; ++y) {
       copy_texture_row(dst_slice + (uint32_t)y * dst_row_bytes,
                        src_slice + (size_t)y * src_row_bytes, (uint32_t)width,
@@ -604,7 +723,9 @@ static bool upload_texture_sub_region(GLTexture *tex, GLint level,
   uint8_t *dst;
   const uint8_t *src;
   uint32_t src_row_bytes;
+  uint32_t src_image_bytes;
   uint32_t dst_row_bytes;
+  size_t src_base_offset;
 
   if (!pixels) {
     return false;
@@ -625,13 +746,16 @@ static bool upload_texture_sub_region(GLTexture *tex, GLint level,
     return false;
   }
 
-  src = (const uint8_t *)pixels;
-  src_row_bytes = (uint32_t)width * info->src_bytes_per_texel;
+  if (!get_unpack_layout(info, width, height, &src_row_bytes, &src_image_bytes,
+                         &src_base_offset)) {
+    return false;
+  }
+  src = (const uint8_t *)pixels + src_base_offset;
   dst_row_bytes = layout.pitch * info->dst_bytes_per_texel;
 
   for (GLsizei z = 0; z < depth; ++z) {
     uint8_t *dst_slice = dst + (uint32_t)(zoffset + z) * layout.slice_size;
-    const uint8_t *src_slice = src + (size_t)z * src_row_bytes * height;
+    const uint8_t *src_slice = src + (size_t)z * src_image_bytes;
     for (GLsizei y = 0; y < height; ++y) {
       copy_texture_row(
           dst_slice + (uint32_t)(yoffset + y) * dst_row_bytes +
@@ -806,8 +930,132 @@ static GLuint get_bound_tex(GLenum target) {
   }
 }
 
+static bool is_copy_color_format_supported(GLint internalformat,
+                                           const TextureFormatInfo *info) {
+  if (!info || info->bytes_per_component != 1 || info->packed_u32) {
+    return false;
+  }
+
+  switch (internalformat) {
+  case GL_ALPHA:
+  case GL_LUMINANCE:
+  case GL_LUMINANCE_ALPHA:
+  case 1:
+  case GL_RED:
+  case GL_R8:
+  case 2:
+  case GL_RG:
+  case GL_RG8:
+  case 3:
+  case GL_RGB:
+  case GL_RGB8:
+  case 4:
+  case GL_RGBA:
+  case GL_RGBA8:
+    return true;
+  default:
+    return false;
+  }
+}
+
+static bool convert_copy_texels(const uint8_t *src_rgba, GLint internalformat,
+                                const TextureFormatInfo *info,
+                                GLsizei width, GLsizei height,
+                                uint8_t *dst_pixels) {
+  uint32_t texel_count;
+
+  if (!src_rgba || !info || !dst_pixels || width < 0 || height < 0) {
+    return false;
+  }
+
+  texel_count = (uint32_t)width * (uint32_t)height;
+  for (uint32_t i = 0; i < texel_count; ++i) {
+    const uint8_t *src_texel = src_rgba + i * 4u;
+    uint8_t *dst_texel = dst_pixels + i * info->src_bytes_per_texel;
+
+    switch (internalformat) {
+    case GL_ALPHA:
+      dst_texel[0] = src_texel[3];
+      break;
+    case GL_LUMINANCE:
+    case 1:
+    case GL_RED:
+    case GL_R8:
+      dst_texel[0] = src_texel[0];
+      break;
+    case GL_LUMINANCE_ALPHA:
+      dst_texel[0] = src_texel[0];
+      dst_texel[1] = src_texel[3];
+      break;
+    case 2:
+    case GL_RG:
+    case GL_RG8:
+      dst_texel[0] = src_texel[0];
+      dst_texel[1] = src_texel[1];
+      break;
+    case 3:
+    case GL_RGB:
+    case GL_RGB8:
+      dst_texel[0] = src_texel[0];
+      dst_texel[1] = src_texel[1];
+      dst_texel[2] = src_texel[2];
+      break;
+    case 4:
+    case GL_RGBA:
+    case GL_RGBA8:
+      memcpy(dst_texel, src_texel, 4u);
+      break;
+    default:
+      return false;
+    }
+  }
+
+  return true;
+}
+
+static uint8_t *build_copy_upload_pixels(GLint x, GLint y, GLsizei width,
+                                         GLsizei height, GLint internalformat,
+                                         const TextureFormatInfo *info) {
+  size_t texel_count;
+  size_t rgba_size;
+  size_t upload_size;
+  uint8_t *rgba_pixels;
+  uint8_t *upload_pixels;
+
+  if (width == 0 || height == 0) {
+    return NULL;
+  }
+
+  texel_count = (size_t)width * (size_t)height;
+  rgba_size = texel_count * 4u;
+  upload_size = texel_count * info->src_bytes_per_texel;
+  rgba_pixels = (uint8_t *)gl_mem_alloc(GL_MEM_TYPE_MEM2, rgba_size, 64);
+  if (!rgba_pixels) {
+    _gl_set_error(GL_OUT_OF_MEMORY);
+    return NULL;
+  }
+  upload_pixels = (uint8_t *)gl_mem_alloc(GL_MEM_TYPE_MEM2, upload_size, 64);
+  if (!upload_pixels) {
+    gl_mem_free(GL_MEM_TYPE_MEM2, rgba_pixels);
+    _gl_set_error(GL_OUT_OF_MEMORY);
+    return NULL;
+  }
+
+  if (!gl_read_color_pixels_rgba8(x, y, width, height, rgba_pixels) ||
+      !convert_copy_texels(rgba_pixels, internalformat, info, width, height,
+                           upload_pixels)) {
+    gl_mem_free(GL_MEM_TYPE_MEM2, rgba_pixels);
+    gl_mem_free(GL_MEM_TYPE_MEM2, upload_pixels);
+    return NULL;
+  }
+
+  gl_mem_free(GL_MEM_TYPE_MEM2, rgba_pixels);
+  return upload_pixels;
+}
+
 void gl_texture_init(void) {
   memset(g_textures, 0, sizeof(g_textures));
+  memset(g_samplers, 0, sizeof(g_samplers));
 }
 
 void _gl_GenTextures(GLsizei n, GLuint *textures) {
@@ -847,6 +1095,7 @@ void _gl_DeleteTextures(GLsizei n, const GLuint *textures) {
   for (int i = 0; i < n; i++) {
     GLuint id = textures[i];
     if (id > 0 && id < MAX_TEXTURES && g_textures[id].in_use) {
+      gl_framebuffer_mark_texture_dirty(id);
       for (int u = 0; u < 32; u++) {
         if (g_gl_context->bound_texture_2d[u] == id) {
           g_gl_context->bound_texture_2d[u] = 0;
@@ -862,6 +1111,74 @@ void _gl_DeleteTextures(GLsizei n, const GLuint *textures) {
       g_textures[id].in_use = false;
     }
   }
+}
+
+GLboolean _gl_IsTexture(GLuint texture) {
+  return (texture > 0 && texture < MAX_TEXTURES && g_textures[texture].in_use)
+             ? GL_TRUE
+             : GL_FALSE;
+}
+
+void _gl_GenSamplers(GLsizei n, GLuint *samplers) {
+  int generated = 0;
+
+  if (!g_gl_context || n < 0) {
+    if (n < 0) {
+      _gl_set_error(GL_INVALID_VALUE);
+    }
+    return;
+  }
+
+  for (int i = 1; i < MAX_SAMPLER_OBJECTS && generated < n; ++i) {
+    if (!g_samplers[i].in_use) {
+      memset(&g_samplers[i], 0, sizeof(GLSampler));
+      g_samplers[i].in_use = true;
+      g_samplers[i].min_filter = GL_NEAREST_MIPMAP_LINEAR;
+      g_samplers[i].mag_filter = GL_LINEAR;
+      g_samplers[i].wrap_s = GL_REPEAT;
+      g_samplers[i].wrap_t = GL_REPEAT;
+      g_samplers[i].wrap_r = GL_REPEAT;
+      init_sampler_object(&g_samplers[i]);
+      samplers[generated++] = i;
+    }
+  }
+
+  if (generated < n) {
+    _gl_set_error(GL_OUT_OF_MEMORY);
+  }
+}
+
+void _gl_DeleteSamplers(GLsizei n, const GLuint *samplers) {
+  if (!g_gl_context || n < 0) {
+    if (n < 0) {
+      _gl_set_error(GL_INVALID_VALUE);
+    }
+    return;
+  }
+
+  for (int i = 0; i < n; ++i) {
+    GLuint id = samplers[i];
+    if (id == 0 || id >= MAX_SAMPLER_OBJECTS || !g_samplers[id].in_use) {
+      continue;
+    }
+
+    for (int unit = 0; unit < 32; ++unit) {
+      if (g_gl_context->bound_sampler[unit] == id) {
+        g_gl_context->bound_sampler[unit] = 0;
+      }
+    }
+
+    memset(&g_samplers[id], 0, sizeof(GLSampler));
+  }
+}
+
+GLboolean _gl_IsSampler(GLuint sampler) {
+  if (sampler == 0) {
+    return GL_FALSE;
+  }
+  return (sampler < MAX_SAMPLER_OBJECTS && g_samplers[sampler].in_use)
+             ? GL_TRUE
+             : GL_FALSE;
 }
 
 void _gl_BindTexture(GLenum target, GLuint texture) {
@@ -891,6 +1208,24 @@ void _gl_BindTexture(GLenum target, GLuint texture) {
   if (texture > 0) {
     g_textures[texture].target = target;
   }
+  g_gl_context->dirty_flags |= GL_DIRTY_TEXTURE_BINDINGS;
+}
+
+void _gl_BindSampler(GLuint unit, GLuint sampler) {
+  if (!g_gl_context) {
+    return;
+  }
+  if (unit >= 32) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+  if (sampler >= MAX_SAMPLER_OBJECTS ||
+      (sampler > 0 && !g_samplers[sampler].in_use)) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+
+  g_gl_context->bound_sampler[unit] = sampler;
   g_gl_context->dirty_flags |= GL_DIRTY_TEXTURE_BINDINGS;
 }
 
@@ -1161,6 +1496,256 @@ void _gl_TexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
   g_gl_context->dirty_flags |= GL_DIRTY_TEXTURE_BINDINGS;
 }
 
+void _gl_CopyTexImage2D(GLenum target, GLint level, GLenum internalformat,
+                        GLint x, GLint y, GLsizei width, GLsizei height,
+                        GLint border) {
+  GLuint id;
+  GLTexture *tex;
+  TextureFormatInfo info;
+  GLsizei expected_width;
+  GLsizei expected_height;
+  uint8_t *upload_pixels = NULL;
+
+  if (!g_gl_context) {
+    return;
+  }
+  if (target != GL_TEXTURE_2D) {
+    _gl_set_error(GL_INVALID_ENUM);
+    return;
+  }
+
+  id = get_bound_tex(target);
+  if (!id) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
+  if (level < 0 || x < 0 || y < 0 || width < 0 || height < 0 || border != 0) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+  if (!get_texture_format_info(internalformat, GL_RGBA, GL_UNSIGNED_BYTE, false,
+                               &info) ||
+      !is_copy_color_format_supported(internalformat, &info)) {
+    _gl_set_error(GL_INVALID_ENUM);
+    return;
+  }
+
+  tex = &g_textures[id];
+  if (level > 0) {
+    if (!tex->storage_allocated || tex->internal_format != internalformat) {
+      _gl_set_error(GL_INVALID_OPERATION);
+      return;
+    }
+
+    expected_width = tex->width >> level;
+    expected_height = tex->height >> level;
+    if (expected_width < 1) {
+      expected_width = 1;
+    }
+    if (expected_height < 1) {
+      expected_height = 1;
+    }
+    if (width != expected_width || height != expected_height) {
+      _gl_set_error(GL_INVALID_VALUE);
+      return;
+    }
+  }
+
+  upload_pixels =
+      build_copy_upload_pixels(x, y, width, height, internalformat, &info);
+  if ((width > 0 && height > 0) && !upload_pixels) {
+    return;
+  }
+
+  if (level == 0) {
+    if (!rebuild_texture_storage(tex, width, height, 1, internalformat, 1,
+                                 false)) {
+      if (upload_pixels) {
+        gl_mem_free(GL_MEM_TYPE_MEM2, upload_pixels);
+      }
+      _gl_set_error(GL_OUT_OF_MEMORY);
+      return;
+    }
+  } else if ((uint32_t)(level + 1) > tex->gx2_texture.surface.mipLevels &&
+             !rebuild_texture_storage(tex, tex->width, tex->height, tex->depth,
+                                      tex->internal_format,
+                                      (uint32_t)(level + 1), true)) {
+    if (upload_pixels) {
+      gl_mem_free(GL_MEM_TYPE_MEM2, upload_pixels);
+    }
+    _gl_set_error(GL_OUT_OF_MEMORY);
+    return;
+  }
+
+  if (upload_pixels &&
+      !upload_texture_level(tex, level, width, height, 1, &info,
+                            upload_pixels)) {
+    gl_mem_free(GL_MEM_TYPE_MEM2, upload_pixels);
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
+
+  if (upload_pixels) {
+    gl_mem_free(GL_MEM_TYPE_MEM2, upload_pixels);
+  }
+  tex->complete = true;
+  g_gl_context->dirty_flags |= GL_DIRTY_TEXTURE_BINDINGS;
+}
+
+void _gl_CopyTexSubImage2D(GLenum target, GLint level, GLint xoffset,
+                           GLint yoffset, GLint x, GLint y, GLsizei width,
+                           GLsizei height) {
+  GLuint id;
+  GLTexture *tex;
+  TextureFormatInfo info;
+  uint8_t *upload_pixels = NULL;
+
+  if (!g_gl_context) {
+    return;
+  }
+  if (target != GL_TEXTURE_2D) {
+    _gl_set_error(GL_INVALID_ENUM);
+    return;
+  }
+
+  id = get_bound_tex(target);
+  if (!id) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
+  if (level < 0 || xoffset < 0 || yoffset < 0 || x < 0 || y < 0 ||
+      width < 0 || height < 0) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+
+  tex = &g_textures[id];
+  if (!tex->storage_allocated || !tex->complete) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
+  if ((uint32_t)level >= tex->gx2_texture.surface.mipLevels) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+  if (!get_texture_format_info(tex->internal_format, GL_RGBA,
+                               GL_UNSIGNED_BYTE, false, &info) ||
+      !is_copy_color_format_supported(tex->internal_format, &info)) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
+  if (width == 0 || height == 0) {
+    return;
+  }
+
+  upload_pixels =
+      build_copy_upload_pixels(x, y, width, height, tex->internal_format,
+                               &info);
+  if (!upload_pixels) {
+    return;
+  }
+
+  if (!upload_texture_sub_region(tex, level, xoffset, yoffset, 0, width,
+                                 height, 1, &info, upload_pixels)) {
+    gl_mem_free(GL_MEM_TYPE_MEM2, upload_pixels);
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+
+  gl_mem_free(GL_MEM_TYPE_MEM2, upload_pixels);
+  g_gl_context->dirty_flags |= GL_DIRTY_TEXTURE_BINDINGS;
+}
+
+void _gl_CompressedTexImage2D(GLenum target, GLint level, GLenum internalformat,
+                              GLsizei width, GLsizei height, GLint border,
+                              GLsizei imageSize, const GLvoid *data) {
+  (void)internalformat;
+  (void)data;
+
+  if (!g_gl_context) {
+    return;
+  }
+  if (target != GL_TEXTURE_2D) {
+    _gl_set_error(GL_INVALID_ENUM);
+    return;
+  }
+  if (level < 0 || width < 0 || height < 0 || border != 0 || imageSize < 0) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+  if (!get_bound_tex(target)) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
+  _gl_set_error(GL_INVALID_ENUM);
+}
+
+void _gl_CompressedTexSubImage2D(GLenum target, GLint level, GLint xoffset,
+                                 GLint yoffset, GLsizei width, GLsizei height,
+                                 GLenum format, GLsizei imageSize,
+                                 const GLvoid *data) {
+  (void)format;
+  (void)data;
+
+  if (!g_gl_context) {
+    return;
+  }
+  if (target != GL_TEXTURE_2D) {
+    _gl_set_error(GL_INVALID_ENUM);
+    return;
+  }
+  if (level < 0 || xoffset < 0 || yoffset < 0 || width < 0 || height < 0 ||
+      imageSize < 0) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+  if (!get_bound_tex(target)) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
+  _gl_set_error(GL_INVALID_ENUM);
+}
+
+static bool apply_sampler_parameter(GLenum pname, GLint param,
+                                    GLenum *min_filter, GLenum *mag_filter,
+                                    GLenum *wrap_s, GLenum *wrap_t,
+                                    GLenum *wrap_r) {
+  switch (pname) {
+  case GL_TEXTURE_MIN_FILTER:
+    if (!is_valid_min_filter(param)) {
+      return false;
+    }
+    *min_filter = param;
+    return true;
+  case GL_TEXTURE_MAG_FILTER:
+    if (!is_valid_mag_filter(param)) {
+      return false;
+    }
+    *mag_filter = param;
+    return true;
+  case GL_TEXTURE_WRAP_S:
+    if (!is_valid_wrap_mode(param)) {
+      return false;
+    }
+    *wrap_s = param;
+    return true;
+  case GL_TEXTURE_WRAP_T:
+    if (!is_valid_wrap_mode(param)) {
+      return false;
+    }
+    *wrap_t = param;
+    return true;
+  case GL_TEXTURE_WRAP_R:
+    if (!is_valid_wrap_mode(param)) {
+      return false;
+    }
+    *wrap_r = param;
+    return true;
+  default:
+    return false;
+  }
+}
+
 void _gl_TexParameteri(GLenum target, GLenum pname, GLint param) {
   if (!g_gl_context) {
     return;
@@ -1176,49 +1761,237 @@ void _gl_TexParameteri(GLenum target, GLenum pname, GLint param) {
   }
   GLTexture *tex = &g_textures[id];
 
-  switch (pname) {
-  case GL_TEXTURE_MIN_FILTER:
-    if (!is_valid_min_filter(param)) {
-      _gl_set_error(GL_INVALID_ENUM);
-      return;
-    }
-    tex->min_filter = param;
-    break;
-  case GL_TEXTURE_MAG_FILTER:
-    if (!is_valid_mag_filter(param)) {
-      _gl_set_error(GL_INVALID_ENUM);
-      return;
-    }
-    tex->mag_filter = param;
-    break;
-  case GL_TEXTURE_WRAP_S:
-    if (!is_valid_wrap_mode(param)) {
-      _gl_set_error(GL_INVALID_ENUM);
-      return;
-    }
-    tex->wrap_s = param;
-    break;
-  case GL_TEXTURE_WRAP_T:
-    if (!is_valid_wrap_mode(param)) {
-      _gl_set_error(GL_INVALID_ENUM);
-      return;
-    }
-    tex->wrap_t = param;
-    break;
-  case GL_TEXTURE_WRAP_R:
-    if (!is_valid_wrap_mode(param)) {
-      _gl_set_error(GL_INVALID_ENUM);
-      return;
-    }
-    tex->wrap_r = param;
-    break;
-  default:
+  if (!apply_sampler_parameter(pname, param, &tex->min_filter, &tex->mag_filter,
+                               &tex->wrap_s, &tex->wrap_t, &tex->wrap_r)) {
     _gl_set_error(GL_INVALID_ENUM);
     return;
   }
 
   init_texture_sampler(tex);
   g_gl_context->dirty_flags |= GL_DIRTY_TEXTURE_BINDINGS;
+}
+
+void _gl_TexParameterf(GLenum target, GLenum pname, GLfloat param) {
+  GLint value = (GLint)param;
+
+  if ((GLfloat)value != param) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+
+  _gl_TexParameteri(target, pname, value);
+}
+
+void _gl_TexParameteriv(GLenum target, GLenum pname, const GLint *params) {
+  if (!params) {
+    return;
+  }
+
+  _gl_TexParameteri(target, pname, params[0]);
+}
+
+void _gl_TexParameterfv(GLenum target, GLenum pname, const GLfloat *params) {
+  if (!params) {
+    return;
+  }
+
+  _gl_TexParameterf(target, pname, params[0]);
+}
+
+void _gl_GetTexParameteriv(GLenum target, GLenum pname, GLint *params) {
+  GLuint id;
+  GLTexture *tex;
+
+  if (!g_gl_context || !params) {
+    return;
+  }
+  if (!is_valid_texture_target(target)) {
+    _gl_set_error(GL_INVALID_ENUM);
+    return;
+  }
+
+  id = get_bound_tex(target);
+  if (!id) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
+
+  tex = &g_textures[id];
+  switch (pname) {
+  case GL_TEXTURE_MIN_FILTER:
+    *params = (GLint)tex->min_filter;
+    break;
+  case GL_TEXTURE_MAG_FILTER:
+    *params = (GLint)tex->mag_filter;
+    break;
+  case GL_TEXTURE_WRAP_S:
+    *params = (GLint)tex->wrap_s;
+    break;
+  case GL_TEXTURE_WRAP_T:
+    *params = (GLint)tex->wrap_t;
+    break;
+  case GL_TEXTURE_WRAP_R:
+    *params = (GLint)tex->wrap_r;
+    break;
+  default:
+    _gl_set_error(GL_INVALID_ENUM);
+    break;
+  }
+}
+
+void _gl_GetTexParameterfv(GLenum target, GLenum pname, GLfloat *params) {
+  GLuint id;
+  GLTexture *tex;
+
+  if (!g_gl_context || !params) {
+    return;
+  }
+  if (!is_valid_texture_target(target)) {
+    _gl_set_error(GL_INVALID_ENUM);
+    return;
+  }
+
+  id = get_bound_tex(target);
+  if (!id) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
+
+  tex = &g_textures[id];
+  switch (pname) {
+  case GL_TEXTURE_MIN_FILTER:
+    *params = (GLfloat)tex->min_filter;
+    break;
+  case GL_TEXTURE_MAG_FILTER:
+    *params = (GLfloat)tex->mag_filter;
+    break;
+  case GL_TEXTURE_WRAP_S:
+    *params = (GLfloat)tex->wrap_s;
+    break;
+  case GL_TEXTURE_WRAP_T:
+    *params = (GLfloat)tex->wrap_t;
+    break;
+  case GL_TEXTURE_WRAP_R:
+    *params = (GLfloat)tex->wrap_r;
+    break;
+  default:
+    _gl_set_error(GL_INVALID_ENUM);
+    break;
+  }
+}
+
+void _gl_SamplerParameteriv(GLuint sampler, GLenum pname, const GLint *param) {
+  if (!param) {
+    return;
+  }
+
+  _gl_SamplerParameteri(sampler, pname, param[0]);
+}
+
+void _gl_SamplerParameterfv(GLuint sampler, GLenum pname,
+                            const GLfloat *param) {
+  if (!param) {
+    return;
+  }
+
+  _gl_SamplerParameterf(sampler, pname, param[0]);
+}
+
+void _gl_SamplerParameteri(GLuint sampler, GLenum pname, GLint param) {
+  if (!g_gl_context) {
+    return;
+  }
+  if (sampler == 0 || sampler >= MAX_SAMPLER_OBJECTS ||
+      !g_samplers[sampler].in_use) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+  if (!apply_sampler_parameter(pname, param, &g_samplers[sampler].min_filter,
+                               &g_samplers[sampler].mag_filter,
+                               &g_samplers[sampler].wrap_s,
+                               &g_samplers[sampler].wrap_t,
+                               &g_samplers[sampler].wrap_r)) {
+    _gl_set_error(GL_INVALID_ENUM);
+    return;
+  }
+
+  init_sampler_object(&g_samplers[sampler]);
+  g_gl_context->dirty_flags |= GL_DIRTY_TEXTURE_BINDINGS;
+}
+
+void _gl_SamplerParameterf(GLuint sampler, GLenum pname, GLfloat param) {
+  GLint value = (GLint)param;
+
+  if ((GLfloat)value != param) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+
+  _gl_SamplerParameteri(sampler, pname, value);
+}
+
+void _gl_GetSamplerParameteriv(GLuint sampler, GLenum pname, GLint *params) {
+  if (!g_gl_context || !params) {
+    return;
+  }
+  if (sampler == 0 || sampler >= MAX_SAMPLER_OBJECTS ||
+      !g_samplers[sampler].in_use) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+
+  switch (pname) {
+  case GL_TEXTURE_MIN_FILTER:
+    *params = (GLint)g_samplers[sampler].min_filter;
+    break;
+  case GL_TEXTURE_MAG_FILTER:
+    *params = (GLint)g_samplers[sampler].mag_filter;
+    break;
+  case GL_TEXTURE_WRAP_S:
+    *params = (GLint)g_samplers[sampler].wrap_s;
+    break;
+  case GL_TEXTURE_WRAP_T:
+    *params = (GLint)g_samplers[sampler].wrap_t;
+    break;
+  case GL_TEXTURE_WRAP_R:
+    *params = (GLint)g_samplers[sampler].wrap_r;
+    break;
+  default:
+    _gl_set_error(GL_INVALID_ENUM);
+    break;
+  }
+}
+
+void _gl_GetSamplerParameterfv(GLuint sampler, GLenum pname, GLfloat *params) {
+  if (!g_gl_context || !params) {
+    return;
+  }
+  if (sampler == 0 || sampler >= MAX_SAMPLER_OBJECTS ||
+      !g_samplers[sampler].in_use) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+
+  switch (pname) {
+  case GL_TEXTURE_MIN_FILTER:
+    *params = (GLfloat)g_samplers[sampler].min_filter;
+    break;
+  case GL_TEXTURE_MAG_FILTER:
+    *params = (GLfloat)g_samplers[sampler].mag_filter;
+    break;
+  case GL_TEXTURE_WRAP_S:
+    *params = (GLfloat)g_samplers[sampler].wrap_s;
+    break;
+  case GL_TEXTURE_WRAP_T:
+    *params = (GLfloat)g_samplers[sampler].wrap_t;
+    break;
+  case GL_TEXTURE_WRAP_R:
+    *params = (GLfloat)g_samplers[sampler].wrap_r;
+    break;
+  default:
+    _gl_set_error(GL_INVALID_ENUM);
+    break;
+  }
 }
 
 void _gl_GenerateMipmap(GLenum target) {
@@ -1275,8 +2048,7 @@ void _gl_GenerateMipmap(GLenum target) {
 }
 
 void gl_bind_textures(void) {
-  /* Sampler bindings are resolved per-program in gl_bind_shaders so sampler
-   * uniforms can remap GL texture units onto GX2 sampler locations. */
+  // Binding happens elsewhere
 }
 
 GX2Texture *gl_get_gx2_texture(GLuint id) {
@@ -1301,6 +2073,22 @@ GX2Sampler *gl_get_gx2_sampler(GLuint id) {
     return &g_textures[id].gx2_sampler;
   }
   return NULL;
+}
+
+GX2Sampler *gl_get_effective_gx2_sampler(GLuint unit, GLuint texture) {
+  GLuint sampler_id;
+
+  if (!g_gl_context || unit >= 32) {
+    return NULL;
+  }
+
+  sampler_id = g_gl_context->bound_sampler[unit];
+  if (sampler_id > 0 && sampler_id < MAX_SAMPLER_OBJECTS &&
+      g_samplers[sampler_id].in_use) {
+    return &g_samplers[sampler_id].gx2_sampler;
+  }
+
+  return gl_get_gx2_sampler(texture);
 }
 
 #ifdef __cplusplus

@@ -18,4 +18,4 @@ void _gl_DrawElementsInstanced(GLenum mode, GLsizei count, GLenum type,
 }
 #endif
 
-#endif /* GL33_DRAW_H */
+#endif // Draw header guard

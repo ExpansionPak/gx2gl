@@ -7,6 +7,7 @@
 #include <gx2/enum.h>
 #include <gx2/mem.h>
 #include <gx2/state.h>
+#include <gx2/utils.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -15,7 +16,6 @@ extern "C" {
 #endif
 
 #define MAX_VAOS 512
-#define MAX_VERTEX_ATTRIBS 16
 
 typedef struct {
   bool enabled;
@@ -30,10 +30,10 @@ typedef struct {
 
 typedef struct {
   bool in_use;
-  GLVertexAttrib attribs[MAX_VERTEX_ATTRIBS];
-  GLuint element_array_buffer; // Element array bound to this VAO
+  GLVertexAttrib attribs[GL33_MAX_VERTEX_ATTRIBS];
+  GLuint element_array_buffer; // EBO binding id
 
-  bool dirty; // Recompile fetch shader
+  bool dirty; // Fetch state dirty
   GX2FetchShader fetch_shader;
   void *fetch_program;
 } GLVertexArray;
@@ -42,7 +42,7 @@ static GLVertexArray g_vaos[MAX_VAOS];
 
 void gl_vao_init(void) {
   memset(g_vaos, 0, sizeof(g_vaos));
-  // VAO 0 is the default VAO
+  // Reserve default VAO
   g_vaos[0].in_use = true;
   g_vaos[0].dirty = true;
 }
@@ -79,11 +79,15 @@ void _gl_DeleteVertexArrays(GLsizei n, const GLuint *arrays) {
       }
       g_vaos[id].in_use = false;
       if (g_gl_context->bound_vao == id) {
-        g_gl_context->bound_vao = 0; // Bind default VAO
+        g_gl_context->bound_vao = 0; // Reset to default
         g_gl_context->dirty_flags |= GL_DIRTY_VAO;
       }
     }
   }
+}
+
+GLboolean _gl_IsVertexArray(GLuint array) {
+  return (array < MAX_VAOS && g_vaos[array].in_use) ? GL_TRUE : GL_FALSE;
 }
 
 void _gl_BindVertexArray(GLuint array) {
@@ -98,7 +102,7 @@ void _gl_BindVertexArray(GLuint array) {
 }
 
 void _gl_EnableVertexAttribArray(GLuint index) {
-  if (!g_gl_context || index >= MAX_VERTEX_ATTRIBS) {
+  if (!g_gl_context || index >= GL33_MAX_VERTEX_ATTRIBS) {
     _gl_set_error(GL_INVALID_VALUE);
     return;
   }
@@ -109,7 +113,7 @@ void _gl_EnableVertexAttribArray(GLuint index) {
 }
 
 void _gl_DisableVertexAttribArray(GLuint index) {
-  if (!g_gl_context || index >= MAX_VERTEX_ATTRIBS) {
+  if (!g_gl_context || index >= GL33_MAX_VERTEX_ATTRIBS) {
     _gl_set_error(GL_INVALID_VALUE);
     return;
   }
@@ -117,6 +121,133 @@ void _gl_DisableVertexAttribArray(GLuint index) {
   g_vaos[vao].attribs[index].enabled = false;
   g_vaos[vao].dirty = true;
   g_gl_context->dirty_flags |= GL_DIRTY_VAO;
+}
+
+static void set_current_vertex_attrib(GLuint index, GLfloat x, GLfloat y,
+                                      GLfloat z, GLfloat w) {
+  if (!g_gl_context || index >= GL33_MAX_VERTEX_ATTRIBS) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+
+  g_gl_context->current_vertex_attrib[index][0] = x;
+  g_gl_context->current_vertex_attrib[index][1] = y;
+  g_gl_context->current_vertex_attrib[index][2] = z;
+  g_gl_context->current_vertex_attrib[index][3] = w;
+}
+
+void _gl_GetVertexAttribfv(GLuint index, GLenum pname, GLfloat *params) {
+  GLVertexAttrib *attrib;
+
+  if (!g_gl_context || !params) {
+    return;
+  }
+  if (index >= GL33_MAX_VERTEX_ATTRIBS) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+
+  attrib = &g_vaos[g_gl_context->bound_vao].attribs[index];
+  switch (pname) {
+  case GL_CURRENT_VERTEX_ATTRIB:
+    params[0] = g_gl_context->current_vertex_attrib[index][0];
+    params[1] = g_gl_context->current_vertex_attrib[index][1];
+    params[2] = g_gl_context->current_vertex_attrib[index][2];
+    params[3] = g_gl_context->current_vertex_attrib[index][3];
+    break;
+  case GL_VERTEX_ATTRIB_ARRAY_ENABLED:
+    params[0] = attrib->enabled ? 1.0f : 0.0f;
+    break;
+  case GL_VERTEX_ATTRIB_ARRAY_SIZE:
+    params[0] = (GLfloat)attrib->size;
+    break;
+  case GL_VERTEX_ATTRIB_ARRAY_STRIDE:
+    params[0] = (GLfloat)attrib->stride;
+    break;
+  case GL_VERTEX_ATTRIB_ARRAY_TYPE:
+    params[0] = (GLfloat)attrib->type;
+    break;
+  case GL_VERTEX_ATTRIB_ARRAY_NORMALIZED:
+    params[0] = attrib->normalized ? 1.0f : 0.0f;
+    break;
+  case GL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING:
+    params[0] = (GLfloat)attrib->buffer;
+    break;
+  case GL_VERTEX_ATTRIB_ARRAY_INTEGER:
+    params[0] = 0.0f;
+    break;
+  case GL_VERTEX_ATTRIB_ARRAY_DIVISOR:
+    params[0] = (GLfloat)attrib->divisor;
+    break;
+  default:
+    _gl_set_error(GL_INVALID_ENUM);
+    break;
+  }
+}
+
+void _gl_GetVertexAttribiv(GLuint index, GLenum pname, GLint *params) {
+  GLVertexAttrib *attrib;
+
+  if (!g_gl_context || !params) {
+    return;
+  }
+  if (index >= GL33_MAX_VERTEX_ATTRIBS) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+
+  attrib = &g_vaos[g_gl_context->bound_vao].attribs[index];
+  switch (pname) {
+  case GL_CURRENT_VERTEX_ATTRIB:
+    params[0] = (GLint)g_gl_context->current_vertex_attrib[index][0];
+    params[1] = (GLint)g_gl_context->current_vertex_attrib[index][1];
+    params[2] = (GLint)g_gl_context->current_vertex_attrib[index][2];
+    params[3] = (GLint)g_gl_context->current_vertex_attrib[index][3];
+    break;
+  case GL_VERTEX_ATTRIB_ARRAY_ENABLED:
+    *params = attrib->enabled ? GL_TRUE : GL_FALSE;
+    break;
+  case GL_VERTEX_ATTRIB_ARRAY_SIZE:
+    *params = attrib->size;
+    break;
+  case GL_VERTEX_ATTRIB_ARRAY_STRIDE:
+    *params = attrib->stride;
+    break;
+  case GL_VERTEX_ATTRIB_ARRAY_TYPE:
+    *params = (GLint)attrib->type;
+    break;
+  case GL_VERTEX_ATTRIB_ARRAY_NORMALIZED:
+    *params = attrib->normalized ? GL_TRUE : GL_FALSE;
+    break;
+  case GL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING:
+    *params = (GLint)attrib->buffer;
+    break;
+  case GL_VERTEX_ATTRIB_ARRAY_INTEGER:
+    *params = GL_FALSE;
+    break;
+  case GL_VERTEX_ATTRIB_ARRAY_DIVISOR:
+    *params = (GLint)attrib->divisor;
+    break;
+  default:
+    _gl_set_error(GL_INVALID_ENUM);
+    break;
+  }
+}
+
+void _gl_GetVertexAttribPointerv(GLuint index, GLenum pname, GLvoid **pointer) {
+  if (!g_gl_context || !pointer) {
+    return;
+  }
+  if (index >= GL33_MAX_VERTEX_ATTRIBS) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+  if (pname != GL_VERTEX_ATTRIB_ARRAY_POINTER) {
+    _gl_set_error(GL_INVALID_ENUM);
+    return;
+  }
+
+  *pointer = (GLvoid *)g_vaos[g_gl_context->bound_vao].attribs[index].pointer;
 }
 
 static uint32_t get_attrib_stride_bytes(GLint size, GLenum type, bool *valid) {
@@ -190,10 +321,79 @@ static GX2AttribFormat map_attrib_format(GLint size, GLenum type,
   return GX2_ATTRIB_FORMAT_FLOAT_32_32_32_32;
 }
 
+static uint32_t get_attrib_selector_mask(GLint size) {
+  switch (size) {
+  case 1:
+    return GX2_SEL_MASK(GX2_SQ_SEL_X, GX2_SQ_SEL_0, GX2_SQ_SEL_0,
+                        GX2_SQ_SEL_1);
+  case 2:
+    return GX2_SEL_MASK(GX2_SQ_SEL_X, GX2_SQ_SEL_Y, GX2_SQ_SEL_0,
+                        GX2_SQ_SEL_1);
+  case 3:
+    return GX2_SEL_MASK(GX2_SQ_SEL_X, GX2_SQ_SEL_Y, GX2_SQ_SEL_Z,
+                        GX2_SQ_SEL_1);
+  case 4:
+    return GX2_SEL_MASK(GX2_SQ_SEL_X, GX2_SQ_SEL_Y, GX2_SQ_SEL_Z,
+                        GX2_SQ_SEL_W);
+  default:
+    return GX2_SEL_MASK(GX2_SQ_SEL_0, GX2_SQ_SEL_0, GX2_SQ_SEL_0,
+                        GX2_SQ_SEL_1);
+  }
+}
+
+void _gl_VertexAttrib1f(GLuint index, GLfloat x) {
+  set_current_vertex_attrib(index, x, 0.0f, 0.0f, 1.0f);
+}
+
+void _gl_VertexAttrib1fv(GLuint index, const GLfloat *v) {
+  if (!v) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+  set_current_vertex_attrib(index, v[0], 0.0f, 0.0f, 1.0f);
+}
+
+void _gl_VertexAttrib2f(GLuint index, GLfloat x, GLfloat y) {
+  set_current_vertex_attrib(index, x, y, 0.0f, 1.0f);
+}
+
+void _gl_VertexAttrib2fv(GLuint index, const GLfloat *v) {
+  if (!v) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+  set_current_vertex_attrib(index, v[0], v[1], 0.0f, 1.0f);
+}
+
+void _gl_VertexAttrib3f(GLuint index, GLfloat x, GLfloat y, GLfloat z) {
+  set_current_vertex_attrib(index, x, y, z, 1.0f);
+}
+
+void _gl_VertexAttrib3fv(GLuint index, const GLfloat *v) {
+  if (!v) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+  set_current_vertex_attrib(index, v[0], v[1], v[2], 1.0f);
+}
+
+void _gl_VertexAttrib4f(GLuint index, GLfloat x, GLfloat y, GLfloat z,
+                        GLfloat w) {
+  set_current_vertex_attrib(index, x, y, z, w);
+}
+
+void _gl_VertexAttrib4fv(GLuint index, const GLfloat *v) {
+  if (!v) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+  set_current_vertex_attrib(index, v[0], v[1], v[2], v[3]);
+}
+
 void _gl_VertexAttribPointer(GLuint index, GLint size, GLenum type,
                              GLboolean normalized, GLsizei stride,
                              const GLvoid *pointer) {
-  if (!g_gl_context || index >= MAX_VERTEX_ATTRIBS) {
+  if (!g_gl_context || index >= GL33_MAX_VERTEX_ATTRIBS) {
     _gl_set_error(GL_INVALID_VALUE);
     return;
   }
@@ -215,7 +415,7 @@ void _gl_VertexAttribPointer(GLuint index, GLint size, GLenum type,
 void _gl_VertexAttribDivisor(GLuint index, GLuint divisor) {
   GLuint vao;
 
-  if (!g_gl_context || index >= MAX_VERTEX_ATTRIBS) {
+  if (!g_gl_context || index >= GL33_MAX_VERTEX_ATTRIBS) {
     _gl_set_error(GL_INVALID_VALUE);
     return;
   }
@@ -234,18 +434,18 @@ void gl_bind_vao(void) {
   GLVertexArray *vao = &g_vaos[vao_id];
 
   if (vao->dirty) {
-    /* Recompile fetch shader */
-    GX2AttribStream attribs[MAX_VERTEX_ATTRIBS];
+    // Rebuild fetch shader
+    GX2AttribStream attribs[GL33_MAX_VERTEX_ATTRIBS];
     uint32_t attrib_count = 0;
 
-    for (uint32_t i = 0; i < MAX_VERTEX_ATTRIBS; i++) {
+    for (uint32_t i = 0; i < GL33_MAX_VERTEX_ATTRIBS; i++) {
       if (vao->attribs[i].enabled) {
         bool valid = false;
         GX2AttribFormat format =
             map_attrib_format(vao->attribs[i].size, vao->attribs[i].type,
                               vao->attribs[i].normalized, &valid);
         if (!valid) {
-          /* Fallback to float format to prevent crashing */
+          // Fallback float format
           format = GX2_ATTRIB_FORMAT_FLOAT_32_32_32_32;
         }
 
@@ -262,14 +462,15 @@ void gl_bind_vao(void) {
 
         attribs[attrib_count].location = i;
         attribs[attrib_count].buffer =
-            i; /* Buffer index bindings map 1:1 with attribute index for now */
+            i; 
         attribs[attrib_count].offset = (uint32_t)vao->attribs[i].pointer;
         attribs[attrib_count].format = format;
         attribs[attrib_count].type =
             vao->attribs[i].divisor > 0 ? GX2_ATTRIB_INDEX_PER_INSTANCE
                                         : GX2_ATTRIB_INDEX_PER_VERTEX;
         attribs[attrib_count].aluDivisor = vao->attribs[i].divisor;
-        attribs[attrib_count].mask = ((1u << vao->attribs[i].size) - 1u) << 16;
+        attribs[attrib_count].mask =
+            get_attrib_selector_mask(vao->attribs[i].size);
         attribs[attrib_count].endianSwap = GX2_ENDIAN_SWAP_DEFAULT;
 
         attrib_count++;
@@ -300,7 +501,7 @@ void gl_bind_vao(void) {
     GX2SetFetchShader(&vao->fetch_shader);
   }
 
-  for (uint32_t i = 0; i < MAX_VERTEX_ATTRIBS; i++) {
+  for (uint32_t i = 0; i < GL33_MAX_VERTEX_ATTRIBS; i++) {
     if (!vao->attribs[i].enabled) {
       continue;
     }

@@ -15,4 +15,4 @@ void gl_mem_shutdown(void);
 void* gl_mem_alloc(gl_mem_type_t type, size_t size, uint32_t align);
 void gl_mem_free(gl_mem_type_t type, void* ptr);
 
-#endif /* GL33_MEM_H */
+#endif // Memory header guard

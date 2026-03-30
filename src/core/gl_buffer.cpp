@@ -18,6 +18,7 @@ typedef struct {
   GLenum target;
   GLsizeiptr size;
   GLenum usage;
+  GLenum mapped_access;
   void *mapped_ptr;
   void *mapped_shadow_ptr;
   void *mapped_gpu_ptr;
@@ -90,6 +91,8 @@ void _gl_GenBuffers(GLsizei n, GLuint *buffers) {
       g_buffers[i].in_use = true;
       g_buffers[i].target = 0;
       g_buffers[i].size = 0;
+      g_buffers[i].usage = GL_STATIC_DRAW;
+      g_buffers[i].mapped_access = GL_READ_WRITE;
       g_buffers[i].mapped_ptr = NULL;
       g_buffers[i].pending_delete = false;
       g_buffers[i].gpu_owned = false;
@@ -110,7 +113,7 @@ void _gl_DeleteBuffers(GLsizei n, const GLuint *buffers) {
   for (int i = 0; i < n; i++) {
     GLuint id = buffers[i];
     if (id > 0 && id < MAX_BUFFERS && g_buffers[id].in_use) {
-      /* If bound, unbind from context state targets */
+      // Drop active bindings
       if (g_gl_context->bound_array_buffer == id)
         g_gl_context->bound_array_buffer = 0;
       if (g_gl_context->bound_element_array_buffer == id)
@@ -122,6 +125,10 @@ void _gl_DeleteBuffers(GLsizei n, const GLuint *buffers) {
       g_buffers[id].pending_delete = true;
     }
   }
+}
+
+GLboolean _gl_IsBuffer(GLuint buffer) {
+  return lookup_buffer(buffer) ? GL_TRUE : GL_FALSE;
 }
 
 void _gl_BindBuffer(GLenum target, GLuint buffer) {
@@ -288,7 +295,7 @@ void _gl_BufferData(GLenum target, GLsizeiptr size, const GLvoid *data,
   buf->gx2_buffer.elemCount = size;
   buf->gx2_buffer.elemSize = 1;
 
-  // No raw malloc/free, we must ensure memory comes from MEM2 or GX2R itself.
+  // Create backing buffer
 
   if (!GX2RCreateBuffer(&buf->gx2_buffer)) {
     _gl_set_error(GL_OUT_OF_MEMORY);
@@ -338,11 +345,7 @@ void _gl_BufferSubData(GLenum target, GLintptr offset, GLsizeiptr size,
   uint8_t *dst = (uint8_t *)ptr + offset;
 
   if (target == GL_UNIFORM_BUFFER) {
-    /*
-     * Each scalar field written into a locked uniform buffer must be
-     * individually swapped using CPU_TO_GPU_32. We assume incoming data
-     * is packed 32-bit scalars (std140 layout usually guarantees this).
-     */
+    // Swap uniform words
     const uint32_t *src32 = (const uint32_t *)data;
     uint32_t *dst32 = (uint32_t *)dst;
     size_t count = size / 4;
@@ -351,12 +354,11 @@ void _gl_BufferSubData(GLenum target, GLintptr offset, GLsizeiptr size,
     }
     size_t remainder = size % 4;
     if (remainder > 0) {
-      /* If not multiple of 4, safely fallback to memcpy.
-         This shouldn't happen for valid UBOs per spec. */
+      // Copy leftover bytes
       memcpy(dst + count * 4, (const uint8_t *)data + count * 4, remainder);
     }
   } else {
-    /* GL_ARRAY_BUFFER / GL_ELEMENT_ARRAY_BUFFER: No swap needed */
+    // Copy bytes directly
     memcpy(dst, data, size);
   }
 
@@ -371,9 +373,69 @@ void _gl_BufferSubData(GLenum target, GLintptr offset, GLsizeiptr size,
   }
 }
 
+void _gl_GetBufferParameteriv(GLenum target, GLenum pname, GLint *params) {
+  GLBuffer *buf;
+
+  if (!g_gl_context || !params) {
+    return;
+  }
+  if (!is_valid_buffer_target(target)) {
+    _gl_set_error(GL_INVALID_ENUM);
+    return;
+  }
+
+  buf = lookup_buffer(get_bound_buffer(target));
+  if (!buf) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
+
+  switch (pname) {
+  case GL_BUFFER_SIZE:
+    *params = (GLint)buf->size;
+    break;
+  case GL_BUFFER_USAGE:
+    *params = (GLint)buf->usage;
+    break;
+  case GL_BUFFER_ACCESS:
+    *params = (GLint)buf->mapped_access;
+    break;
+  case GL_BUFFER_MAPPED:
+    *params = buf->mapped_ptr ? GL_TRUE : GL_FALSE;
+    break;
+  default:
+    _gl_set_error(GL_INVALID_ENUM);
+    break;
+  }
+}
+
+void _gl_GetBufferPointerv(GLenum target, GLenum pname, GLvoid **params) {
+  GLBuffer *buf;
+
+  if (!g_gl_context || !params) {
+    return;
+  }
+  if (!is_valid_buffer_target(target)) {
+    _gl_set_error(GL_INVALID_ENUM);
+    return;
+  }
+  if (pname != GL_BUFFER_MAP_POINTER) {
+    _gl_set_error(GL_INVALID_ENUM);
+    return;
+  }
+
+  buf = lookup_buffer(get_bound_buffer(target));
+  if (!buf) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
+
+  *params = buf->mapped_ptr;
+}
+
 void *_gl_MapBuffer(GLenum target, GLenum access) {
   return _gl_MapBufferRange(target, 0, 0,
-                            access); /* Length handled inside if 0 */
+                            access); // Use full range
 }
 
 void *_gl_MapBufferRange(GLenum target, GLintptr offset, GLsizeiptr length,
@@ -397,7 +459,7 @@ void *_gl_MapBufferRange(GLenum target, GLintptr offset, GLsizeiptr length,
   }
 
   if (length == 0)
-    length = buf->size; // Handling for MapBuffer wrapper
+    length = buf->size; // Default whole size
 
   if (offset < 0 || length < 0 || offset + length > buf->size) {
     _gl_set_error(GL_INVALID_VALUE);
@@ -413,6 +475,12 @@ void *_gl_MapBufferRange(GLenum target, GLintptr offset, GLsizeiptr length,
   buf->mapped_offset = offset;
   buf->mapped_length = length;
   buf->mapped_gpu_ptr = (uint8_t *)ptr + offset;
+  if (access == GL_READ_ONLY || access == GL_WRITE_ONLY ||
+      access == GL_READ_WRITE) {
+    buf->mapped_access = access;
+  } else {
+    buf->mapped_access = GL_READ_WRITE;
+  }
   buf->mapped_uniform_shadow = GL_FALSE;
 
   if (target == GL_UNIFORM_BUFFER) {
@@ -499,6 +567,7 @@ GLboolean _gl_UnmapBuffer(GLenum target) {
   buf->mapped_gpu_ptr = NULL;
   buf->mapped_offset = 0;
   buf->mapped_length = 0;
+  buf->mapped_access = GL_READ_WRITE;
   buf->mapped_uniform_shadow = GL_FALSE;
   return GL_TRUE;
 }

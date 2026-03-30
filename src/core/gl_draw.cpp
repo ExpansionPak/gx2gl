@@ -100,10 +100,10 @@ void _gl_DrawElementsInstanced(GLenum mode, GLsizei count, GLenum type,
         return;
     }
     
-    // Combine base pointer with offset
+    // Apply index offset
     void *final_indices = (void*)((uintptr_t)buffer_data + index_offset);
     
-    // GX2DrawIndexedEx parameters: primitive_mode, count, indexFormat, indices, firstVertex, numInstances
+    // Submit indexed draw
     GX2DrawIndexedEx(prim, count, idx_type, final_indices, 0,
                      (uint32_t)instancecount);
 }

@@ -7,6 +7,13 @@
 extern "C" {
 #endif
 
+static const char *g_extensions[] = {
+    "GL_WIIU_shader_group",
+    "GL_WIIU_cafeglsl_gfd"
+};
+static const GLuint g_extension_count =
+    (GLuint)(sizeof(g_extensions) / sizeof(g_extensions[0]));
+
 const GLubyte *_gl_GetString(GLenum name) {
     if (!g_gl_context) return NULL;
     switch (name) {
@@ -17,6 +24,19 @@ const GLubyte *_gl_GetString(GLenum name) {
         case GL_EXTENSIONS: return (const GLubyte *)"GL_WIIU_shader_group GL_WIIU_cafeglsl_gfd";
         default: _gl_set_error(GL_INVALID_ENUM); return NULL;
     }
+}
+
+const GLubyte *_gl_GetStringi(GLenum name, GLuint index) {
+    if (!g_gl_context) return NULL;
+    if (name != GL_EXTENSIONS) {
+        _gl_set_error(GL_INVALID_ENUM);
+        return NULL;
+    }
+    if (index >= g_extension_count) {
+        _gl_set_error(GL_INVALID_VALUE);
+        return NULL;
+    }
+    return (const GLubyte *)g_extensions[index];
 }
 
 void _gl_GetBooleanv(GLenum pname, GLboolean *data) {
@@ -59,7 +79,7 @@ void _gl_GetIntegerv(GLenum pname, GLint *data) {
     if (!g_gl_context || !data) return;
     switch (pname) {
         case GL_CURRENT_PROGRAM: *data = (GLint)g_gl_context->bound_program; break;
-        case GL_MAX_TEXTURE_SIZE: *data = 8192; break; // Latte maximum
+        case GL_MAX_TEXTURE_SIZE: *data = 8192; break; // Wii U texture cap
         case GL_MAX_VERTEX_ATTRIBS: *data = 16; break;
         case GL_MAX_TEXTURE_IMAGE_UNITS: *data = 16; break;
         case GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS: *data = 32; break;
@@ -69,13 +89,48 @@ void _gl_GetIntegerv(GLenum pname, GLint *data) {
         case GL_MAX_RENDERBUFFER_SIZE: *data = 8192; break;
         case GL_MAX_UNIFORM_BUFFER_BINDINGS: *data = GL33_MAX_UNIFORM_BUFFER_BINDINGS; break;
         case GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT: *data = GX2_UNIFORM_BLOCK_ALIGNMENT; break;
+        case GL_NUM_EXTENSIONS: *data = (GLint)g_extension_count; break;
+        case GL_SHADER_COMPILER: *data = 1; break;
+        case GL_NUM_SHADER_BINARY_FORMATS: *data = 0; break;
+        case GL_SHADER_BINARY_FORMATS: *data = 0; break;
+        case GL_NUM_COMPRESSED_TEXTURE_FORMATS: *data = 0; break;
+        case GL_COMPRESSED_TEXTURE_FORMATS: *data = 0; break;
+        case GL_IMPLEMENTATION_COLOR_READ_FORMAT: *data = GL_RGBA; break;
+        case GL_IMPLEMENTATION_COLOR_READ_TYPE: *data = GL_UNSIGNED_BYTE; break;
+        case GL_GENERATE_MIPMAP_HINT: *data = (GLint)g_gl_context->generate_mipmap_hint; break;
         case GL_BLEND: *data = g_gl_context->blend_enabled ? 1 : 0; break;
         case GL_DEPTH_TEST: *data = g_gl_context->depth_test_enabled ? 1 : 0; break;
         case GL_STENCIL_TEST: *data = g_gl_context->stencil_test_enabled ? 1 : 0; break;
         case GL_CULL_FACE: *data = g_gl_context->cull_face_enabled ? 1 : 0; break;
         case GL_SCISSOR_TEST: *data = g_gl_context->scissor_test_enabled ? 1 : 0; break;
+        case GL_SAMPLE_COVERAGE: *data = g_gl_context->sample_coverage_enabled ? 1 : 0; break;
+        case GL_SAMPLE_COVERAGE_INVERT: *data = g_gl_context->sample_coverage_invert ? 1 : 0; break;
         case GL_DEPTH_WRITEMASK: *data = g_gl_context->depth_mask ? 1 : 0; break;
         case GL_STENCIL_WRITEMASK: *data = (GLint)g_gl_context->stencil_write_mask[0]; break;
+        case GL_VIEWPORT:
+            data[0] = g_gl_context->viewport.x;
+            data[1] = g_gl_context->viewport.y;
+            data[2] = g_gl_context->viewport.width;
+            data[3] = g_gl_context->viewport.height;
+            break;
+        case GL_SCISSOR_BOX:
+            data[0] = g_gl_context->scissor.x;
+            data[1] = g_gl_context->scissor.y;
+            data[2] = g_gl_context->scissor.width;
+            data[3] = g_gl_context->scissor.height;
+            break;
+        case GL_PACK_ALIGNMENT: *data = g_gl_context->pack_alignment; break;
+        case GL_PACK_ROW_LENGTH: *data = g_gl_context->pack_row_length; break;
+        case GL_PACK_SKIP_ROWS: *data = g_gl_context->pack_skip_rows; break;
+        case GL_PACK_SKIP_PIXELS: *data = g_gl_context->pack_skip_pixels; break;
+        case GL_PACK_IMAGE_HEIGHT: *data = g_gl_context->pack_image_height; break;
+        case GL_PACK_SKIP_IMAGES: *data = g_gl_context->pack_skip_images; break;
+        case GL_UNPACK_ALIGNMENT: *data = g_gl_context->unpack_alignment; break;
+        case GL_UNPACK_ROW_LENGTH: *data = g_gl_context->unpack_row_length; break;
+        case GL_UNPACK_SKIP_ROWS: *data = g_gl_context->unpack_skip_rows; break;
+        case GL_UNPACK_SKIP_PIXELS: *data = g_gl_context->unpack_skip_pixels; break;
+        case GL_UNPACK_IMAGE_HEIGHT: *data = g_gl_context->unpack_image_height; break;
+        case GL_UNPACK_SKIP_IMAGES: *data = g_gl_context->unpack_skip_images; break;
         case GL_COLOR_WRITEMASK:
             data[0] = g_gl_context->color_mask[0] ? 1 : 0;
             data[1] = g_gl_context->color_mask[1] ? 1 : 0;
@@ -100,6 +155,18 @@ void _gl_GetFloatv(GLenum pname, GLfloat *data) {
             data[0] = g_gl_context->viewport.near_z;
             data[1] = g_gl_context->viewport.far_z;
             break;
+        case GL_VIEWPORT:
+            data[0] = (GLfloat)g_gl_context->viewport.x;
+            data[1] = (GLfloat)g_gl_context->viewport.y;
+            data[2] = (GLfloat)g_gl_context->viewport.width;
+            data[3] = (GLfloat)g_gl_context->viewport.height;
+            break;
+        case GL_SCISSOR_BOX:
+            data[0] = (GLfloat)g_gl_context->scissor.x;
+            data[1] = (GLfloat)g_gl_context->scissor.y;
+            data[2] = (GLfloat)g_gl_context->scissor.width;
+            data[3] = (GLfloat)g_gl_context->scissor.height;
+            break;
         case GL_COLOR_CLEAR_VALUE:
             data[0] = g_gl_context->clear_color[0];
             data[1] = g_gl_context->clear_color[1];
@@ -111,6 +178,9 @@ void _gl_GetFloatv(GLenum pname, GLfloat *data) {
             break;
         case GL_LINE_WIDTH:
             data[0] = g_gl_context->line_width;
+            break;
+        case GL_SAMPLE_COVERAGE_VALUE:
+            data[0] = g_gl_context->sample_coverage_value;
             break;
         default: {
             GLint d = 0;
@@ -138,6 +208,16 @@ void _gl_GetDoublev(GLenum pname, GLdouble *data) {
             _gl_GetFloatv(pname, floats);
             data[0] = (GLdouble)floats[0];
             data[1] = (GLdouble)floats[1];
+            break;
+        }
+        case GL_VIEWPORT:
+        case GL_SCISSOR_BOX: {
+            GLfloat floats[4];
+            _gl_GetFloatv(pname, floats);
+            data[0] = (GLdouble)floats[0];
+            data[1] = (GLdouble)floats[1];
+            data[2] = (GLdouble)floats[2];
+            data[3] = (GLdouble)floats[3];
             break;
         }
         case GL_COLOR_CLEAR_VALUE: {
@@ -176,6 +256,4 @@ void _gl_GetDoublev(GLenum pname, GLdouble *data) {
 
 #ifdef __cplusplus
 }
-#endif
-
-/* glGetError is implemented in gl_context.cpp using the queue */
+#endif // C linkage guard

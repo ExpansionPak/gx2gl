@@ -12,6 +12,7 @@ extern "C" {
 #include <gx2/mem.h>
 #include <gx2/shaders.h>
 #include <gx2/state.h>
+#include <stdio.h>
 #include <string.h>
 #include <whb/gfx.h>
 
@@ -54,6 +55,7 @@ typedef struct {
 typedef struct {
   bool in_use;
   bool linked;
+  bool validated;
   bool delete_pending;
 
   GLuint attached_vertex_shader;
@@ -77,6 +79,7 @@ typedef struct {
 
   GLint vertex_sampler_units[MAX_PROGRAM_SAMPLERS];
   GLint pixel_sampler_units[MAX_PROGRAM_SAMPLERS];
+  char *attrib_binding_names[GL33_MAX_VERTEX_ATTRIBS];
 } GLProgram;
 
 static GLShader g_shaders[MAX_SHADERS];
@@ -88,6 +91,18 @@ static bool is_valid_shader(GLuint shader) {
 
 static bool is_valid_program(GLuint program) {
   return program > 0 && program < MAX_PROGRAMS && g_programs[program].in_use;
+}
+
+static bool is_generated_shader_name(GLuint shader) {
+  return shader > 0 && shader < MAX_SHADERS && g_shaders[shader].in_use;
+}
+
+static void set_program_lookup_error(GLuint program) {
+  if (is_generated_shader_name(program)) {
+    _gl_set_error(GL_INVALID_OPERATION);
+  } else {
+    _gl_set_error(GL_INVALID_VALUE);
+  }
 }
 
 static bool location_is_sampler(GLint location) {
@@ -145,6 +160,16 @@ static void free_program_uniform_blocks(ProgramUniformBlock *blocks,
     }
   }
   gl_mem_free(GL_MEM_TYPE_MEM2, blocks);
+}
+
+static void free_program_attrib_bindings(GLProgram *prog) {
+  if (!prog) {
+    return;
+  }
+
+  for (uint32_t i = 0; i < GL33_MAX_VERTEX_ATTRIBS; ++i) {
+    free_owned_string(&prog->attrib_binding_names[i]);
+  }
 }
 
 static char *copy_program_string(const char *src) {
@@ -210,6 +235,7 @@ static void clear_program_group(GLProgram *prog) {
   prog->group = NULL;
   prog->owns_group = false;
   prog->linked = false;
+  prog->validated = false;
   memset(prog->vertex_sampler_units, 0, sizeof(prog->vertex_sampler_units));
   memset(prog->pixel_sampler_units, 0, sizeof(prog->pixel_sampler_units));
 }
@@ -257,6 +283,379 @@ static uint32_t count_program_attached_shaders(const GLProgram *prog) {
   return count;
 }
 
+typedef struct {
+  const char *name;
+  GLint size;
+  GLenum type;
+} ActiveVariableInfo;
+
+static GLenum map_shader_var_type(GX2ShaderVarType type) {
+  switch (type) {
+  case GX2_SHADER_VAR_TYPE_FLOAT:
+    return GL_FLOAT;
+  case GX2_SHADER_VAR_TYPE_FLOAT2:
+    return GL_FLOAT_VEC2;
+  case GX2_SHADER_VAR_TYPE_FLOAT3:
+    return GL_FLOAT_VEC3;
+  case GX2_SHADER_VAR_TYPE_FLOAT4:
+    return GL_FLOAT_VEC4;
+  case GX2_SHADER_VAR_TYPE_INT:
+    return GL_INT;
+  case GX2_SHADER_VAR_TYPE_INT2:
+    return GL_INT_VEC2;
+  case GX2_SHADER_VAR_TYPE_INT3:
+    return GL_INT_VEC3;
+  case GX2_SHADER_VAR_TYPE_INT4:
+    return GL_INT_VEC4;
+  case GX2_SHADER_VAR_TYPE_BOOL:
+    return GL_BOOL;
+  case GX2_SHADER_VAR_TYPE_BOOL2:
+    return GL_BOOL_VEC2;
+  case GX2_SHADER_VAR_TYPE_BOOL3:
+    return GL_BOOL_VEC3;
+  case GX2_SHADER_VAR_TYPE_BOOL4:
+    return GL_BOOL_VEC4;
+  case GX2_SHADER_VAR_TYPE_FLOAT2X2:
+    return GL_FLOAT_MAT2;
+  case GX2_SHADER_VAR_TYPE_FLOAT3X3:
+    return GL_FLOAT_MAT3;
+  case GX2_SHADER_VAR_TYPE_FLOAT4X4:
+    return GL_FLOAT_MAT4;
+  default:
+    return 0;
+  }
+}
+
+static GLenum map_sampler_var_type(GX2SamplerVarType type) {
+  switch (type) {
+  case GX2_SAMPLER_VAR_TYPE_SAMPLER_1D:
+    return GL_SAMPLER_1D;
+  case GX2_SAMPLER_VAR_TYPE_SAMPLER_2D:
+    return GL_SAMPLER_2D;
+  case GX2_SAMPLER_VAR_TYPE_SAMPLER_3D:
+    return GL_SAMPLER_3D;
+  case GX2_SAMPLER_VAR_TYPE_SAMPLER_CUBE:
+    return GL_SAMPLER_CUBE;
+  default:
+    return 0;
+  }
+}
+
+static uint32_t shader_var_type_word_count(GX2ShaderVarType type) {
+  switch (type) {
+  case GX2_SHADER_VAR_TYPE_FLOAT:
+  case GX2_SHADER_VAR_TYPE_INT:
+  case GX2_SHADER_VAR_TYPE_BOOL:
+    return 1;
+  case GX2_SHADER_VAR_TYPE_FLOAT2:
+  case GX2_SHADER_VAR_TYPE_INT2:
+  case GX2_SHADER_VAR_TYPE_BOOL2:
+    return 2;
+  case GX2_SHADER_VAR_TYPE_FLOAT3:
+  case GX2_SHADER_VAR_TYPE_INT3:
+  case GX2_SHADER_VAR_TYPE_BOOL3:
+    return 3;
+  case GX2_SHADER_VAR_TYPE_FLOAT4:
+  case GX2_SHADER_VAR_TYPE_INT4:
+  case GX2_SHADER_VAR_TYPE_BOOL4:
+    return 4;
+  case GX2_SHADER_VAR_TYPE_FLOAT2X2:
+    return 4;
+  case GX2_SHADER_VAR_TYPE_FLOAT3X3:
+    return 9;
+  case GX2_SHADER_VAR_TYPE_FLOAT4X4:
+    return 16;
+  default:
+    return 0;
+  }
+}
+
+static bool shader_var_type_is_float_storage(GX2ShaderVarType type) {
+  switch (type) {
+  case GX2_SHADER_VAR_TYPE_FLOAT:
+  case GX2_SHADER_VAR_TYPE_FLOAT2:
+  case GX2_SHADER_VAR_TYPE_FLOAT3:
+  case GX2_SHADER_VAR_TYPE_FLOAT4:
+  case GX2_SHADER_VAR_TYPE_FLOAT2X2:
+  case GX2_SHADER_VAR_TYPE_FLOAT3X3:
+  case GX2_SHADER_VAR_TYPE_FLOAT4X4:
+    return true;
+  default:
+    return false;
+  }
+}
+
+static bool name_seen_in_uniform_vars(const GX2UniformVar *vars, uint32_t count,
+                                      const char *name, uint32_t limit) {
+  if (!vars || !name) {
+    return false;
+  }
+  if (limit > count) {
+    limit = count;
+  }
+  for (uint32_t i = 0; i < limit; ++i) {
+    if (vars[i].name && strcmp(vars[i].name, name) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool name_seen_in_sampler_vars(const GX2SamplerVar *vars, uint32_t count,
+                                      const char *name, uint32_t limit) {
+  if (!vars || !name) {
+    return false;
+  }
+  if (limit > count) {
+    limit = count;
+  }
+  for (uint32_t i = 0; i < limit; ++i) {
+    if (vars[i].name && strcmp(vars[i].name, name) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static void consider_active_variable(const char *name, GLint size, GLenum type,
+                                     GLuint wanted_index, GLuint *count,
+                                     GLsizei *max_name_length,
+                                     ActiveVariableInfo *out_info) {
+  GLsizei name_length;
+
+  if (!name || !count) {
+    return;
+  }
+
+  name_length = (GLsizei)strlen(name) + 1;
+  if (max_name_length && name_length > *max_name_length) {
+    *max_name_length = name_length;
+  }
+  if (out_info && *count == wanted_index) {
+    out_info->name = name;
+    out_info->size = size;
+    out_info->type = type;
+  }
+  ++(*count);
+}
+
+static void collect_active_uniforms(const GLProgram *prog, GLuint wanted_index,
+                                    ActiveVariableInfo *out_info,
+                                    GLuint *out_count,
+                                    GLsizei *out_max_name_length) {
+  const GX2VertexShader *vertex_shader;
+  const GX2PixelShader *pixel_shader;
+  GLuint count = 0;
+  GLsizei max_name_length = 0;
+
+  if (out_info) {
+    memset(out_info, 0, sizeof(*out_info));
+  }
+  if (!prog || !prog->group) {
+    if (out_count) {
+      *out_count = 0;
+    }
+    if (out_max_name_length) {
+      *out_max_name_length = 0;
+    }
+    return;
+  }
+
+  vertex_shader = prog->group->vertexShader;
+  pixel_shader = prog->group->pixelShader;
+
+  if (vertex_shader) {
+    for (uint32_t i = 0; i < vertex_shader->uniformVarCount; ++i) {
+      const GX2UniformVar *var = &vertex_shader->uniformVars[i];
+
+      if (!var->name ||
+          name_seen_in_uniform_vars(vertex_shader->uniformVars,
+                                    vertex_shader->uniformVarCount, var->name,
+                                    i)) {
+        continue;
+      }
+      consider_active_variable(var->name, (GLint)var->count,
+                               map_shader_var_type(var->type), wanted_index,
+                               &count, &max_name_length, out_info);
+    }
+
+    for (uint32_t i = 0; i < vertex_shader->samplerVarCount; ++i) {
+      const GX2SamplerVar *var = &vertex_shader->samplerVars[i];
+
+      if (!var->name ||
+          name_seen_in_uniform_vars(vertex_shader->uniformVars,
+                                    vertex_shader->uniformVarCount, var->name,
+                                    vertex_shader->uniformVarCount) ||
+          name_seen_in_sampler_vars(vertex_shader->samplerVars,
+                                    vertex_shader->samplerVarCount, var->name,
+                                    i)) {
+        continue;
+      }
+      consider_active_variable(var->name, 1, map_sampler_var_type(var->type),
+                               wanted_index, &count, &max_name_length,
+                               out_info);
+    }
+  }
+
+  if (pixel_shader) {
+    for (uint32_t i = 0; i < pixel_shader->uniformVarCount; ++i) {
+      const GX2UniformVar *var = &pixel_shader->uniformVars[i];
+
+      if (!var->name ||
+          (vertex_shader &&
+           (name_seen_in_uniform_vars(vertex_shader->uniformVars,
+                                      vertex_shader->uniformVarCount, var->name,
+                                      vertex_shader->uniformVarCount) ||
+            name_seen_in_sampler_vars(vertex_shader->samplerVars,
+                                      vertex_shader->samplerVarCount, var->name,
+                                      vertex_shader->samplerVarCount))) ||
+          name_seen_in_uniform_vars(pixel_shader->uniformVars,
+                                    pixel_shader->uniformVarCount, var->name,
+                                    i)) {
+        continue;
+      }
+      consider_active_variable(var->name, (GLint)var->count,
+                               map_shader_var_type(var->type), wanted_index,
+                               &count, &max_name_length, out_info);
+    }
+
+    for (uint32_t i = 0; i < pixel_shader->samplerVarCount; ++i) {
+      const GX2SamplerVar *var = &pixel_shader->samplerVars[i];
+
+      if (!var->name ||
+          (vertex_shader &&
+           (name_seen_in_uniform_vars(vertex_shader->uniformVars,
+                                      vertex_shader->uniformVarCount, var->name,
+                                      vertex_shader->uniformVarCount) ||
+            name_seen_in_sampler_vars(vertex_shader->samplerVars,
+                                      vertex_shader->samplerVarCount, var->name,
+                                      vertex_shader->samplerVarCount))) ||
+          name_seen_in_uniform_vars(pixel_shader->uniformVars,
+                                    pixel_shader->uniformVarCount, var->name,
+                                    pixel_shader->uniformVarCount) ||
+          name_seen_in_sampler_vars(pixel_shader->samplerVars,
+                                    pixel_shader->samplerVarCount, var->name,
+                                    i)) {
+        continue;
+      }
+      consider_active_variable(var->name, 1, map_sampler_var_type(var->type),
+                               wanted_index, &count, &max_name_length,
+                               out_info);
+    }
+  }
+
+  if (out_count) {
+    *out_count = count;
+  }
+  if (out_max_name_length) {
+    *out_max_name_length = max_name_length;
+  }
+}
+
+static void collect_active_attribs(const GLProgram *prog, GLuint wanted_index,
+                                   ActiveVariableInfo *out_info,
+                                   GLuint *out_count,
+                                   GLsizei *out_max_name_length) {
+  const GX2VertexShader *vertex_shader;
+  GLuint count = 0;
+  GLsizei max_name_length = 0;
+
+  if (out_info) {
+    memset(out_info, 0, sizeof(*out_info));
+  }
+  if (!prog || !prog->group || !prog->group->vertexShader) {
+    if (out_count) {
+      *out_count = 0;
+    }
+    if (out_max_name_length) {
+      *out_max_name_length = 0;
+    }
+    return;
+  }
+
+  vertex_shader = prog->group->vertexShader;
+  for (uint32_t i = 0; i < vertex_shader->attribVarCount; ++i) {
+    const GX2AttribVar *var = &vertex_shader->attribVars[i];
+
+    if (!var->name) {
+      continue;
+    }
+    consider_active_variable(var->name, (GLint)var->count,
+                             map_shader_var_type(var->type), wanted_index,
+                             &count, &max_name_length, out_info);
+  }
+
+  if (out_count) {
+    *out_count = count;
+  }
+  if (out_max_name_length) {
+    *out_max_name_length = max_name_length;
+  }
+}
+
+static void write_active_variable_name(const char *source, GLsizei bufSize,
+                                       GLsizei *length, GLchar *name) {
+  GLsizei copied = 0;
+
+  if (length) {
+    *length = 0;
+  }
+  if (!source || !name || bufSize <= 0) {
+    return;
+  }
+
+  copied = (GLsizei)strlen(source);
+  if (copied >= bufSize) {
+    copied = bufSize - 1;
+  }
+  memcpy(name, source, (size_t)copied);
+  name[copied] = '\0';
+  if (length) {
+    *length = copied;
+  }
+}
+
+static bool validate_sampler_bindings(const GX2SamplerVar *vars, uint32_t count,
+                                      const GLint *units,
+                                      GLenum unit_types[MAX_PROGRAM_SAMPLERS],
+                                      const char **conflict_name,
+                                      GLint *conflict_unit) {
+  for (uint32_t i = 0; i < count; ++i) {
+    GLenum sampler_type;
+    GLint unit;
+
+    if (!vars[i].name || vars[i].location >= MAX_PROGRAM_SAMPLERS) {
+      continue;
+    }
+
+    sampler_type = map_sampler_var_type(vars[i].type);
+    unit = units[vars[i].location];
+    if (unit < 0 || unit >= MAX_PROGRAM_SAMPLERS) {
+      if (conflict_name) {
+        *conflict_name = vars[i].name;
+      }
+      if (conflict_unit) {
+        *conflict_unit = unit;
+      }
+      return false;
+    }
+
+    if (unit_types[unit] != 0 && unit_types[unit] != sampler_type) {
+      if (conflict_name) {
+        *conflict_name = vars[i].name;
+      }
+      if (conflict_unit) {
+        *conflict_unit = unit;
+      }
+      return false;
+    }
+
+    unit_types[unit] = sampler_type;
+  }
+
+  return true;
+}
+
 static void destroy_shader(GLuint shader_id) {
   if (!is_valid_shader(shader_id)) {
     return;
@@ -295,6 +694,7 @@ static void destroy_program(GLuint program_id) {
   attached_geometry_shader = g_programs[program_id].attached_geometry_shader;
 
   clear_program_group(&g_programs[program_id]);
+  free_program_attrib_bindings(&g_programs[program_id]);
   free_owned_string(&g_programs[program_id].info_log);
   memset(&g_programs[program_id], 0, sizeof(g_programs[program_id]));
 
@@ -552,6 +952,153 @@ static GLProgram *get_bound_linked_program(bool set_error) {
   return &g_programs[program];
 }
 
+static GLProgram *get_linked_program(GLuint program) {
+  if (!g_gl_context) {
+    return NULL;
+  }
+  if (!is_valid_program(program)) {
+    set_program_lookup_error(program);
+    return NULL;
+  }
+  if (!g_programs[program].linked || !g_programs[program].group) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return NULL;
+  }
+
+  return &g_programs[program];
+}
+
+static UniformBlockShadow *get_uniform_shadow_block(GLProgram *prog,
+                                                    GLint location) {
+  uint32_t block_idx;
+
+  if (!prog || location_is_sampler(location)) {
+    return NULL;
+  }
+
+  block_idx = ((uint32_t)location >> 16) & GL_LOCATION_BLOCK_MASK;
+  if (location_is_pixel(location)) {
+    if (block_idx >= prog->ps_block_count) {
+      return NULL;
+    }
+    return &prog->ps_blocks[block_idx];
+  }
+
+  if (block_idx >= prog->vs_block_count) {
+    return NULL;
+  }
+  return &prog->vs_blocks[block_idx];
+}
+
+static const GX2UniformVar *find_uniform_var_for_location(const GLProgram *prog,
+                                                          GLint location) {
+  const GX2UniformVar *vars = NULL;
+  uint32_t count = 0;
+  uint32_t block_idx;
+  uint32_t offset;
+
+  if (!prog || !prog->group || location_is_sampler(location)) {
+    return NULL;
+  }
+
+  if (location_is_pixel(location)) {
+    if (!prog->group->pixelShader) {
+      return NULL;
+    }
+    vars = prog->group->pixelShader->uniformVars;
+    count = prog->group->pixelShader->uniformVarCount;
+  } else {
+    if (!prog->group->vertexShader) {
+      return NULL;
+    }
+    vars = prog->group->vertexShader->uniformVars;
+    count = prog->group->vertexShader->uniformVarCount;
+  }
+
+  block_idx = ((uint32_t)location >> 16) & GL_LOCATION_BLOCK_MASK;
+  offset = (uint32_t)location & 0xFFFFu;
+  for (uint32_t i = 0; i < count; ++i) {
+    if (vars[i].block == block_idx && vars[i].offset == offset) {
+      return &vars[i];
+    }
+  }
+
+  return NULL;
+}
+
+static const GX2SamplerVar *find_sampler_var_for_location(const GLProgram *prog,
+                                                          GLint location) {
+  const GX2SamplerVar *vars = NULL;
+  uint32_t count = 0;
+  uint32_t sampler_location;
+
+  if (!prog || !prog->group || !location_is_sampler(location)) {
+    return NULL;
+  }
+
+  if (location_is_pixel(location)) {
+    if (!prog->group->pixelShader) {
+      return NULL;
+    }
+    vars = prog->group->pixelShader->samplerVars;
+    count = prog->group->pixelShader->samplerVarCount;
+  } else {
+    if (!prog->group->vertexShader) {
+      return NULL;
+    }
+    vars = prog->group->vertexShader->samplerVars;
+    count = prog->group->vertexShader->samplerVarCount;
+  }
+
+  sampler_location = (uint32_t)location & 0xFFFFu;
+  for (uint32_t i = 0; i < count; ++i) {
+    if (vars[i].location == sampler_location) {
+      return &vars[i];
+    }
+  }
+
+  return NULL;
+}
+
+static void copy_uniform_words_to_floats(const uint32_t *src_words,
+                                         GLsizei word_count,
+                                         bool float_storage,
+                                         GLfloat *params) {
+  for (GLsizei i = 0; i < word_count; ++i) {
+    uint32_t raw = GPU_TO_CPU_32(src_words[i]);
+
+    if (float_storage) {
+      union {
+        uint32_t u32;
+        GLfloat f32;
+      } value;
+      value.u32 = raw;
+      params[i] = value.f32;
+    } else {
+      params[i] = (GLfloat)(GLint)raw;
+    }
+  }
+}
+
+static void copy_uniform_words_to_ints(const uint32_t *src_words,
+                                       GLsizei word_count, bool float_storage,
+                                       GLint *params) {
+  for (GLsizei i = 0; i < word_count; ++i) {
+    uint32_t raw = GPU_TO_CPU_32(src_words[i]);
+
+    if (float_storage) {
+      union {
+        uint32_t u32;
+        GLfloat f32;
+      } value;
+      value.u32 = raw;
+      params[i] = (GLint)value.f32;
+    } else {
+      params[i] = (GLint)raw;
+    }
+  }
+}
+
 static bool update_uniform_words(GLint location, const uint32_t *data,
                                  GLsizei count_words,
                                  uint32_t extra_offset_bytes) {
@@ -647,6 +1194,78 @@ static bool set_sampler_unit(GLint location, GLint unit) {
   return true;
 }
 
+static bool set_sampler_units(GLint location, GLsizei count,
+                              const GLint *values) {
+  GLProgram *prog = get_bound_linked_program(true);
+  uint32_t sampler_location;
+
+  if (location == -1) {
+    return true;
+  }
+  if (count < 0) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return false;
+  }
+  if (count == 0) {
+    return true;
+  }
+  if (!values) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return false;
+  }
+  if (!prog) {
+    return false;
+  }
+  if (!location_is_sampler(location)) {
+    return update_uniform_words(location, (const uint32_t *)values, count, 0);
+  }
+
+  sampler_location = (uint32_t)location & 0xFFFFu;
+  if (sampler_location + (uint32_t)count > MAX_PROGRAM_SAMPLERS) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return false;
+  }
+
+  for (GLsizei i = 0; i < count; ++i) {
+    if (values[i] < 0 || values[i] >= 32) {
+      _gl_set_error(GL_INVALID_VALUE);
+      return false;
+    }
+    if (location_is_pixel(location)) {
+      prog->pixel_sampler_units[sampler_location + (uint32_t)i] = values[i];
+    } else {
+      prog->vertex_sampler_units[sampler_location + (uint32_t)i] = values[i];
+    }
+  }
+
+  g_gl_context->dirty_flags |= GL_DIRTY_TEXTURE_BINDINGS;
+  return true;
+}
+
+static bool update_non_sampler_int_words(GLint location, const GLint *data,
+                                         GLsizei count_words) {
+  if (location == -1) {
+    return true;
+  }
+  if (count_words < 0) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return false;
+  }
+  if (count_words == 0) {
+    return true;
+  }
+  if (!data) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return false;
+  }
+  if (location_is_sampler(location)) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return false;
+  }
+
+  return update_uniform_words(location, (const uint32_t *)data, count_words, 0);
+}
+
 void gl_shader_init(void) {
   memset(g_shaders, 0, sizeof(g_shaders));
   memset(g_programs, 0, sizeof(g_programs));
@@ -686,6 +1305,10 @@ void _gl_DeleteShader(GLuint shader) {
 
   g_shaders[shader].delete_pending = true;
   maybe_destroy_shader(shader);
+}
+
+GLboolean _gl_IsShader(GLuint shader) {
+  return is_valid_shader(shader) ? GL_TRUE : GL_FALSE;
 }
 
 void _gl_ShaderSource(GLuint shader, GLsizei count, const GLchar *const *string,
@@ -762,8 +1385,7 @@ void _gl_CompileShader(GLuint shader) {
     return;
   }
 
-  /* CafeGLSL compilation happens off-device. Runtime compile only marks the
-   * source as ready for an offline pass that produces a GFD/GSH blob. */
+  // Mark compile success
   g_shaders[shader].compile_requested = true;
   g_shaders[shader].compile_succeeded = true;
   set_shader_log(&g_shaders[shader], NULL);
@@ -797,6 +1419,10 @@ void _gl_DeleteProgram(GLuint program) {
 
   g_programs[program].delete_pending = true;
   maybe_destroy_program(program);
+}
+
+GLboolean _gl_IsProgram(GLuint program) {
+  return is_valid_program(program) ? GL_TRUE : GL_FALSE;
 }
 
 void _gl_AttachShader(GLuint program, GLuint shader) {
@@ -833,6 +1459,7 @@ void _gl_AttachShader(GLuint program, GLuint shader) {
 
   replaced_shader = *slot;
   *slot = shader;
+  prog->validated = false;
   if (replaced_shader != 0 && replaced_shader != shader) {
     maybe_destroy_shader(replaced_shader);
   }
@@ -863,7 +1490,156 @@ void _gl_DetachShader(GLuint program, GLuint shader) {
   }
 
   *slot = 0;
+  prog->validated = false;
   maybe_destroy_shader(shader);
+}
+
+void _gl_BindAttribLocation(GLuint program, GLuint index, const GLchar *name) {
+  GLProgram *prog;
+  char *copy;
+
+  if (!g_gl_context) {
+    return;
+  }
+  if (!is_valid_program(program)) {
+    set_program_lookup_error(program);
+    return;
+  }
+  if (!name || index >= GL33_MAX_VERTEX_ATTRIBS) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+  if (strncmp(name, "gl_", 3) == 0) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
+
+  copy = copy_program_string(name);
+  if (!copy) {
+    _gl_set_error(GL_OUT_OF_MEMORY);
+    return;
+  }
+
+  prog = &g_programs[program];
+  for (uint32_t i = 0; i < GL33_MAX_VERTEX_ATTRIBS; ++i) {
+    if (prog->attrib_binding_names[i] &&
+        strcmp(prog->attrib_binding_names[i], name) == 0) {
+      free_owned_string(&prog->attrib_binding_names[i]);
+    }
+  }
+
+  free_owned_string(&prog->attrib_binding_names[index]);
+  prog->attrib_binding_names[index] = copy;
+}
+
+void _gl_GetAttachedShaders(GLuint program, GLsizei maxCount, GLsizei *count,
+                            GLuint *shaders) {
+  GLsizei written = 0;
+  GLProgram *prog;
+
+  if (!g_gl_context) {
+    return;
+  }
+  if (!is_valid_program(program)) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+  if (maxCount < 0) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+
+  prog = &g_programs[program];
+  if (count) {
+    *count = 0;
+  }
+  if (!shaders || maxCount == 0) {
+    return;
+  }
+
+  if (prog->attached_vertex_shader && written < maxCount) {
+    shaders[written++] = prog->attached_vertex_shader;
+  }
+  if (prog->attached_pixel_shader && written < maxCount) {
+    shaders[written++] = prog->attached_pixel_shader;
+  }
+  if (prog->attached_geometry_shader && written < maxCount) {
+    shaders[written++] = prog->attached_geometry_shader;
+  }
+
+  if (count) {
+    *count = written;
+  }
+}
+
+void _gl_GetActiveAttrib(GLuint program, GLuint index, GLsizei bufSize,
+                         GLsizei *length, GLint *size, GLenum *type,
+                         GLchar *name) {
+  GLProgram *prog;
+  ActiveVariableInfo info;
+  GLuint active_count = 0;
+
+  if (!g_gl_context) {
+    return;
+  }
+  if (!is_valid_program(program)) {
+    set_program_lookup_error(program);
+    return;
+  }
+  if (bufSize < 0) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+
+  prog = &g_programs[program];
+  collect_active_attribs(prog, index, &info, &active_count, NULL);
+  if (index >= active_count) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+
+  if (size) {
+    *size = info.size;
+  }
+  if (type) {
+    *type = info.type;
+  }
+  write_active_variable_name(info.name, bufSize, length, name);
+}
+
+void _gl_GetActiveUniform(GLuint program, GLuint index, GLsizei bufSize,
+                          GLsizei *length, GLint *size, GLenum *type,
+                          GLchar *name) {
+  GLProgram *prog;
+  ActiveVariableInfo info;
+  GLuint active_count = 0;
+
+  if (!g_gl_context) {
+    return;
+  }
+  if (!is_valid_program(program)) {
+    set_program_lookup_error(program);
+    return;
+  }
+  if (bufSize < 0) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+
+  prog = &g_programs[program];
+  collect_active_uniforms(prog, index, &info, &active_count, NULL);
+  if (index >= active_count) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+
+  if (size) {
+    *size = info.size;
+  }
+  if (type) {
+    *type = info.type;
+  }
+  write_active_variable_name(info.name, bufSize, length, name);
 }
 
 void _gl_LinkProgram(GLuint program) {
@@ -880,6 +1656,7 @@ void _gl_LinkProgram(GLuint program) {
   prog = &g_programs[program];
   if (prog->group) {
     prog->linked = true;
+    prog->validated = false;
     set_program_log(prog, NULL);
     return;
   }
@@ -894,14 +1671,77 @@ void _gl_LinkProgram(GLuint program) {
     return;
   }
 
-  /* Runtime GLSL-to-GX2 compilation is intentionally unsupported. Applications
-   * must compile with CafeGLSL on the host and load the resulting GFD/GSH blob
-   * through glWiiULoadShaderGroupGFD or glWiiULoadShaderGroup. */
+  // Explain link failure
   set_program_log(
       prog,
-      "Runtime GLSL linking is unsupported. Compile with CafeGLSL and load a "
-      "precompiled GFD/GSH shader group.");
+        "Runtime GLSL linking is unsupported. Compile with CafeGLSL and load a "
+        "precompiled GFD/GSH shader group.");
   _gl_set_error(GL_INVALID_OPERATION);
+}
+
+void _gl_ValidateProgram(GLuint program) {
+  GLProgram *prog;
+  GLenum unit_types[MAX_PROGRAM_SAMPLERS];
+  const char *conflict_name = NULL;
+  GLint conflict_unit = -1;
+  char message[160];
+
+  if (!g_gl_context) {
+    return;
+  }
+  if (!is_valid_program(program)) {
+    set_program_lookup_error(program);
+    return;
+  }
+
+  prog = &g_programs[program];
+  prog->validated = false;
+
+  if (!prog->linked || !prog->group) {
+    set_program_log(prog, "Program validation failed: no linked shader group.");
+    return;
+  }
+
+  memset(unit_types, 0, sizeof(unit_types));
+
+  if (prog->group->vertexShader &&
+      !validate_sampler_bindings(prog->group->vertexShader->samplerVars,
+                                 prog->group->vertexShader->samplerVarCount,
+                                 prog->vertex_sampler_units, unit_types,
+                                 &conflict_name, &conflict_unit)) {
+    if (conflict_unit < 0 || conflict_unit >= MAX_PROGRAM_SAMPLERS) {
+      snprintf(message, sizeof(message),
+               "Program validation failed: sampler %s uses out-of-range unit %d.",
+               conflict_name ? conflict_name : "<unnamed>", conflict_unit);
+    } else {
+      snprintf(message, sizeof(message),
+               "Program validation failed: sampler type conflict on unit %d for %s.",
+               conflict_unit, conflict_name ? conflict_name : "<unnamed>");
+    }
+    set_program_log(prog, message);
+    return;
+  }
+
+  if (prog->group->pixelShader &&
+      !validate_sampler_bindings(prog->group->pixelShader->samplerVars,
+                                 prog->group->pixelShader->samplerVarCount,
+                                 prog->pixel_sampler_units, unit_types,
+                                 &conflict_name, &conflict_unit)) {
+    if (conflict_unit < 0 || conflict_unit >= MAX_PROGRAM_SAMPLERS) {
+      snprintf(message, sizeof(message),
+               "Program validation failed: sampler %s uses out-of-range unit %d.",
+               conflict_name ? conflict_name : "<unnamed>", conflict_unit);
+    } else {
+      snprintf(message, sizeof(message),
+               "Program validation failed: sampler type conflict on unit %d for %s.",
+               conflict_unit, conflict_name ? conflict_name : "<unnamed>");
+    }
+    set_program_log(prog, message);
+    return;
+  }
+
+  prog->validated = true;
+  set_program_log(prog, NULL);
 }
 
 void _gl_UseProgram(GLuint program) {
@@ -1008,11 +1848,14 @@ void _gl_GetShaderiv(GLuint shader, GLenum pname, GLint *params) {
 }
 
 void _gl_GetProgramiv(GLuint program, GLenum pname, GLint *params) {
+  GLsizei max_name_length = 0;
+  GLuint active_count = 0;
+
   if (!g_gl_context || !params) {
     return;
   }
   if (!is_valid_program(program)) {
-    _gl_set_error(GL_INVALID_VALUE);
+    set_program_lookup_error(program);
     return;
   }
 
@@ -1023,11 +1866,34 @@ void _gl_GetProgramiv(GLuint program, GLenum pname, GLint *params) {
   case GL_LINK_STATUS:
     *params = g_programs[program].linked ? GL_TRUE : GL_FALSE;
     break;
+  case GL_VALIDATE_STATUS:
+    *params = g_programs[program].validated ? GL_TRUE : GL_FALSE;
+    break;
   case GL_INFO_LOG_LENGTH:
     *params = (GLint)get_log_length(g_programs[program].info_log);
     break;
   case GL_ATTACHED_SHADERS:
     *params = (GLint)count_program_attached_shaders(&g_programs[program]);
+    break;
+  case GL_ACTIVE_UNIFORMS:
+    collect_active_uniforms(&g_programs[program], (GLuint)~0u, NULL,
+                            &active_count, NULL);
+    *params = (GLint)active_count;
+    break;
+  case GL_ACTIVE_UNIFORM_MAX_LENGTH:
+    collect_active_uniforms(&g_programs[program], (GLuint)~0u, NULL, NULL,
+                            &max_name_length);
+    *params = (GLint)max_name_length;
+    break;
+  case GL_ACTIVE_ATTRIBUTES:
+    collect_active_attribs(&g_programs[program], (GLuint)~0u, NULL,
+                           &active_count, NULL);
+    *params = (GLint)active_count;
+    break;
+  case GL_ACTIVE_ATTRIBUTE_MAX_LENGTH:
+    collect_active_attribs(&g_programs[program], (GLuint)~0u, NULL, NULL,
+                           &max_name_length);
+    *params = (GLint)max_name_length;
     break;
   default:
     _gl_set_error(GL_INVALID_ENUM);
@@ -1077,6 +1943,19 @@ void _gl_GetShaderInfoLog(GLuint shader, GLsizei maxLength, GLsizei *length,
   copy_info_log_text(g_shaders[shader].info_log, maxLength, length, infoLog);
 }
 
+void _gl_GetShaderSource(GLuint shader, GLsizei bufSize, GLsizei *length,
+                         GLchar *source) {
+  if (!g_gl_context) {
+    return;
+  }
+  if (!is_valid_shader(shader)) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+
+  copy_info_log_text(g_shaders[shader].source, bufSize, length, source);
+}
+
 void _gl_GetProgramInfoLog(GLuint program, GLsizei maxLength, GLsizei *length,
                            GLchar *infoLog) {
   if (!g_gl_context) {
@@ -1090,7 +1969,187 @@ void _gl_GetProgramInfoLog(GLuint program, GLsizei maxLength, GLsizei *length,
   copy_info_log_text(g_programs[program].info_log, maxLength, length, infoLog);
 }
 
-/* Encoding: bit 31 = is_pixel, bits 16-30 = block_index, bits 0-15 = offset */
+void _gl_GetUniformfv(GLuint program, GLint location, GLfloat *params) {
+  GLProgram *prog;
+  const GX2UniformVar *uniform_var;
+  const GX2SamplerVar *sampler_var;
+  UniformBlockShadow *block;
+  const uint32_t *src_words;
+  GLsizei word_count;
+  uint32_t offset;
+
+  if (!g_gl_context || !params) {
+    return;
+  }
+
+  prog = get_linked_program(program);
+  if (!prog) {
+    return;
+  }
+
+  if (location_is_sampler(location)) {
+    sampler_var = find_sampler_var_for_location(prog, location);
+    if (!sampler_var || sampler_var->location >= MAX_PROGRAM_SAMPLERS) {
+      _gl_set_error(GL_INVALID_OPERATION);
+      return;
+    }
+
+    if (location_is_pixel(location)) {
+      params[0] = (GLfloat)prog->pixel_sampler_units[sampler_var->location];
+    } else {
+      params[0] = (GLfloat)prog->vertex_sampler_units[sampler_var->location];
+    }
+    return;
+  }
+
+  uniform_var = find_uniform_var_for_location(prog, location);
+  block = get_uniform_shadow_block(prog, location);
+  if (!uniform_var || !block || !block->buffer) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
+
+  word_count = (GLsizei)(shader_var_type_word_count(uniform_var->type) *
+                         (uniform_var->count > 0 ? uniform_var->count : 1u));
+  offset = (uint32_t)location & 0xFFFFu;
+  if (word_count == 0 ||
+      offset + (uint32_t)word_count * 4u > block->size) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
+
+  src_words = (const uint32_t *)((const uint8_t *)block->buffer + offset);
+  copy_uniform_words_to_floats(
+      src_words, word_count,
+      shader_var_type_is_float_storage(uniform_var->type), params);
+}
+
+void _gl_GetUniformiv(GLuint program, GLint location, GLint *params) {
+  GLProgram *prog;
+  const GX2UniformVar *uniform_var;
+  const GX2SamplerVar *sampler_var;
+  UniformBlockShadow *block;
+  const uint32_t *src_words;
+  GLsizei word_count;
+  uint32_t offset;
+
+  if (!g_gl_context || !params) {
+    return;
+  }
+
+  prog = get_linked_program(program);
+  if (!prog) {
+    return;
+  }
+
+  if (location_is_sampler(location)) {
+    sampler_var = find_sampler_var_for_location(prog, location);
+    if (!sampler_var || sampler_var->location >= MAX_PROGRAM_SAMPLERS) {
+      _gl_set_error(GL_INVALID_OPERATION);
+      return;
+    }
+
+    if (location_is_pixel(location)) {
+      params[0] = prog->pixel_sampler_units[sampler_var->location];
+    } else {
+      params[0] = prog->vertex_sampler_units[sampler_var->location];
+    }
+    return;
+  }
+
+  uniform_var = find_uniform_var_for_location(prog, location);
+  block = get_uniform_shadow_block(prog, location);
+  if (!uniform_var || !block || !block->buffer) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
+
+  word_count = (GLsizei)(shader_var_type_word_count(uniform_var->type) *
+                         (uniform_var->count > 0 ? uniform_var->count : 1u));
+  offset = (uint32_t)location & 0xFFFFu;
+  if (word_count == 0 ||
+      offset + (uint32_t)word_count * 4u > block->size) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
+
+  src_words = (const uint32_t *)((const uint8_t *)block->buffer + offset);
+  copy_uniform_words_to_ints(
+      src_words, word_count,
+      shader_var_type_is_float_storage(uniform_var->type), params);
+}
+
+void _gl_ReleaseShaderCompiler(void) {}
+
+void _gl_ShaderBinary(GLsizei count, const GLuint *shaders, GLenum binaryFormat,
+                      const GLvoid *binary, GLsizei length) {
+  (void)binary;
+
+  if (!g_gl_context) {
+    return;
+  }
+  if (count < 0 || length < 0) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+  if (count > 0 && !shaders) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+  for (GLsizei i = 0; i < count; ++i) {
+    if (!is_valid_shader(shaders[i])) {
+      _gl_set_error(GL_INVALID_VALUE);
+      return;
+    }
+  }
+  if (count == 0) {
+    return;
+  }
+
+  (void)binaryFormat;
+  _gl_set_error(GL_INVALID_ENUM);
+}
+
+void _gl_GetShaderPrecisionFormat(GLenum shadertype, GLenum precisiontype,
+                                  GLint *range, GLint *precision) {
+  if (!g_gl_context) {
+    return;
+  }
+  if (shadertype != GL_VERTEX_SHADER && shadertype != GL_FRAGMENT_SHADER) {
+    _gl_set_error(GL_INVALID_ENUM);
+    return;
+  }
+
+  switch (precisiontype) {
+  case GL_LOW_FLOAT:
+  case GL_MEDIUM_FLOAT:
+  case GL_HIGH_FLOAT:
+    if (range) {
+      range[0] = 127;
+      range[1] = 127;
+    }
+    if (precision) {
+      *precision = 23;
+    }
+    return;
+  case GL_LOW_INT:
+  case GL_MEDIUM_INT:
+  case GL_HIGH_INT:
+    if (range) {
+      range[0] = 31;
+      range[1] = 30;
+    }
+    if (precision) {
+      *precision = 0;
+    }
+    return;
+  default:
+    _gl_set_error(GL_INVALID_ENUM);
+    return;
+  }
+}
+
+// Look up uniforms
 GLint _gl_GetUniformLocation(GLuint program, const GLchar *name) {
   GLProgram *prog;
 
@@ -1234,6 +2293,10 @@ void _gl_Uniform1i(GLint location, GLint v0) {
   (void)set_sampler_unit(location, v0);
 }
 
+void _gl_Uniform1iv(GLint location, GLsizei count, const GLint *value) {
+  (void)set_sampler_units(location, count, value);
+}
+
 void _gl_Uniform2f(GLint location, GLfloat v0, GLfloat v1) {
   GLfloat data[2] = {v0, v1};
   (void)update_uniform_words(location, (const uint32_t *)data, 2, 0);
@@ -1245,6 +2308,19 @@ void _gl_Uniform2fv(GLint location, GLsizei count, const GLfloat *value) {
     return;
   }
   (void)update_uniform_words(location, (const uint32_t *)value, count * 2, 0);
+}
+
+void _gl_Uniform2i(GLint location, GLint v0, GLint v1) {
+  GLint data[2] = {v0, v1};
+  (void)update_non_sampler_int_words(location, data, 2);
+}
+
+void _gl_Uniform2iv(GLint location, GLsizei count, const GLint *value) {
+  if (count < 0 || (count > 0 && !value)) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+  (void)update_non_sampler_int_words(location, value, count * 2);
 }
 
 void _gl_Uniform3f(GLint location, GLfloat v0, GLfloat v1, GLfloat v2) {
@@ -1260,6 +2336,19 @@ void _gl_Uniform3fv(GLint location, GLsizei count, const GLfloat *value) {
   (void)update_uniform_words(location, (const uint32_t *)value, count * 3, 0);
 }
 
+void _gl_Uniform3i(GLint location, GLint v0, GLint v1, GLint v2) {
+  GLint data[3] = {v0, v1, v2};
+  (void)update_non_sampler_int_words(location, data, 3);
+}
+
+void _gl_Uniform3iv(GLint location, GLsizei count, const GLint *value) {
+  if (count < 0 || (count > 0 && !value)) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+  (void)update_non_sampler_int_words(location, value, count * 3);
+}
+
 void _gl_Uniform4f(GLint location, GLfloat v0, GLfloat v1, GLfloat v2,
                    GLfloat v3) {
   GLfloat data[4] = {v0, v1, v2, v3};
@@ -1272,6 +2361,83 @@ void _gl_Uniform4fv(GLint location, GLsizei count, const GLfloat *value) {
     return;
   }
   (void)update_uniform_words(location, (const uint32_t *)value, count * 4, 0);
+}
+
+void _gl_Uniform4i(GLint location, GLint v0, GLint v1, GLint v2, GLint v3) {
+  GLint data[4] = {v0, v1, v2, v3};
+  (void)update_non_sampler_int_words(location, data, 4);
+}
+
+void _gl_Uniform4iv(GLint location, GLsizei count, const GLint *value) {
+  if (count < 0 || (count > 0 && !value)) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+  (void)update_non_sampler_int_words(location, value, count * 4);
+}
+
+void _gl_UniformMatrix2fv(GLint location, GLsizei count, GLboolean transpose,
+                          const GLfloat *value) {
+  if (location == -1) {
+    return;
+  }
+  if (count < 0 || !value) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+
+  for (GLsizei c = 0; c < count; ++c) {
+    const GLfloat *src = value + c * 4;
+    uint32_t offset = (uint32_t)c * 16u;
+
+    if (transpose) {
+      GLfloat transposed[4];
+      for (int row = 0; row < 2; ++row) {
+        for (int col = 0; col < 2; ++col) {
+          transposed[row * 2 + col] = src[col * 2 + row];
+        }
+      }
+      if (!update_uniform_words(location, (const uint32_t *)transposed, 4,
+                                offset)) {
+        return;
+      }
+    } else if (!update_uniform_words(location, (const uint32_t *)src, 4,
+                                     offset)) {
+      return;
+    }
+  }
+}
+
+void _gl_UniformMatrix3fv(GLint location, GLsizei count, GLboolean transpose,
+                          const GLfloat *value) {
+  if (location == -1) {
+    return;
+  }
+  if (count < 0 || !value) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+
+  for (GLsizei c = 0; c < count; ++c) {
+    const GLfloat *src = value + c * 9;
+    uint32_t offset = (uint32_t)c * 36u;
+
+    if (transpose) {
+      GLfloat transposed[9];
+      for (int row = 0; row < 3; ++row) {
+        for (int col = 0; col < 3; ++col) {
+          transposed[row * 3 + col] = src[col * 3 + row];
+        }
+      }
+      if (!update_uniform_words(location, (const uint32_t *)transposed, 9,
+                                offset)) {
+        return;
+      }
+    } else if (!update_uniform_words(location, (const uint32_t *)src, 9,
+                                     offset)) {
+      return;
+    }
+  }
 }
 
 void _gl_UniformMatrix4fv(GLint location, GLsizei count, GLboolean transpose,
@@ -1342,7 +2508,7 @@ static void bind_shader_sampler_vars(const GX2SamplerVar *samplers,
     }
 
     texture = gl_get_gx2_texture(texture_id);
-    gx2_sampler = gl_get_gx2_sampler(texture_id);
+    gx2_sampler = gl_get_effective_gx2_sampler(gl_unit, texture_id);
     if (!texture || !gx2_sampler) {
       continue;
     }

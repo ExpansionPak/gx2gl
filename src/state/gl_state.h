@@ -5,14 +5,10 @@
 
 #ifdef __cplusplus
 extern "C" {
-#endif
-
-
-
-// Internal function to apply all dirty state to GX2
+#endif // C linkage guard
 void gl_flush_state(void);
 
-// These will be assigned to dispatch table
+// State call implementations
 void _gl_ClearColor(GLclampf red, GLclampf green, GLclampf blue,
                     GLclampf alpha);
 void _gl_ClearDepth(GLclampd depth);
@@ -44,6 +40,9 @@ void _gl_Scissor(GLint x, GLint y, GLsizei width, GLsizei height);
 void _gl_ColorMask(GLboolean red, GLboolean green, GLboolean blue,
                    GLboolean alpha);
 void _gl_LineWidth(GLfloat width);
+void _gl_Hint(GLenum target, GLenum mode);
+void _gl_SampleCoverage(GLclampf value, GLboolean invert);
+void _gl_PixelStorei(GLenum pname, GLint param);
 void _gl_Enable(GLenum cap);
 void _gl_Disable(GLenum cap);
 GLboolean _gl_IsEnabled(GLenum cap);
@@ -52,4 +51,4 @@ GLboolean _gl_IsEnabled(GLenum cap);
 }
 #endif
 
-#endif // GL33_STATE_H
+#endif // State header guard
