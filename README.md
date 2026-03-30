@@ -12,4 +12,6 @@ wut: https://github.com/devkitPro/wut/
 
 Projects that use gx2gl: https://github.com/siahisaforker/Latte3AIR
 
-if your project uses gx2gl, you can make a pr or something like that so I can add your link
+#Please read!!
+
+!!This project is being used as a learning device. It is NOT production ready, and by using it you acknowledge that it is NOT accurate and will not be for a long time.
