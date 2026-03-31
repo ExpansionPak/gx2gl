@@ -10,6 +10,8 @@ wut: https://github.com/devkitPro/wut/
 
 "Because ANGLE wasn't enough." - siahisaforker, February 12, 2026
 
+- To clarify, that date was the first day I accomplished a single passing GL function
+
 Projects that use gx2gl: https://github.com/siahisaforker/Latte3AIR
 
 # Please read!!
