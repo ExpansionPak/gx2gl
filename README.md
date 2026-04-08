@@ -12,7 +12,6 @@ wut: https://github.com/devkitPro/wut/
 
 - To clarify, that date was the first day I accomplished a single passing GL function
 
-Projects that use gx2gl: https://github.com/siahisaforker/Latte3AIR
 
 # Please read!!
 
