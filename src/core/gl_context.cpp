@@ -740,26 +740,38 @@ void glTexBuffer(GLenum target, GLenum internalformat, GLuint buffer) { (void)ta
 
 void glFramebufferTexture1D(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level) { (void)target;(void)attachment;(void)textarget;(void)texture;(void)level; }
 void glFramebufferTexture3D(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level, GLint zoffset) { (void)target;(void)attachment;(void)textarget;(void)texture;(void)level;(void)zoffset; }
-void glGetBooleani_v(GLenum target, GLuint index, GLboolean *data) { (void)target;(void)index; if(data)*data=GL_FALSE; }
-void glGetBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, GLvoid *data) { (void)target;(void)offset;(void)size;(void)data; }
+void glGetBooleani_v(GLenum target, GLuint index, GLboolean *data) {
+    GLint v = 0; glGetIntegeri_v(target, index, &v); if (data) *data = v ? GL_TRUE : GL_FALSE;
+}
+void glGetBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, GLvoid *data) { _gl_GetBufferSubData(target, offset, size, data); }
 void glGetCompressedTexImage(GLenum target, GLint level, GLvoid *img) { (void)target;(void)level;(void)img; }
-void glGetPointerv(GLenum pname, GLvoid **params) { (void)pname; if(params)*params=NULL; }
-void glGetSamplerParameterIiv(GLuint sampler, GLenum pname, GLint *params) { (void)sampler;(void)pname; if(params)*params=0; }
-void glGetSamplerParameterIuiv(GLuint sampler, GLenum pname, GLuint *params) { (void)sampler;(void)pname; if(params)*params=0; }
+void glGetPointerv(GLenum pname, GLvoid **params) {
+    if (!params) return;
+    if (pname == 0x8449) { *params = NULL; return; }
+    GLuint idx = (pname >= 0x8626 && pname <= 0x8641) ? pname - 0x8626 : 0;
+    GLfloat dummy[4] = {0,0,0,0};
+    glGetVertexAttribfv(idx, 0x8645, dummy);
+    *params = NULL;
+}
+void glGetSamplerParameterIiv(GLuint sampler, GLenum pname, GLint *params) { _gl_GetSamplerParameterIiv(sampler, pname, params); }
+void glGetSamplerParameterIuiv(GLuint sampler, GLenum pname, GLuint *params) { _gl_GetSamplerParameterIuiv(sampler, pname, params); }
 
 void glGetTexImage(GLenum target, GLint level, GLenum format, GLenum type, GLvoid *pixels) { (void)target;(void)level;(void)format;(void)type;(void)pixels; }
-void glGetTexParameterIiv(GLenum target, GLenum pname, GLint *params) { (void)target;(void)pname; if(params)*params=0; }
-void glGetTexParameterIuiv(GLenum target, GLenum pname, GLuint *params) { (void)target;(void)pname; if(params)*params=0; }
-void glGetVertexAttribdv(GLuint index, GLenum pname, GLdouble *params) { (void)index;(void)pname; if(params)*params=0.0; }
-void glPixelStoref(GLenum pname, GLfloat param) { (void)pname;(void)param; }
+void glGetTexParameterIiv(GLenum target, GLenum pname, GLint *params) { _gl_GetTexParameterIiv(target, pname, params); }
+void glGetTexParameterIuiv(GLenum target, GLenum pname, GLuint *params) { _gl_GetTexParameterIuiv(target, pname, params); }
+void glGetVertexAttribdv(GLuint index, GLenum pname, GLdouble *params) {
+    GLfloat v[4] = {0,0,0,0}; glGetVertexAttribfv(index, pname, v); if (params) *params = (GLdouble)v[0];
+}
+void glPixelStoref(GLenum pname, GLfloat param) { glPixelStorei(pname, (GLint)param); }
 void glPointParameterf(GLenum pname, GLfloat param) { (void)pname;(void)param; }
-void glPointParameterfv(GLenum pname, const GLfloat *params) { (void)pname;(void)params; }
-void glPointParameteri(GLenum pname, GLint param) { (void)pname;(void)param; }
-void glPointParameteriv(GLenum pname, const GLint *params) { (void)pname;(void)params; }
-void glSamplerParameterIiv(GLuint sampler, GLenum pname, const GLint *param) { (void)sampler;(void)pname;(void)param; }
-void glSamplerParameterIuiv(GLuint sampler, GLenum pname, const GLuint *param) { (void)sampler;(void)pname;(void)param; }
-void glTexParameterIiv(GLenum target, GLenum pname, const GLint *params) { (void)target;(void)pname;(void)params; }
-void glTexParameterIuiv(GLenum target, GLenum pname, const GLuint *params) { (void)target;(void)pname;(void)params; }
+void glPointParameterfv(GLenum pname, const GLfloat *params) { if (params) glPointParameterf(pname, params[0]); }
+void glPointParameteri(GLenum pname, GLint param) { glPointParameterf(pname, (GLfloat)param); }
+void glPointParameteriv(GLenum pname, const GLint *params) { if (params) glPointParameterf(pname, (GLfloat)params[0]); }
+void glSamplerParameterIiv(GLuint sampler, GLenum pname, const GLint *param) { _gl_SamplerParameterIiv(sampler, pname, param); }
+void glSamplerParameterIuiv(GLuint sampler, GLenum pname, const GLuint *param) { _gl_SamplerParameterIuiv(sampler, pname, param); }
+void glTexParameterIiv(GLenum target, GLenum pname, const GLint *params) { _gl_TexParameterIiv(target, pname, params); }
+void glTexParameterIuiv(GLenum target, GLenum pname, const GLuint *params) { _gl_TexParameterIuiv(target, pname, params); }
+
 void glVertexAttrib1d(GLuint index, GLdouble x) { glVertexAttrib1f(index, (GLfloat)x); }
 void glVertexAttrib1dv(GLuint index, const GLdouble *v) { if(v) glVertexAttrib1f(index, (GLfloat)v[0]); }
 void glVertexAttrib1s(GLuint index, GLshort x) { glVertexAttrib1f(index, (GLfloat)x); }

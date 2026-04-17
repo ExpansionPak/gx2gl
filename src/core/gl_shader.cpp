@@ -245,7 +245,17 @@ GLint _gl_GetAttribLocation(GLuint p, const GLchar *name) {
 }
 void _gl_ReleaseShaderCompiler(void) {}
 void _gl_ShaderBinary(GLsizei c, const GLuint* s, GLenum f, const GLvoid* b, GLsizei l) { (void)c;(void)s;(void)f;(void)b;(void)l; }
-void _gl_GetShaderPrecisionFormat(GLenum s, GLenum p, GLint* r, GLint* pr) { (void)s;(void)p;(void)r;(void)pr; }
+void _gl_GetShaderPrecisionFormat(GLenum shaderType, GLenum precisionType, GLint *range, GLint *precision) {
+    (void)shaderType;
+    if (range) { range[0] = 127; range[1] = 127; }
+    if (precision) {
+        switch (precisionType) {
+        case 0x8DF0: case 0x8DF1: *precision = 8; break;
+        case 0x8DF2: case 0x8DF3: *precision = 16; break;
+        default: *precision = 23; break;
+        }
+    }
+}
 void _gl_Uniform1f(GLint l, GLfloat v) { update_uniform_words(l, (uint32_t*)&v, 1, 0); }
 void _gl_Uniform1fv(GLint l, GLsizei c, const GLfloat *v) { update_uniform_words(l, (uint32_t*)v, c, 0); }
 void _gl_Uniform1i(GLint l, GLint v) { update_uniform_words(l, (uint32_t*)&v, 1, 0); }

@@ -3,6 +3,7 @@
 #include "endian/endian.h"
 #include "mem/gl_mem.h"
 #include "state/gl_state.h"
+#include <coreinit/cache.h>
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -327,8 +328,10 @@ void _gl_RenderbufferStorage(GLenum target, GLenum internalformat, GLsizei width
 }
 
 void _gl_ReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, GLvoid *pixels) {
-    (void)x; (void)y; (void)width; (void)height; (void)format; (void)type; (void)pixels;
-    _gl_set_error(GL_INVALID_OPERATION);
+    if (!pixels || width <= 0 || height <= 0) { _gl_set_error(GL_INVALID_VALUE); return; }
+    if (format != GL_RGBA && format != 0x80E1 /*GL_BGRA*/) { _gl_set_error(GL_INVALID_ENUM); return; }
+    if (type != GL_UNSIGNED_BYTE) { _gl_set_error(GL_INVALID_ENUM); return; }
+    if (!gl_read_color_pixels_rgba8(x, y, width, height, pixels)) _gl_set_error(GL_INVALID_OPERATION);
 }
 
 void _gl_FramebufferTexture(GLenum target, GLenum attachment, GLuint texture, GLint level) {
@@ -336,8 +339,37 @@ void _gl_FramebufferTexture(GLenum target, GLenum attachment, GLuint texture, GL
 }
 
 void _gl_BlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1, GLbitfield mask, GLenum filter) {
-    (void)srcX0; (void)srcY0; (void)srcX1; (void)srcY1; (void)dstX0; (void)dstY0; (void)dstX1; (void)dstY1; (void)mask; (void)filter;
-    _gl_set_error(GL_INVALID_OPERATION);
+    (void)srcX0; (void)srcY0; (void)dstX0; (void)dstY0; (void)filter;
+    if (!g_gl_context) return;
+    uint32_t srcW = (uint32_t)(srcX1 - srcX0); uint32_t srcH = (uint32_t)(srcY1 - srcY0);
+    uint32_t dstW = (uint32_t)(dstX1 - dstX0); uint32_t dstH = (uint32_t)(dstY1 - dstY0);
+    (void)srcW; (void)srcH; (void)dstW; (void)dstH;
+    if (mask & GL_COLOR_BUFFER_BIT) {
+        GX2ColorBuffer *src_cb = NULL, *dst_cb = NULL;
+        GLuint read_fbo = g_gl_context->bound_read_framebuffer;
+        GLuint draw_fbo = g_gl_context->bound_framebuffer;
+        if (read_fbo == 0) src_cb = WHBGfxGetTVColourBuffer();
+        else if (read_fbo < MAX_FRAMEBUFFERS && g_framebuffers[read_fbo].in_use)
+            src_cb = &g_framebuffers[read_fbo].cb[0];
+        if (draw_fbo == 0) dst_cb = WHBGfxGetTVColourBuffer();
+        else if (draw_fbo < MAX_FRAMEBUFFERS && g_framebuffers[draw_fbo].in_use)
+            dst_cb = &g_framebuffers[draw_fbo].cb[0];
+        if (src_cb && dst_cb)
+            GX2CopySurface(&src_cb->surface, 0, 0, &dst_cb->surface, 0, 0);
+    }
+    if (mask & GL_DEPTH_BUFFER_BIT) {
+        GX2DepthBuffer *src_db = NULL, *dst_db = NULL;
+        GLuint read_fbo = g_gl_context->bound_read_framebuffer;
+        GLuint draw_fbo = g_gl_context->bound_framebuffer;
+        if (read_fbo == 0) src_db = WHBGfxGetTVDepthBuffer();
+        else if (read_fbo < MAX_FRAMEBUFFERS && g_framebuffers[read_fbo].in_use)
+            src_db = &g_framebuffers[read_fbo].db;
+        if (draw_fbo == 0) dst_db = WHBGfxGetTVDepthBuffer();
+        else if (draw_fbo < MAX_FRAMEBUFFERS && g_framebuffers[draw_fbo].in_use)
+            dst_db = &g_framebuffers[draw_fbo].db;
+        if (src_db && dst_db)
+            GX2CopySurface(&src_db->surface, 0, 0, &dst_db->surface, 0, 0);
+    }
 }
 
 void _gl_RenderbufferStorageMultisample(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height) {
@@ -527,8 +559,33 @@ void gl_framebuffer_mark_texture_dirty(GLuint texture) {
 }
 
 GLboolean gl_read_color_pixels_rgba8(GLint x, GLint y, GLsizei width, GLsizei height, void *pixels) {
-    (void)x; (void)y; (void)width; (void)height; (void)pixels;
-    return GL_FALSE;
+    if (!g_gl_context || !pixels) return GL_FALSE;
+    GX2ColorBuffer *cb = NULL;
+    GLuint fbo = g_gl_context->bound_read_framebuffer;
+    if (fbo == 0) cb = WHBGfxGetTVColourBuffer();
+    else if (fbo < MAX_FRAMEBUFFERS && g_framebuffers[fbo].in_use) cb = &g_framebuffers[fbo].cb[0];
+    if (!cb || !cb->surface.image) return GL_FALSE;
+    GX2DrawDone();
+    GX2Surface *surf = &cb->surface;
+    uint32_t surf_height = surf->height;
+    uint32_t pitch = surf->pitch;
+    DCInvalidateRange(surf->image, surf->imageSize);
+    uint32_t *src = (uint32_t *)surf->image;
+    uint8_t *dst = (uint8_t *)pixels;
+    for (GLsizei row = 0; row < height; row++) {
+        GLsizei src_row = (GLsizei)surf_height - 1 - (y + row);
+        if (src_row < 0 || src_row >= (GLsizei)surf_height) continue;
+        uint32_t *src_line = src + (uint32_t)src_row * pitch + (uint32_t)x;
+        uint8_t *dst_line = dst + (GLsizei)row * width * 4;
+        for (GLsizei col = 0; col < width; col++) {
+            uint32_t px = src_line[col];
+            dst_line[col*4+0] = (px >> 24) & 0xFF;
+            dst_line[col*4+1] = (px >> 16) & 0xFF;
+            dst_line[col*4+2] = (px >>  8) & 0xFF;
+            dst_line[col*4+3] = (px >>  0) & 0xFF;
+        }
+    }
+    return GL_TRUE;
 }
 
 #ifdef __cplusplus

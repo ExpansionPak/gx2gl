@@ -1839,6 +1839,19 @@ void _gl_GetTexParameteriv(GLenum target, GLenum pname, GLint *params) {
   }
 }
 
+void _gl_TexParameterIiv(GLenum target, GLenum pname, const GLint *params) {
+  if (params) _gl_TexParameteri(target, pname, params[0]);
+}
+void _gl_TexParameterIuiv(GLenum target, GLenum pname, const GLuint *params) {
+  if (params) _gl_TexParameteri(target, pname, (GLint)params[0]);
+}
+void _gl_GetTexParameterIiv(GLenum target, GLenum pname, GLint *params) {
+  _gl_GetTexParameteriv(target, pname, params);
+}
+void _gl_GetTexParameterIuiv(GLenum target, GLenum pname, GLuint *params) {
+  GLint v = 0; _gl_GetTexParameteriv(target, pname, &v); if (params) *params = (GLuint)v;
+}
+
 void _gl_GetTexParameterfv(GLenum target, GLenum pname, GLfloat *params) {
   GLuint id;
   GLTexture *tex;
@@ -1881,11 +1894,15 @@ void _gl_GetTexParameterfv(GLenum target, GLenum pname, GLfloat *params) {
 }
 
 void _gl_SamplerParameteriv(GLuint sampler, GLenum pname, const GLint *param) {
-  if (!param) {
-    return;
-  }
-
+  if (!param) return;
   _gl_SamplerParameteri(sampler, pname, param[0]);
+}
+
+void _gl_SamplerParameterIiv(GLuint sampler, GLenum pname, const GLint *param) {
+  if (param) _gl_SamplerParameteri(sampler, pname, param[0]);
+}
+void _gl_SamplerParameterIuiv(GLuint sampler, GLenum pname, const GLuint *param) {
+  if (param) _gl_SamplerParameteri(sampler, pname, (GLint)param[0]);
 }
 
 void _gl_SamplerParameterfv(GLuint sampler, GLenum pname,
@@ -1960,6 +1977,13 @@ void _gl_GetSamplerParameteriv(GLuint sampler, GLenum pname, GLint *params) {
     _gl_set_error(GL_INVALID_ENUM);
     break;
   }
+}
+
+void _gl_GetSamplerParameterIiv(GLuint sampler, GLenum pname, GLint *params) {
+  _gl_GetSamplerParameteriv(sampler, pname, params);
+}
+void _gl_GetSamplerParameterIuiv(GLuint sampler, GLenum pname, GLuint *params) {
+  GLint v = 0; _gl_GetSamplerParameteriv(sampler, pname, &v); if (params) *params = (GLuint)v;
 }
 
 void _gl_GetSamplerParameterfv(GLuint sampler, GLenum pname, GLfloat *params) {

@@ -186,6 +186,16 @@ void _gl_FlushMappedBufferRange(GLenum target, GLintptr offset, GLsizeiptr lengt
   DCFlushRange((uint8_t *)buf->mapped_ptr + offset, length);
 }
 
+void _gl_GetBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, GLvoid *data) {
+  GLuint id = get_bound_buffer(target);
+  if (id == 0 || !data) { _gl_set_error(GL_INVALID_OPERATION); return; }
+  GLBuffer *buf = &g_buffers[id];
+  if (!buf->gpu_owned || offset < 0 || size < 0 || offset + size > buf->size) { _gl_set_error(GL_INVALID_VALUE); return; }
+  void *ptr = GX2RLockBufferEx(&buf->gx2_buffer, (GX2RResourceFlags)0);
+  if (ptr) { DCInvalidateRange((uint8_t*)ptr + offset, size); memcpy(data, (uint8_t*)ptr + offset, size); }
+  GX2RUnlockBufferEx(&buf->gx2_buffer, (GX2RResourceFlags)0);
+}
+
 void *gl_buffer_get_data(GLuint id) {
   if (id > 0 && id < MAX_BUFFERS && g_buffers[id].in_use && g_buffers[id].gpu_owned) return g_buffers[id].gx2_buffer.buffer;
   return NULL;
