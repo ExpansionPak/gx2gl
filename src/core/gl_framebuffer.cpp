@@ -52,7 +52,7 @@ typedef struct {
     GLenum read_buffer;
     GLAttachmentRef depth_attachment;
     GLAttachmentRef stencil_attachment;
-    
+
     GX2ColorBuffer cb[8];
     GX2DepthBuffer db;
     bool dirty;

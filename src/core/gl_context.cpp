@@ -589,7 +589,7 @@ void glVertexAttrib3fv(GLuint i, const GLfloat *v) { _gl_VertexAttrib3fv(i, v); 
 void glVertexAttrib4fv(GLuint i, const GLfloat *v) { _gl_VertexAttrib4fv(i, v); }
 
 
-/* --- GL 3.2 draw variants --- */
+
 void glDrawRangeElements(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const GLvoid *i) { _gl_DrawRangeElements(mode, start, end, count, type, i); }
 void glDrawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, const GLvoid *i, GLint bv) { _gl_DrawElementsBaseVertex(mode, count, type, i, bv); }
 void glDrawRangeElementsBaseVertex(GLenum mode, GLuint s, GLuint e, GLsizei count, GLenum type, const GLvoid *i, GLint bv) { _gl_DrawRangeElementsBaseVertex(mode, s, e, count, type, i, bv); }
@@ -598,7 +598,7 @@ void glMultiDrawArrays(GLenum mode, const GLint *first, const GLsizei *count, GL
 void glMultiDrawElements(GLenum mode, const GLsizei *count, GLenum type, const GLvoid *const *i, GLsizei dc) { _gl_MultiDrawElements(mode, count, type, i, dc); }
 void glMultiDrawElementsBaseVertex(GLenum mode, const GLsizei *count, GLenum type, const GLvoid *const *i, GLsizei dc, const GLint *bv) { _gl_MultiDrawElementsBaseVertex(mode, count, type, i, dc, bv); }
 
-/* --- GL 3.0 ClearBuffer --- */
+
 void glClearBufferiv(GLenum buffer, GLint drawbuffer, const GLint *value) {
     if (!g_gl_context) return;
     gl_flush_state();
@@ -627,13 +627,13 @@ void glClearBufferfi(GLenum buffer, GLint drawbuffer, GLfloat depth, GLint stenc
     if (db) GX2ClearDepthStencilEx(db, depth, (uint8_t)stencil, GX2_CLEAR_FLAGS_BOTH);
 }
 
-/* --- GL 3.0 per-index enable/mask --- */
+
 void glEnablei(GLenum cap, GLuint index) { (void)index; glEnable(cap); }
 void glDisablei(GLenum cap, GLuint index) { (void)index; glDisable(cap); }
 GLboolean glIsEnabledi(GLenum cap, GLuint index) { (void)index; return glIsEnabled(cap); }
 void glColorMaski(GLuint index, GLboolean r, GLboolean g, GLboolean b, GLboolean a) { (void)index; glColorMask(r,g,b,a); }
 
-/* --- indexed state queries --- */
+
 void glGetIntegeri_v(GLenum target, GLuint index, GLint *data) {
     if (!g_gl_context || !data) return;
     if (target == GL_UNIFORM_BUFFER_BINDING && index < GL33_MAX_UNIFORM_BUFFER_BINDINGS)
@@ -652,7 +652,7 @@ void glGetBufferParameteri64v(GLenum target, GLenum pname, GLint64 *params) {
     if (!params) return; GLint v = 0; glGetBufferParameteriv(target, pname, &v); *params = (GLint64)v;
 }
 
-/* --- GL 3.1 buffer copy --- */
+
 void glCopyBufferSubData(GLenum readTarget, GLenum writeTarget, GLintptr readOffset, GLintptr writeOffset, GLsizeiptr size) {
     void *src = glMapBufferRange(readTarget, readOffset, size, GL_MAP_READ_BIT);
     if (!src) return;
@@ -665,24 +665,24 @@ void glCopyBufferSubData(GLenum readTarget, GLenum writeTarget, GLintptr readOff
     free(tmp);
 }
 
-/* --- GL 3.1 uniform index queries --- */
+
 void glGetUniformIndices(GLuint program, GLsizei count, const GLchar *const *names, GLuint *indices) {
     for (GLsizei i = 0; i < count; i++) indices[i] = GL_INVALID_INDEX;
     (void)program; (void)names;
 }
 
-/* --- GL 3.0 layered FBO --- */
+
 void glFramebufferTextureLayer(GLenum target, GLenum attachment, GLuint texture, GLint level, GLint layer) {
     (void)layer; glFramebufferTexture2D(target, attachment, GL_TEXTURE_2D, texture, level);
 }
 
-/* --- GL 3.0 fragment output --- */
+
 void glBindFragDataLocation(GLuint program, GLuint color, const GLchar *name) { (void)program; (void)color; (void)name; }
 GLint glGetFragDataLocation(GLuint program, const GLchar *name) { (void)program; (void)name; return -1; }
 void glBindFragDataLocationIndexed(GLuint program, GLuint colorNumber, GLuint index, const GLchar *name) { (void)program; (void)colorNumber; (void)index; (void)name; }
 GLint glGetFragDataIndex(GLuint program, const GLchar *name) { (void)program; (void)name; return -1; }
 
-/* --- GL 3.0 transform feedback stubs --- */
+
 void glBeginTransformFeedback(GLenum primitiveMode) { (void)primitiveMode; _gl_set_error(GL_INVALID_OPERATION); }
 void glEndTransformFeedback(void) { _gl_set_error(GL_INVALID_OPERATION); }
 void glPauseTransformFeedback(void) {}
@@ -695,7 +695,7 @@ void glDrawTransformFeedback(GLenum mode, GLuint id) { (void)id; glDrawArrays(mo
 void glClampColor(GLenum target, GLenum clamp) { (void)target; (void)clamp; }
 void glProvokingVertex(GLenum mode) { (void)mode; }
 
-/* --- GL 3.2 sync objects --- */
+
 struct __GLsync { int dummy; };
 static struct __GLsync g_sync_sentinel = {1};
 GLsync glFenceSync(GLenum condition, GLbitfield flags) { (void)condition; (void)flags; GX2DrawDone(); return &g_sync_sentinel; }
@@ -709,7 +709,7 @@ void glGetSynciv(GLsync sync, GLenum pname, GLsizei bufSize, GLsizei *length, GL
     if (values && bufSize >= 1) values[0] = GL_SIGNALED;
 }
 
-/* --- GL 3.2 multisample stubs --- */
+
 void glGetMultisamplefv(GLenum pname, GLuint index, GLfloat *val) { (void)pname; (void)index; if(val){val[0]=0.5f;val[1]=0.5f;} }
 void glSampleMaski(GLuint maskNumber, GLbitfield mask) { (void)maskNumber; (void)mask; }
 void glTexImage2DMultisample(GLenum target, GLsizei samples, GLenum internalformat, GLsizei w, GLsizei h, GLboolean fixed) {
@@ -719,12 +719,12 @@ void glTexImage3DMultisample(GLenum target, GLsizei samples, GLenum internalform
     (void)samples; (void)fixed; glTexImage3D(target, 0, internalformat, w, h, d, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
 }
 
-/* --- GL 3.3 timer queries (GX2 has no GPU timer API, stubs) --- */
+
 void glQueryCounter(GLuint id, GLenum target) { (void)id; (void)target; }
 void glGetQueryObjecti64v(GLuint id, GLenum pname, GLint64 *params) { (void)id; (void)pname; if(params)*params=0; }
 void glGetQueryObjectui64v(GLuint id, GLenum pname, GLuint64 *params) { (void)id; (void)pname; if(params)*params=0; }
 
-/* --- GL 3.3 packed vertex attrib stubs --- */
+
 void glVertexAttribP1ui(GLuint i, GLenum t, GLboolean n, GLuint v) { (void)t;(void)n; glVertexAttrib1f(i,(GLfloat)v); }
 void glVertexAttribP2ui(GLuint i, GLenum t, GLboolean n, GLuint v) { (void)t;(void)n; glVertexAttrib2f(i,(GLfloat)v,0.0f); }
 void glVertexAttribP3ui(GLuint i, GLenum t, GLboolean n, GLuint v) { (void)t;(void)n; glVertexAttrib3f(i,(GLfloat)v,0.0f,0.0f); }
@@ -734,10 +734,10 @@ void glVertexAttribP2uiv(GLuint i, GLenum t, GLboolean n, const GLuint *v) { if(
 void glVertexAttribP3uiv(GLuint i, GLenum t, GLboolean n, const GLuint *v) { if(v) glVertexAttribP3ui(i,t,n,*v); }
 void glVertexAttribP4uiv(GLuint i, GLenum t, GLboolean n, const GLuint *v) { if(v) glVertexAttribP4ui(i,t,n,*v); }
 
-/* --- GL 3.1 texture buffer stub --- */
+
 void glTexBuffer(GLenum target, GLenum internalformat, GLuint buffer) { (void)target;(void)internalformat;(void)buffer; _gl_set_error(GL_INVALID_OPERATION); }
 
-/* --- GL 3.3 missing variants and queries --- */
+
 void glFramebufferTexture1D(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level) { (void)target;(void)attachment;(void)textarget;(void)texture;(void)level; }
 void glFramebufferTexture3D(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level, GLint zoffset) { (void)target;(void)attachment;(void)textarget;(void)texture;(void)level;(void)zoffset; }
 void glGetBooleani_v(GLenum target, GLuint index, GLboolean *data) { (void)target;(void)index; if(data)*data=GL_FALSE; }

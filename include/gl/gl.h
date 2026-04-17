@@ -627,7 +627,7 @@ void glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffse
 void glCompressedTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLsizei imageSize, const GLvoid *data);
 
 
-// GL 3.2 draw variants (implemented in gl_draw.cpp)
+
 void glDrawRangeElements(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const GLvoid *indices);
 void glDrawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, const GLvoid *indices, GLint basevertex);
 void glDrawRangeElementsBaseVertex(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const GLvoid *indices, GLint basevertex);
@@ -637,42 +637,42 @@ void glMultiDrawElements(GLenum mode, const GLsizei *count, GLenum type, const G
 void glMultiDrawElementsBaseVertex(GLenum mode, const GLsizei *count, GLenum type, const GLvoid *const *indices, GLsizei drawcount, const GLint *basevertex);
 void glPrimitiveRestartIndex(GLuint index);
 
-// GL 3.0 — ClearBuffer
+
 void glClearBufferiv(GLenum buffer, GLint drawbuffer, const GLint *value);
 void glClearBufferuiv(GLenum buffer, GLint drawbuffer, const GLuint *value);
 void glClearBufferfv(GLenum buffer, GLint drawbuffer, const GLfloat *value);
 void glClearBufferfi(GLenum buffer, GLint drawbuffer, GLfloat depth, GLint stencil);
 
-// GL 3.0 — per-buffer enable/mask
+
 void glEnablei(GLenum cap, GLuint index);
 void glDisablei(GLenum cap, GLuint index);
 GLboolean glIsEnabledi(GLenum cap, GLuint index);
 void glColorMaski(GLuint index, GLboolean r, GLboolean g, GLboolean b, GLboolean a);
 
-// GL 3.0/3.2 — indexed state queries
+
 void glGetIntegeri_v(GLenum target, GLuint index, GLint *data);
 void glGetInteger64v(GLenum pname, GLint64 *data);
 void glGetInteger64i_v(GLenum target, GLuint index, GLint64 *data);
 void glGetBufferParameteri64v(GLenum target, GLenum pname, GLint64 *params);
 
-// GL 3.1 — buffer copy
+
 void glCopyBufferSubData(GLenum readTarget, GLenum writeTarget, GLintptr readOffset, GLintptr writeOffset, GLsizeiptr size);
 
-// GL 3.1 — uniform queries
+
 void glGetUniformIndices(GLuint program, GLsizei uniformCount, const GLchar *const *uniformNames, GLuint *uniformIndices);
 
-// GL 3.0 — layered FBO
+
 void glFramebufferTextureLayer(GLenum target, GLenum attachment, GLuint texture, GLint level, GLint layer);
 
-// GL 3.0 — fragment output binding
+
 void glBindFragDataLocation(GLuint program, GLuint color, const GLchar *name);
 GLint glGetFragDataLocation(GLuint program, const GLchar *name);
 
-// GL 3.3 — fragment output index
+
 void glBindFragDataLocationIndexed(GLuint program, GLuint colorNumber, GLuint index, const GLchar *name);
 GLint glGetFragDataIndex(GLuint program, const GLchar *name);
 
-// GL 3.0 — transform feedback stubs
+
 void glBeginTransformFeedback(GLenum primitiveMode);
 void glEndTransformFeedback(void);
 void glPauseTransformFeedback(void);
@@ -683,13 +683,13 @@ void glTransformFeedbackVaryings(GLuint program, GLsizei count, const GLchar *co
 void glGetTransformFeedbackVarying(GLuint program, GLuint index, GLsizei bufSize, GLsizei *length, GLsizei *size, GLenum *type, GLchar *name);
 void glDrawTransformFeedback(GLenum mode, GLuint id);
 
-// GL 3.0 — clamp color
+
 void glClampColor(GLenum target, GLenum clamp);
 
-// GL 3.2 — provoking vertex
+
 void glProvokingVertex(GLenum mode);
 
-// GL 3.2 — sync objects (mapped to GX2DrawDone)
+
 typedef struct __GLsync *GLsync;
 #define GL_SYNC_GPU_COMMANDS_COMPLETE 0x9117
 #define GL_ALREADY_SIGNALED           0x911A
@@ -705,20 +705,20 @@ GLenum glClientWaitSync(GLsync sync, GLbitfield flags, GLuint64 timeout);
 void glWaitSync(GLsync sync, GLbitfield flags, GLuint64 timeout);
 void glGetSynciv(GLsync sync, GLenum pname, GLsizei bufSize, GLsizei *length, GLint *values);
 
-// GL 3.2 — multisample stubs
+
 void glGetMultisamplefv(GLenum pname, GLuint index, GLfloat *val);
 void glSampleMaski(GLuint maskNumber, GLbitfield mask);
 void glTexImage2DMultisample(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLboolean fixedsamplelocations);
 void glTexImage3DMultisample(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth, GLboolean fixedsamplelocations);
 
-// GL 3.3 — timer queries
+
 #define GL_TIME_ELAPSED 0x88BF
 #define GL_TIMESTAMP    0x8E28
 void glQueryCounter(GLuint id, GLenum target);
 void glGetQueryObjecti64v(GLuint id, GLenum pname, GLint64 *params);
 void glGetQueryObjectui64v(GLuint id, GLenum pname, GLuint64 *params);
 
-// GL 3.3 — packed vertex attribs (stubs)
+
 #define GL_INT_2_10_10_10_REV          0x8D9F
 #define GL_UNSIGNED_INT_2_10_10_10_REV 0x8368
 void glVertexAttribP1ui(GLuint index, GLenum type, GLboolean normalized, GLuint value);
@@ -730,11 +730,11 @@ void glVertexAttribP2uiv(GLuint index, GLenum type, GLboolean normalized, const 
 void glVertexAttribP3uiv(GLuint index, GLenum type, GLboolean normalized, const GLuint *value);
 void glVertexAttribP4uiv(GLuint index, GLenum type, GLboolean normalized, const GLuint *value);
 
-// GL 3.1 — texture buffer (stub)
+
 #define GL_TEXTURE_BUFFER 0x8C2A
 void glTexBuffer(GLenum target, GLenum internalformat, GLuint buffer);
 
-// GL 3.3 missing variants and queries
+
 void glFramebufferTexture1D(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level);
 void glFramebufferTexture3D(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level, GLint zoffset);
 void glGetBooleani_v(GLenum target, GLuint index, GLboolean *data);
@@ -791,7 +791,7 @@ void glVertexAttribI4sv(GLuint index, const GLshort *v);
 void glVertexAttribI4ubv(GLuint index, const GLubyte *v);
 void glVertexAttribI4usv(GLuint index, const GLushort *v);
 
-// GX2 lookup helpers
+
 
 struct GX2Texture* gl_get_gx2_texture(GLuint texture);
 

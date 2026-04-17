@@ -12,6 +12,13 @@ wut: https://github.com/devkitPro/wut/
 
 - To clarify, that date was the first day I accomplished a single passing GL function
 
+# Progress:
+
+Only missing functions for 3.3 Core are these:
+
+glBeginTransformFeedback glEndTransformFeedback glPauseTransformFeedback glResumeTransformFeedback glShaderBinary glReleaseShaderCompiler glProgramParameteri glGetTexImage glGetCompressedTexImage glGetBufferSubData glQueryCounter glGetQueryObjecti64v glTexImage2DMultisample glTexImage3DMultisample glSampleMaski glProvokingVertex glPointParameterf glPointParameterfv glPointParameteri glPointParameteriv glPixelStoref glFramebufferTexture1D glFramebufferTexture3D glFramebufferTextureLayer glGetBooleani_v glGetSamplerParameterIiv glGetSamplerParameterIuiv glGetTexParameterIiv glGetTexParameterIuiv glGetVertexAttribdv glSamplerParameterIiv glSamplerParameterIuiv glTexParameterIiv glTexParameterIuiv glFenceSync glWaitSync glClientWaitSync glDeleteSync glGetSynciv glTexBuffer glSampleCoverage glHint glGetShaderPrecisionFormat
+
+They require complex memory mapping or just cannot be mapped to GX2 at all.
 
 # Please read!!
 

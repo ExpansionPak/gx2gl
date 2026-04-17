@@ -60,4 +60,4 @@ void gl_bind_vao(void);
 }
 #endif
 
-#endif // VAO header guard
+#endif

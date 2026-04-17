@@ -2117,7 +2117,7 @@ void _gl_GenerateMipmap(GLenum target) {
 }
 
 void gl_bind_textures(void) {
-  // Binding happens elsewhere
+
 }
 
 GX2Texture *gl_get_gx2_texture(GLuint id) {
@@ -2136,7 +2136,7 @@ GLint gl_get_texture_internal_format(GLuint id) {
   return 0;
 }
 
-/* id = texture id or sampler-object id depending on use_sampler_obj */
+
 GX2Sampler *gl_get_gx2_sampler(GLuint id, bool use_sampler_obj) {
   if (use_sampler_obj) {
     if (id > 0 && id < MAX_SAMPLER_OBJECTS && g_samplers[id].in_use)

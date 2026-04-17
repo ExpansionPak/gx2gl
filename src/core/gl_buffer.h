@@ -8,13 +8,13 @@
 
 #ifdef __cplusplus
 extern "C" {
-#endif // C linkage guard
+#endif
 void gl_buffer_init(void);
 
-// Frame cleanup hook
+
 void gl_buffer_end_frame(void);
 
-// Buffer call entrypoints
+
 void _gl_GenBuffers(GLsizei n, GLuint *buffers);
 void _gl_DeleteBuffers(GLsizei n, const GLuint *buffers);
 GLboolean _gl_IsBuffer(GLuint buffer);
@@ -42,4 +42,4 @@ GX2RBuffer *gl_buffer_get_gx2r_buffer(GLuint buffer);
 }
 #endif
 
-#endif // Buffer header guard
+#endif

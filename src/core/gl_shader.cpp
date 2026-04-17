@@ -170,7 +170,7 @@ void _gl_WiiULoadShaderGroup(GLuint p, const void *g) {
   if (!is_valid_program(p) || !g) return;
   GLProgram *prog = &g_programs[p];
   const WHBGfxShaderGroup *group = (const WHBGfxShaderGroup *)g;
-  /* free old shadow buffers */
+
   if (prog->vs_blocks) {
     for (uint32_t i = 0; i < prog->vs_block_count; i++)
       if (prog->vs_blocks[i].buffer) gl_mem_free(GL_MEM_TYPE_MEM2, prog->vs_blocks[i].buffer);
@@ -273,7 +273,7 @@ void _gl_Uniform4uiv(GLint l, GLsizei c, const GLuint *v) {
     if (l == -1 || c <= 0 || !v) return;
     uint32_t *swapped = (uint32_t*)malloc(c * 4 * 4);
     if (!swapped) return;
-    for(int i=0; i<c*4; i++) swapped[i] = v[i]; // update_uniform_words will swap
+    for(int i=0; i<c*4; i++) swapped[i] = v[i];
     update_uniform_words(l, swapped, c * 4, 0);
     free(swapped);
 }
@@ -302,7 +302,7 @@ void gl_bind_shaders(void) {
   GX2SetFetchShader((GX2FetchShader*)&prog->group->fetchShader);
   if (prog->group->vertexShader) GX2SetVertexShader(prog->group->vertexShader);
   if (prog->group->pixelShader)  GX2SetPixelShader(prog->group->pixelShader);
-  /* bind uniform block shadows */
+
   if (prog->group->vertexShader) {
     for (uint32_t i = 0; i < prog->vs_block_count; i++) {
       if (!prog->vs_blocks || !prog->vs_blocks[i].buffer) continue;
@@ -319,9 +319,9 @@ void gl_bind_shaders(void) {
                               prog->ps_blocks[i].size, prog->ps_blocks[i].buffer);
     }
   }
-  /* bind textures and samplers for each active texture unit */
+
   for (uint32_t unit = 0; unit < 16; ++unit) {
-    /* pixel samplers */
+
     if (prog->pixel_sampler_units[unit] >= 0) {
       GLuint tex_id = g_gl_context->bound_texture_2d[unit];
       if (tex_id == 0) tex_id = g_gl_context->bound_texture_cube[unit];
@@ -329,13 +329,13 @@ void gl_bind_shaders(void) {
       GX2Texture *tex = gl_get_gx2_texture(tex_id);
       if (tex) {
         GX2SetPixelTexture(tex, unit);
-        /* sampler object overrides texture sampler */
+
         GLuint samp_id = g_gl_context->bound_sampler[unit];
         GX2Sampler *sampler = gl_get_gx2_sampler(samp_id ? samp_id : tex_id, samp_id != 0);
         if (sampler) GX2SetPixelSampler(sampler, unit);
       }
     }
-    /* vertex samplers */
+
     if (prog->vertex_sampler_units[unit] >= 0) {
       GLuint tex_id = g_gl_context->bound_texture_2d[unit];
       GX2Texture *tex = gl_get_gx2_texture(tex_id);

@@ -14,7 +14,7 @@ extern "C" {
 #include <string.h>
 
 static int stencil_face_index(GLenum face) {
-    return (face == GL_BACK) ? 1 : 0; /* GL_FRONT or GL_FRONT_AND_BACK → 0 */
+    return (face == GL_BACK) ? 1 : 0;
 }
 
 static GX2CompareFunction map_compare_func(GLenum func, bool *valid) {

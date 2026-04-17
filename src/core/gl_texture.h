@@ -58,8 +58,7 @@ void _gl_GetTexLevelParameteriv(GLenum target, GLint level, GLenum pname, GLint 
 void _gl_GetTexLevelParameterfv(GLenum target, GLint level, GLenum pname, GLfloat *params);
 
 void gl_bind_textures(void);
-/* Returns GX2Sampler* for a texture's embedded sampler (use_sampler_obj=false)
-   or for a sampler object (use_sampler_obj=true, id=sampler object id). */
+
 GX2Sampler *gl_get_gx2_sampler(GLuint id, bool use_sampler_obj);
 
 #ifdef __cplusplus
