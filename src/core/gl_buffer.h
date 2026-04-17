@@ -32,6 +32,7 @@ void *_gl_MapBuffer(GLenum target, GLenum access);
 void *_gl_MapBufferRange(GLenum target, GLintptr offset, GLsizeiptr length,
                          GLbitfield access);
 GLboolean _gl_UnmapBuffer(GLenum target);
+void _gl_FlushMappedBufferRange(GLenum target, GLintptr offset, GLsizeiptr length);
 
 void *gl_buffer_get_data(GLuint buffer);
 GLsizeiptr gl_buffer_get_size(GLuint buffer);

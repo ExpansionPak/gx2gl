@@ -2,8 +2,11 @@
 #define GL33_TEXTURE_H
 
 #include "core/gl_context.h"
-#include <gx2/texture.h>
+#ifdef __cplusplus
+extern "C" {
 #include <gx2/sampler.h>
+}
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -22,26 +25,12 @@ void _gl_BindSampler(GLuint unit, GLuint sampler);
 void _gl_ActiveTexture(GLenum texture);
 void _gl_TexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const GLvoid *pixels);
 void _gl_TexImage3D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLsizei depth, GLint border, GLenum format, GLenum type, const GLvoid *pixels);
-void _gl_TexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
-                       GLsizei width, GLsizei height, GLenum format, GLenum type,
-                       const GLvoid *pixels);
-void _gl_TexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
-                       GLint zoffset, GLsizei width, GLsizei height,
-                       GLsizei depth, GLenum format, GLenum type,
-                       const GLvoid *pixels);
-void _gl_CopyTexImage2D(GLenum target, GLint level, GLenum internalformat,
-                        GLint x, GLint y, GLsizei width, GLsizei height,
-                        GLint border);
-void _gl_CopyTexSubImage2D(GLenum target, GLint level, GLint xoffset,
-                           GLint yoffset, GLint x, GLint y, GLsizei width,
-                           GLsizei height);
-void _gl_CompressedTexImage2D(GLenum target, GLint level, GLenum internalformat,
-                              GLsizei width, GLsizei height, GLint border,
-                              GLsizei imageSize, const GLvoid *data);
-void _gl_CompressedTexSubImage2D(GLenum target, GLint level, GLint xoffset,
-                                 GLint yoffset, GLsizei width, GLsizei height,
-                                 GLenum format, GLsizei imageSize,
-                                 const GLvoid *data);
+void _gl_TexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLenum type, const GLvoid *pixels);
+void _gl_TexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, const GLvoid *pixels);
+void _gl_CopyTexImage2D(GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLsizei height, GLint border);
+void _gl_CopyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y, GLsizei width, GLsizei height);
+void _gl_CompressedTexImage2D(GLenum target, GLint level, GLenum internalformat, GLsizei width, GLsizei height, GLint border, GLsizei imageSize, const GLvoid *data);
+void _gl_CompressedTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLsizei imageSize, const GLvoid *data);
 void _gl_TexParameteri(GLenum target, GLenum pname, GLint param);
 void _gl_TexParameterf(GLenum target, GLenum pname, GLfloat param);
 void _gl_TexParameteriv(GLenum target, GLenum pname, const GLint *params);
@@ -56,19 +45,25 @@ void _gl_GetSamplerParameteriv(GLuint sampler, GLenum pname, GLint *params);
 void _gl_GetSamplerParameterfv(GLuint sampler, GLenum pname, GLfloat *params);
 void _gl_GenerateMipmap(GLenum target);
 
-// Bind active textures
-void gl_bind_textures(void);
+void _gl_TexImage1D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLint border, GLenum format, GLenum type, const GLvoid *pixels);
+void _gl_TexSubImage1D(GLenum target, GLint level, GLint xoffset, GLsizei width, GLenum format, GLenum type, const GLvoid *pixels);
+void _gl_CopyTexImage1D(GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLint border);
+void _gl_CopyTexSubImage1D(GLenum target, GLint level, GLint xoffset, GLint x, GLint y, GLsizei width);
+void _gl_CopyTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLint x, GLint y, GLsizei width, GLsizei height);
+void _gl_CompressedTexImage1D(GLenum target, GLint level, GLenum internalformat, GLsizei width, GLint border, GLsizei imageSize, const GLvoid *data);
+void _gl_CompressedTexImage3D(GLenum target, GLint level, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth, GLint border, GLsizei imageSize, const GLvoid *data);
+void _gl_CompressedTexSubImage1D(GLenum target, GLint level, GLint xoffset, GLsizei width, GLenum format, GLsizei imageSize, const GLvoid *data);
+void _gl_CompressedTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLsizei imageSize, const GLvoid *data);
+void _gl_GetTexLevelParameteriv(GLenum target, GLint level, GLenum pname, GLint *params);
+void _gl_GetTexLevelParameterfv(GLenum target, GLint level, GLenum pname, GLfloat *params);
 
-// GX2 lookup helpers
-struct GX2Texture;
-struct GX2Texture* gl_get_gx2_texture(GLuint texture);
-GLint gl_get_texture_internal_format(GLuint texture);
-struct GX2Sampler;
-struct GX2Sampler* gl_get_gx2_sampler(GLuint texture);
-struct GX2Sampler* gl_get_effective_gx2_sampler(GLuint unit, GLuint texture);
+void gl_bind_textures(void);
+/* Returns GX2Sampler* for a texture's embedded sampler (use_sampler_obj=false)
+   or for a sampler object (use_sampler_obj=true, id=sampler object id). */
+GX2Sampler *gl_get_gx2_sampler(GLuint id, bool use_sampler_obj);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif // Texture header guard
+#endif

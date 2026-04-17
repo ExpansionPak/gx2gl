@@ -12,9 +12,12 @@ extern "C" {
 #include <gx2/mem.h>
 #include <gx2/shaders.h>
 #include <gx2/state.h>
+#include <gx2/sampler.h>
+#include <gx2/texture.h>
 #include <stdio.h>
 #include <string.h>
 #include <whb/gfx.h>
+#include <stdlib.h>
 
 #define MAX_PROGRAMS 512
 #define MAX_SHADERS 512
@@ -57,26 +60,19 @@ typedef struct {
   bool linked;
   bool validated;
   bool delete_pending;
-
   GLuint attached_vertex_shader;
   GLuint attached_pixel_shader;
   GLuint attached_geometry_shader;
-
   char *info_log;
-
   const WHBGfxShaderGroup *group;
   bool owns_group;
   WHBGfxShaderGroup owned_group;
-
   UniformBlockShadow *vs_blocks;
   uint32_t vs_block_count;
-
   UniformBlockShadow *ps_blocks;
   uint32_t ps_block_count;
-
   ProgramUniformBlock *uniform_blocks;
   uint32_t uniform_block_count;
-
   GLint vertex_sampler_units[MAX_PROGRAM_SAMPLERS];
   GLint pixel_sampler_units[MAX_PROGRAM_SAMPLERS];
   char *attrib_binding_names[GL33_MAX_VERTEX_ATTRIBS];
@@ -85,2543 +81,271 @@ typedef struct {
 static GLShader g_shaders[MAX_SHADERS];
 static GLProgram g_programs[MAX_PROGRAMS];
 
-static bool is_valid_shader(GLuint shader) {
-  return shader > 0 && shader < MAX_SHADERS && g_shaders[shader].in_use;
-}
-
-static bool is_valid_program(GLuint program) {
-  return program > 0 && program < MAX_PROGRAMS && g_programs[program].in_use;
-}
-
-static bool is_generated_shader_name(GLuint shader) {
-  return shader > 0 && shader < MAX_SHADERS && g_shaders[shader].in_use;
-}
-
-static void set_program_lookup_error(GLuint program) {
-  if (is_generated_shader_name(program)) {
-    _gl_set_error(GL_INVALID_OPERATION);
-  } else {
-    _gl_set_error(GL_INVALID_VALUE);
-  }
-}
-
-static bool location_is_sampler(GLint location) {
-  return (((uint32_t)location & GL_LOCATION_KIND_SAMPLER) != 0u);
-}
-
-static bool location_is_pixel(GLint location) {
-  return (((uint32_t)location & GL_LOCATION_STAGE_PIXEL) != 0u);
-}
-
-static uint32_t get_log_length(const char *log) {
-  return (log && log[0] != '\0') ? ((uint32_t)strlen(log) + 1u) : 0u;
-}
-
-static void free_shader_source(GLShader *shader) {
-  if (!shader || !shader->source) {
-    return;
-  }
-  gl_mem_free(GL_MEM_TYPE_MEM2, shader->source);
-  shader->source = NULL;
-  shader->source_length = 0;
-  shader->source_present = false;
-  shader->compile_requested = false;
-  shader->compile_succeeded = false;
-}
-
-static void free_owned_string(char **str) {
-  if (!str || !*str) {
-    return;
-  }
-  gl_mem_free(GL_MEM_TYPE_MEM2, *str);
-  *str = NULL;
-}
-
-static void free_shadow_blocks(UniformBlockShadow *blocks, uint32_t count) {
-  if (!blocks) {
-    return;
-  }
-  for (uint32_t i = 0; i < count; i++) {
-    if (blocks[i].buffer) {
-      gl_mem_free(GL_MEM_TYPE_MEM2, blocks[i].buffer);
-    }
-  }
-  gl_mem_free(GL_MEM_TYPE_MEM2, blocks);
-}
-
-static void free_program_uniform_blocks(ProgramUniformBlock *blocks,
-                                        uint32_t count) {
-  if (!blocks) {
-    return;
-  }
-  for (uint32_t i = 0; i < count; ++i) {
-    if (blocks[i].name) {
-      gl_mem_free(GL_MEM_TYPE_MEM2, blocks[i].name);
-    }
-  }
-  gl_mem_free(GL_MEM_TYPE_MEM2, blocks);
-}
-
-static void free_program_attrib_bindings(GLProgram *prog) {
-  if (!prog) {
-    return;
-  }
-
-  for (uint32_t i = 0; i < GL33_MAX_VERTEX_ATTRIBS; ++i) {
-    free_owned_string(&prog->attrib_binding_names[i]);
-  }
-}
-
-static char *copy_program_string(const char *src) {
-  size_t length;
-  char *copy;
-
-  if (!src) {
-    return NULL;
-  }
-
-  length = strlen(src);
-  copy = (char *)gl_mem_alloc(GL_MEM_TYPE_MEM2, (uint32_t)length + 1u, 4);
-  if (!copy) {
-    return NULL;
-  }
-
-  memcpy(copy, src, length + 1u);
-  return copy;
-}
-
-static void set_shader_log(GLShader *shader, const char *message) {
-  if (!shader) {
-    return;
-  }
-  free_owned_string(&shader->info_log);
-  if (!message || message[0] == '\0') {
-    return;
-  }
-  shader->info_log = copy_program_string(message);
-}
-
-static void set_program_log(GLProgram *prog, const char *message) {
-  if (!prog) {
-    return;
-  }
-  free_owned_string(&prog->info_log);
-  if (!message || message[0] == '\0') {
-    return;
-  }
-  prog->info_log = copy_program_string(message);
-}
-
-static void clear_program_group(GLProgram *prog) {
-  if (!prog) {
-    return;
-  }
-
-  free_shadow_blocks(prog->vs_blocks, prog->vs_block_count);
-  free_shadow_blocks(prog->ps_blocks, prog->ps_block_count);
-  prog->vs_blocks = NULL;
-  prog->ps_blocks = NULL;
-  prog->vs_block_count = 0;
-  prog->ps_block_count = 0;
-  free_program_uniform_blocks(prog->uniform_blocks, prog->uniform_block_count);
-  prog->uniform_blocks = NULL;
-  prog->uniform_block_count = 0;
-
-  if (prog->owns_group) {
-    WHBGfxFreeShaderGroup(&prog->owned_group);
-    memset(&prog->owned_group, 0, sizeof(prog->owned_group));
-  }
-
-  prog->group = NULL;
-  prog->owns_group = false;
-  prog->linked = false;
-  prog->validated = false;
-  memset(prog->vertex_sampler_units, 0, sizeof(prog->vertex_sampler_units));
-  memset(prog->pixel_sampler_units, 0, sizeof(prog->pixel_sampler_units));
-}
-
-static uint32_t count_shader_attachments(GLuint shader) {
-  uint32_t count = 0;
-
-  if (shader == 0) {
-    return 0;
-  }
-
-  for (uint32_t i = 1; i < MAX_PROGRAMS; ++i) {
-    if (!g_programs[i].in_use) {
-      continue;
-    }
-    if (g_programs[i].attached_vertex_shader == shader) {
-      ++count;
-    }
-    if (g_programs[i].attached_pixel_shader == shader) {
-      ++count;
-    }
-    if (g_programs[i].attached_geometry_shader == shader) {
-      ++count;
-    }
-  }
-
-  return count;
-}
-
-static uint32_t count_program_attached_shaders(const GLProgram *prog) {
-  uint32_t count = 0;
-
-  if (!prog) {
-    return 0;
-  }
-  if (prog->attached_vertex_shader) {
-    ++count;
-  }
-  if (prog->attached_pixel_shader) {
-    ++count;
-  }
-  if (prog->attached_geometry_shader) {
-    ++count;
-  }
-  return count;
-}
-
-typedef struct {
-  const char *name;
-  GLint size;
-  GLenum type;
-} ActiveVariableInfo;
-
-static GLenum map_shader_var_type(GX2ShaderVarType type) {
-  switch (type) {
-  case GX2_SHADER_VAR_TYPE_FLOAT:
-    return GL_FLOAT;
-  case GX2_SHADER_VAR_TYPE_FLOAT2:
-    return GL_FLOAT_VEC2;
-  case GX2_SHADER_VAR_TYPE_FLOAT3:
-    return GL_FLOAT_VEC3;
-  case GX2_SHADER_VAR_TYPE_FLOAT4:
-    return GL_FLOAT_VEC4;
-  case GX2_SHADER_VAR_TYPE_INT:
-    return GL_INT;
-  case GX2_SHADER_VAR_TYPE_INT2:
-    return GL_INT_VEC2;
-  case GX2_SHADER_VAR_TYPE_INT3:
-    return GL_INT_VEC3;
-  case GX2_SHADER_VAR_TYPE_INT4:
-    return GL_INT_VEC4;
-  case GX2_SHADER_VAR_TYPE_BOOL:
-    return GL_BOOL;
-  case GX2_SHADER_VAR_TYPE_BOOL2:
-    return GL_BOOL_VEC2;
-  case GX2_SHADER_VAR_TYPE_BOOL3:
-    return GL_BOOL_VEC3;
-  case GX2_SHADER_VAR_TYPE_BOOL4:
-    return GL_BOOL_VEC4;
-  case GX2_SHADER_VAR_TYPE_FLOAT2X2:
-    return GL_FLOAT_MAT2;
-  case GX2_SHADER_VAR_TYPE_FLOAT3X3:
-    return GL_FLOAT_MAT3;
-  case GX2_SHADER_VAR_TYPE_FLOAT4X4:
-    return GL_FLOAT_MAT4;
-  default:
-    return 0;
-  }
-}
-
-static GLenum map_sampler_var_type(GX2SamplerVarType type) {
-  switch (type) {
-  case GX2_SAMPLER_VAR_TYPE_SAMPLER_1D:
-    return GL_SAMPLER_1D;
-  case GX2_SAMPLER_VAR_TYPE_SAMPLER_2D:
-    return GL_SAMPLER_2D;
-  case GX2_SAMPLER_VAR_TYPE_SAMPLER_3D:
-    return GL_SAMPLER_3D;
-  case GX2_SAMPLER_VAR_TYPE_SAMPLER_CUBE:
-    return GL_SAMPLER_CUBE;
-  default:
-    return 0;
-  }
-}
-
-static uint32_t shader_var_type_word_count(GX2ShaderVarType type) {
-  switch (type) {
-  case GX2_SHADER_VAR_TYPE_FLOAT:
-  case GX2_SHADER_VAR_TYPE_INT:
-  case GX2_SHADER_VAR_TYPE_BOOL:
-    return 1;
-  case GX2_SHADER_VAR_TYPE_FLOAT2:
-  case GX2_SHADER_VAR_TYPE_INT2:
-  case GX2_SHADER_VAR_TYPE_BOOL2:
-    return 2;
-  case GX2_SHADER_VAR_TYPE_FLOAT3:
-  case GX2_SHADER_VAR_TYPE_INT3:
-  case GX2_SHADER_VAR_TYPE_BOOL3:
-    return 3;
-  case GX2_SHADER_VAR_TYPE_FLOAT4:
-  case GX2_SHADER_VAR_TYPE_INT4:
-  case GX2_SHADER_VAR_TYPE_BOOL4:
-    return 4;
-  case GX2_SHADER_VAR_TYPE_FLOAT2X2:
-    return 4;
-  case GX2_SHADER_VAR_TYPE_FLOAT3X3:
-    return 9;
-  case GX2_SHADER_VAR_TYPE_FLOAT4X4:
-    return 16;
-  default:
-    return 0;
-  }
-}
-
-static bool shader_var_type_is_float_storage(GX2ShaderVarType type) {
-  switch (type) {
-  case GX2_SHADER_VAR_TYPE_FLOAT:
-  case GX2_SHADER_VAR_TYPE_FLOAT2:
-  case GX2_SHADER_VAR_TYPE_FLOAT3:
-  case GX2_SHADER_VAR_TYPE_FLOAT4:
-  case GX2_SHADER_VAR_TYPE_FLOAT2X2:
-  case GX2_SHADER_VAR_TYPE_FLOAT3X3:
-  case GX2_SHADER_VAR_TYPE_FLOAT4X4:
-    return true;
-  default:
-    return false;
-  }
-}
-
-static bool name_seen_in_uniform_vars(const GX2UniformVar *vars, uint32_t count,
-                                      const char *name, uint32_t limit) {
-  if (!vars || !name) {
-    return false;
-  }
-  if (limit > count) {
-    limit = count;
-  }
-  for (uint32_t i = 0; i < limit; ++i) {
-    if (vars[i].name && strcmp(vars[i].name, name) == 0) {
-      return true;
-    }
-  }
-  return false;
-}
-
-static bool name_seen_in_sampler_vars(const GX2SamplerVar *vars, uint32_t count,
-                                      const char *name, uint32_t limit) {
-  if (!vars || !name) {
-    return false;
-  }
-  if (limit > count) {
-    limit = count;
-  }
-  for (uint32_t i = 0; i < limit; ++i) {
-    if (vars[i].name && strcmp(vars[i].name, name) == 0) {
-      return true;
-    }
-  }
-  return false;
-}
-
-static void consider_active_variable(const char *name, GLint size, GLenum type,
-                                     GLuint wanted_index, GLuint *count,
-                                     GLsizei *max_name_length,
-                                     ActiveVariableInfo *out_info) {
-  GLsizei name_length;
-
-  if (!name || !count) {
-    return;
-  }
-
-  name_length = (GLsizei)strlen(name) + 1;
-  if (max_name_length && name_length > *max_name_length) {
-    *max_name_length = name_length;
-  }
-  if (out_info && *count == wanted_index) {
-    out_info->name = name;
-    out_info->size = size;
-    out_info->type = type;
-  }
-  ++(*count);
-}
-
-static void collect_active_uniforms(const GLProgram *prog, GLuint wanted_index,
-                                    ActiveVariableInfo *out_info,
-                                    GLuint *out_count,
-                                    GLsizei *out_max_name_length) {
-  const GX2VertexShader *vertex_shader;
-  const GX2PixelShader *pixel_shader;
-  GLuint count = 0;
-  GLsizei max_name_length = 0;
-
-  if (out_info) {
-    memset(out_info, 0, sizeof(*out_info));
-  }
-  if (!prog || !prog->group) {
-    if (out_count) {
-      *out_count = 0;
-    }
-    if (out_max_name_length) {
-      *out_max_name_length = 0;
-    }
-    return;
-  }
-
-  vertex_shader = prog->group->vertexShader;
-  pixel_shader = prog->group->pixelShader;
-
-  if (vertex_shader) {
-    for (uint32_t i = 0; i < vertex_shader->uniformVarCount; ++i) {
-      const GX2UniformVar *var = &vertex_shader->uniformVars[i];
-
-      if (!var->name ||
-          name_seen_in_uniform_vars(vertex_shader->uniformVars,
-                                    vertex_shader->uniformVarCount, var->name,
-                                    i)) {
-        continue;
-      }
-      consider_active_variable(var->name, (GLint)var->count,
-                               map_shader_var_type(var->type), wanted_index,
-                               &count, &max_name_length, out_info);
-    }
-
-    for (uint32_t i = 0; i < vertex_shader->samplerVarCount; ++i) {
-      const GX2SamplerVar *var = &vertex_shader->samplerVars[i];
-
-      if (!var->name ||
-          name_seen_in_uniform_vars(vertex_shader->uniformVars,
-                                    vertex_shader->uniformVarCount, var->name,
-                                    vertex_shader->uniformVarCount) ||
-          name_seen_in_sampler_vars(vertex_shader->samplerVars,
-                                    vertex_shader->samplerVarCount, var->name,
-                                    i)) {
-        continue;
-      }
-      consider_active_variable(var->name, 1, map_sampler_var_type(var->type),
-                               wanted_index, &count, &max_name_length,
-                               out_info);
-    }
-  }
-
-  if (pixel_shader) {
-    for (uint32_t i = 0; i < pixel_shader->uniformVarCount; ++i) {
-      const GX2UniformVar *var = &pixel_shader->uniformVars[i];
-
-      if (!var->name ||
-          (vertex_shader &&
-           (name_seen_in_uniform_vars(vertex_shader->uniformVars,
-                                      vertex_shader->uniformVarCount, var->name,
-                                      vertex_shader->uniformVarCount) ||
-            name_seen_in_sampler_vars(vertex_shader->samplerVars,
-                                      vertex_shader->samplerVarCount, var->name,
-                                      vertex_shader->samplerVarCount))) ||
-          name_seen_in_uniform_vars(pixel_shader->uniformVars,
-                                    pixel_shader->uniformVarCount, var->name,
-                                    i)) {
-        continue;
-      }
-      consider_active_variable(var->name, (GLint)var->count,
-                               map_shader_var_type(var->type), wanted_index,
-                               &count, &max_name_length, out_info);
-    }
-
-    for (uint32_t i = 0; i < pixel_shader->samplerVarCount; ++i) {
-      const GX2SamplerVar *var = &pixel_shader->samplerVars[i];
-
-      if (!var->name ||
-          (vertex_shader &&
-           (name_seen_in_uniform_vars(vertex_shader->uniformVars,
-                                      vertex_shader->uniformVarCount, var->name,
-                                      vertex_shader->uniformVarCount) ||
-            name_seen_in_sampler_vars(vertex_shader->samplerVars,
-                                      vertex_shader->samplerVarCount, var->name,
-                                      vertex_shader->samplerVarCount))) ||
-          name_seen_in_uniform_vars(pixel_shader->uniformVars,
-                                    pixel_shader->uniformVarCount, var->name,
-                                    pixel_shader->uniformVarCount) ||
-          name_seen_in_sampler_vars(pixel_shader->samplerVars,
-                                    pixel_shader->samplerVarCount, var->name,
-                                    i)) {
-        continue;
-      }
-      consider_active_variable(var->name, 1, map_sampler_var_type(var->type),
-                               wanted_index, &count, &max_name_length,
-                               out_info);
-    }
-  }
-
-  if (out_count) {
-    *out_count = count;
-  }
-  if (out_max_name_length) {
-    *out_max_name_length = max_name_length;
-  }
-}
-
-static void collect_active_attribs(const GLProgram *prog, GLuint wanted_index,
-                                   ActiveVariableInfo *out_info,
-                                   GLuint *out_count,
-                                   GLsizei *out_max_name_length) {
-  const GX2VertexShader *vertex_shader;
-  GLuint count = 0;
-  GLsizei max_name_length = 0;
-
-  if (out_info) {
-    memset(out_info, 0, sizeof(*out_info));
-  }
-  if (!prog || !prog->group || !prog->group->vertexShader) {
-    if (out_count) {
-      *out_count = 0;
-    }
-    if (out_max_name_length) {
-      *out_max_name_length = 0;
-    }
-    return;
-  }
-
-  vertex_shader = prog->group->vertexShader;
-  for (uint32_t i = 0; i < vertex_shader->attribVarCount; ++i) {
-    const GX2AttribVar *var = &vertex_shader->attribVars[i];
-
-    if (!var->name) {
-      continue;
-    }
-    consider_active_variable(var->name, (GLint)var->count,
-                             map_shader_var_type(var->type), wanted_index,
-                             &count, &max_name_length, out_info);
-  }
-
-  if (out_count) {
-    *out_count = count;
-  }
-  if (out_max_name_length) {
-    *out_max_name_length = max_name_length;
-  }
-}
-
-static void write_active_variable_name(const char *source, GLsizei bufSize,
-                                       GLsizei *length, GLchar *name) {
-  GLsizei copied = 0;
-
-  if (length) {
-    *length = 0;
-  }
-  if (!source || !name || bufSize <= 0) {
-    return;
-  }
-
-  copied = (GLsizei)strlen(source);
-  if (copied >= bufSize) {
-    copied = bufSize - 1;
-  }
-  memcpy(name, source, (size_t)copied);
-  name[copied] = '\0';
-  if (length) {
-    *length = copied;
-  }
-}
-
-static bool validate_sampler_bindings(const GX2SamplerVar *vars, uint32_t count,
-                                      const GLint *units,
-                                      GLenum unit_types[MAX_PROGRAM_SAMPLERS],
-                                      const char **conflict_name,
-                                      GLint *conflict_unit) {
-  for (uint32_t i = 0; i < count; ++i) {
-    GLenum sampler_type;
-    GLint unit;
-
-    if (!vars[i].name || vars[i].location >= MAX_PROGRAM_SAMPLERS) {
-      continue;
-    }
-
-    sampler_type = map_sampler_var_type(vars[i].type);
-    unit = units[vars[i].location];
-    if (unit < 0 || unit >= MAX_PROGRAM_SAMPLERS) {
-      if (conflict_name) {
-        *conflict_name = vars[i].name;
-      }
-      if (conflict_unit) {
-        *conflict_unit = unit;
-      }
-      return false;
-    }
-
-    if (unit_types[unit] != 0 && unit_types[unit] != sampler_type) {
-      if (conflict_name) {
-        *conflict_name = vars[i].name;
-      }
-      if (conflict_unit) {
-        *conflict_unit = unit;
-      }
-      return false;
-    }
-
-    unit_types[unit] = sampler_type;
-  }
-
+static bool is_valid_shader(GLuint s) { return s > 0 && s < MAX_SHADERS && g_shaders[s].in_use; }
+static bool is_valid_program(GLuint p) { return p > 0 && p < MAX_PROGRAMS && g_programs[p].in_use; }
+
+static bool location_is_sampler(GLint l) { return (((uint32_t)l & GL_LOCATION_KIND_SAMPLER) != 0u); }
+static bool location_is_pixel(GLint l) { return (((uint32_t)l & GL_LOCATION_STAGE_PIXEL) != 0u); }
+
+static bool update_uniform_words(GLint location, const uint32_t *data, GLsizei count_words, uint32_t extra_offset_bytes) {
+  if (location == -1 || count_words <= 0 || !data) return true;
+  GLuint prog_id = g_gl_context->bound_program;
+  if (!is_valid_program(prog_id)) return false;
+  GLProgram *prog = &g_programs[prog_id];
+  bool is_pixel = location_is_pixel(location);
+  uint32_t block_idx = ((uint32_t)location >> 16) & GL_LOCATION_BLOCK_MASK;
+  uint32_t offset = ((uint32_t)location & 0xFFFFu) + extra_offset_bytes;
+  UniformBlockShadow *block = is_pixel ? (block_idx < prog->ps_block_count ? &prog->ps_blocks[block_idx] : NULL) : (block_idx < prog->vs_block_count ? &prog->vs_blocks[block_idx] : NULL);
+  if (!block || !block->buffer || offset + count_words * 4 > block->size) return false;
+  uint32_t *dst = (uint32_t *)((uint8_t *)block->buffer + offset);
+  for (GLsizei i = 0; i < count_words; i++) dst[i] = CPU_TO_GPU_32(data[i]);
+  DCFlushRange(dst, (uint32_t)count_words * 4);
   return true;
 }
 
-static void destroy_shader(GLuint shader_id) {
-  if (!is_valid_shader(shader_id)) {
-    return;
-  }
-
-  free_shader_source(&g_shaders[shader_id]);
-  free_owned_string(&g_shaders[shader_id].info_log);
-  memset(&g_shaders[shader_id], 0, sizeof(g_shaders[shader_id]));
-}
-
-static void maybe_destroy_shader(GLuint shader_id) {
-  if (!is_valid_shader(shader_id)) {
-    return;
-  }
-  if (!g_shaders[shader_id].delete_pending) {
-    return;
-  }
-  if (count_shader_attachments(shader_id) != 0) {
-    return;
-  }
-
-  destroy_shader(shader_id);
-}
-
-static void destroy_program(GLuint program_id) {
-  GLuint attached_vertex_shader;
-  GLuint attached_pixel_shader;
-  GLuint attached_geometry_shader;
-
-  if (!is_valid_program(program_id)) {
-    return;
-  }
-
-  attached_vertex_shader = g_programs[program_id].attached_vertex_shader;
-  attached_pixel_shader = g_programs[program_id].attached_pixel_shader;
-  attached_geometry_shader = g_programs[program_id].attached_geometry_shader;
-
-  clear_program_group(&g_programs[program_id]);
-  free_program_attrib_bindings(&g_programs[program_id]);
-  free_owned_string(&g_programs[program_id].info_log);
-  memset(&g_programs[program_id], 0, sizeof(g_programs[program_id]));
-
-  maybe_destroy_shader(attached_vertex_shader);
-  maybe_destroy_shader(attached_pixel_shader);
-  maybe_destroy_shader(attached_geometry_shader);
-}
-
-static void maybe_destroy_program(GLuint program_id) {
-  if (!is_valid_program(program_id)) {
-    return;
-  }
-  if (!g_programs[program_id].delete_pending) {
-    return;
-  }
-  if (g_gl_context && g_gl_context->bound_program == program_id) {
-    return;
-  }
-
-  destroy_program(program_id);
-}
-
-static int32_t find_program_uniform_block_index(const GLProgram *prog,
-                                                const char *name) {
-  if (!prog || !name) {
-    return -1;
-  }
-
-  for (uint32_t i = 0; i < prog->uniform_block_count; ++i) {
-    if (prog->uniform_blocks[i].name &&
-        strcmp(prog->uniform_blocks[i].name, name) == 0) {
-      return (int32_t)i;
-    }
-  }
-
-  return -1;
-}
-
-static ProgramUniformBlock *find_program_uniform_block_for_stage(
-    GLProgram *prog, uint32_t block_index, bool pixel_stage) {
-  if (!prog) {
-    return NULL;
-  }
-
-  for (uint32_t i = 0; i < prog->uniform_block_count; ++i) {
-    if ((!pixel_stage && prog->uniform_blocks[i].vertex_block_index == (int32_t)block_index) ||
-        (pixel_stage && prog->uniform_blocks[i].pixel_block_index == (int32_t)block_index)) {
-      return &prog->uniform_blocks[i];
-    }
-  }
-
-  return NULL;
-}
-
-static int32_t find_program_uniform_block_index_in_array(
-    const ProgramUniformBlock *blocks, uint32_t count, const char *name) {
-  if (!blocks || !name) {
-    return -1;
-  }
-
-  for (uint32_t i = 0; i < count; ++i) {
-    if (blocks[i].name && strcmp(blocks[i].name, name) == 0) {
-      return (int32_t)i;
-    }
-  }
-
-  return -1;
-}
-
-static bool build_program_uniform_blocks(GLProgram *prog,
-                                         const GX2VertexShader *vertex_shader,
-                                         const GX2PixelShader *pixel_shader) {
-  uint32_t max_blocks;
-  ProgramUniformBlock *blocks;
-  uint32_t count = 0;
-
-  max_blocks = (vertex_shader ? vertex_shader->uniformBlockCount : 0u) +
-               (pixel_shader ? pixel_shader->uniformBlockCount : 0u);
-  if (max_blocks == 0) {
-    prog->uniform_blocks = NULL;
-    prog->uniform_block_count = 0;
-    return true;
-  }
-
-  blocks = (ProgramUniformBlock *)gl_mem_alloc(
-      GL_MEM_TYPE_MEM2, sizeof(ProgramUniformBlock) * max_blocks, 4);
-  if (!blocks) {
-    return false;
-  }
-  memset(blocks, 0, sizeof(ProgramUniformBlock) * max_blocks);
-
-  if (vertex_shader) {
-    for (uint32_t i = 0; i < vertex_shader->uniformBlockCount; ++i) {
-      const GX2UniformBlock *block = &vertex_shader->uniformBlocks[i];
-      int32_t existing =
-          find_program_uniform_block_index_in_array(blocks, count, block->name);
-      ProgramUniformBlock *dst;
-
-      if (existing >= 0) {
-        dst = &blocks[existing];
-      } else {
-        dst = &blocks[count++];
-        memset(dst, 0, sizeof(*dst));
-        dst->name = copy_program_string(block->name);
-        if (!dst->name) {
-          free_program_uniform_blocks(blocks, max_blocks);
-          return false;
-        }
-        dst->vertex_block_index = -1;
-        dst->pixel_block_index = -1;
-      }
-
-      dst->vertex_block_index = (int32_t)i;
-      dst->vertex_location = block->offset;
-      dst->vertex_size = block->size;
-    }
-  }
-
-  prog->uniform_blocks = blocks;
-  prog->uniform_block_count = count;
-
-  if (pixel_shader) {
-    for (uint32_t i = 0; i < pixel_shader->uniformBlockCount; ++i) {
-      const GX2UniformBlock *block = &pixel_shader->uniformBlocks[i];
-      int32_t existing =
-          find_program_uniform_block_index_in_array(blocks, count, block->name);
-      ProgramUniformBlock *dst;
-
-      if (existing >= 0) {
-        dst = &blocks[existing];
-      } else {
-        if (count >= max_blocks) {
-          free_program_uniform_blocks(blocks, max_blocks);
-          prog->uniform_blocks = NULL;
-          prog->uniform_block_count = 0;
-          return false;
-        }
-        dst = &blocks[count++];
-        memset(dst, 0, sizeof(*dst));
-        dst->name = copy_program_string(block->name);
-        if (!dst->name) {
-          free_program_uniform_blocks(blocks, max_blocks);
-          prog->uniform_blocks = NULL;
-          prog->uniform_block_count = 0;
-          return false;
-        }
-        dst->vertex_block_index = -1;
-        dst->pixel_block_index = -1;
-      }
-
-      dst->pixel_block_index = (int32_t)i;
-      dst->pixel_location = block->offset;
-      dst->pixel_size = block->size;
-    }
-  }
-
-  prog->uniform_block_count = count;
-  return true;
-}
-
-static bool alloc_shadow_block_set(UniformBlockShadow **out_blocks,
-                                   uint32_t *out_count,
-                                   const GX2UniformBlock *uniform_blocks,
-                                   uint32_t count) {
-  UniformBlockShadow *blocks;
-
-  *out_blocks = NULL;
-  *out_count = 0;
-  if (!uniform_blocks || count == 0) {
-    return true;
-  }
-
-  blocks = (UniformBlockShadow *)gl_mem_alloc(
-      GL_MEM_TYPE_MEM2, sizeof(UniformBlockShadow) * count, 4);
-  if (!blocks) {
-    return false;
-  }
-  memset(blocks, 0, sizeof(UniformBlockShadow) * count);
-
-  for (uint32_t i = 0; i < count; ++i) {
-    blocks[i].size = uniform_blocks[i].size;
-    if (blocks[i].size == 0) {
-      continue;
-    }
-
-    blocks[i].buffer = gl_mem_alloc(GL_MEM_TYPE_MEM2, blocks[i].size, 256);
-    if (!blocks[i].buffer) {
-      free_shadow_blocks(blocks, count);
-      return false;
-    }
-    memset(blocks[i].buffer, 0, blocks[i].size);
-  }
-
-  *out_blocks = blocks;
-  *out_count = count;
-  return true;
-}
-
-static bool attach_program_group(GLProgram *prog, const WHBGfxShaderGroup *group,
-                                 bool owns_group) {
-  clear_program_group(prog);
-
-  prog->group = group;
-  prog->owns_group = owns_group;
-  prog->linked = group != NULL;
-
-  if (!group) {
-    return true;
-  }
-
-  memset(prog->vertex_sampler_units, 0, sizeof(prog->vertex_sampler_units));
-  memset(prog->pixel_sampler_units, 0, sizeof(prog->pixel_sampler_units));
-
-  if (group->vertexShader &&
-      !alloc_shadow_block_set(&prog->vs_blocks, &prog->vs_block_count,
-                              group->vertexShader->uniformBlocks,
-                              group->vertexShader->uniformBlockCount)) {
-    clear_program_group(prog);
-    return false;
-  }
-
-  if (group->pixelShader &&
-      !alloc_shadow_block_set(&prog->ps_blocks, &prog->ps_block_count,
-                              group->pixelShader->uniformBlocks,
-                              group->pixelShader->uniformBlockCount)) {
-    clear_program_group(prog);
-    return false;
-  }
-
-  if (!build_program_uniform_blocks(prog, group->vertexShader,
-                                    group->pixelShader)) {
-    clear_program_group(prog);
-    return false;
-  }
-
-  return true;
-}
-
-static GLProgram *get_bound_linked_program(bool set_error) {
-  GLuint program;
-
-  if (!g_gl_context) {
-    return NULL;
-  }
-
-  program = g_gl_context->bound_program;
-  if (!is_valid_program(program) || !g_programs[program].linked ||
-      !g_programs[program].group) {
-    if (set_error) {
-      _gl_set_error(GL_INVALID_OPERATION);
-    }
-    return NULL;
-  }
-
-  return &g_programs[program];
-}
-
-static GLProgram *get_linked_program(GLuint program) {
-  if (!g_gl_context) {
-    return NULL;
-  }
-  if (!is_valid_program(program)) {
-    set_program_lookup_error(program);
-    return NULL;
-  }
-  if (!g_programs[program].linked || !g_programs[program].group) {
-    _gl_set_error(GL_INVALID_OPERATION);
-    return NULL;
-  }
-
-  return &g_programs[program];
-}
-
-static UniformBlockShadow *get_uniform_shadow_block(GLProgram *prog,
-                                                    GLint location) {
-  uint32_t block_idx;
-
-  if (!prog || location_is_sampler(location)) {
-    return NULL;
-  }
-
-  block_idx = ((uint32_t)location >> 16) & GL_LOCATION_BLOCK_MASK;
-  if (location_is_pixel(location)) {
-    if (block_idx >= prog->ps_block_count) {
-      return NULL;
-    }
-    return &prog->ps_blocks[block_idx];
-  }
-
-  if (block_idx >= prog->vs_block_count) {
-    return NULL;
-  }
-  return &prog->vs_blocks[block_idx];
-}
-
-static const GX2UniformVar *find_uniform_var_for_location(const GLProgram *prog,
-                                                          GLint location) {
-  const GX2UniformVar *vars = NULL;
-  uint32_t count = 0;
-  uint32_t block_idx;
-  uint32_t offset;
-
-  if (!prog || !prog->group || location_is_sampler(location)) {
-    return NULL;
-  }
-
-  if (location_is_pixel(location)) {
-    if (!prog->group->pixelShader) {
-      return NULL;
-    }
-    vars = prog->group->pixelShader->uniformVars;
-    count = prog->group->pixelShader->uniformVarCount;
-  } else {
-    if (!prog->group->vertexShader) {
-      return NULL;
-    }
-    vars = prog->group->vertexShader->uniformVars;
-    count = prog->group->vertexShader->uniformVarCount;
-  }
-
-  block_idx = ((uint32_t)location >> 16) & GL_LOCATION_BLOCK_MASK;
-  offset = (uint32_t)location & 0xFFFFu;
-  for (uint32_t i = 0; i < count; ++i) {
-    if (vars[i].block == block_idx && vars[i].offset == offset) {
-      return &vars[i];
-    }
-  }
-
-  return NULL;
-}
-
-static const GX2SamplerVar *find_sampler_var_for_location(const GLProgram *prog,
-                                                          GLint location) {
-  const GX2SamplerVar *vars = NULL;
-  uint32_t count = 0;
-  uint32_t sampler_location;
-
-  if (!prog || !prog->group || !location_is_sampler(location)) {
-    return NULL;
-  }
-
-  if (location_is_pixel(location)) {
-    if (!prog->group->pixelShader) {
-      return NULL;
-    }
-    vars = prog->group->pixelShader->samplerVars;
-    count = prog->group->pixelShader->samplerVarCount;
-  } else {
-    if (!prog->group->vertexShader) {
-      return NULL;
-    }
-    vars = prog->group->vertexShader->samplerVars;
-    count = prog->group->vertexShader->samplerVarCount;
-  }
-
-  sampler_location = (uint32_t)location & 0xFFFFu;
-  for (uint32_t i = 0; i < count; ++i) {
-    if (vars[i].location == sampler_location) {
-      return &vars[i];
-    }
-  }
-
-  return NULL;
-}
-
-static void copy_uniform_words_to_floats(const uint32_t *src_words,
-                                         GLsizei word_count,
-                                         bool float_storage,
-                                         GLfloat *params) {
-  for (GLsizei i = 0; i < word_count; ++i) {
-    uint32_t raw = GPU_TO_CPU_32(src_words[i]);
-
-    if (float_storage) {
-      union {
-        uint32_t u32;
-        GLfloat f32;
-      } value;
-      value.u32 = raw;
-      params[i] = value.f32;
-    } else {
-      params[i] = (GLfloat)(GLint)raw;
-    }
-  }
-}
-
-static void copy_uniform_words_to_ints(const uint32_t *src_words,
-                                       GLsizei word_count, bool float_storage,
-                                       GLint *params) {
-  for (GLsizei i = 0; i < word_count; ++i) {
-    uint32_t raw = GPU_TO_CPU_32(src_words[i]);
-
-    if (float_storage) {
-      union {
-        uint32_t u32;
-        GLfloat f32;
-      } value;
-      value.u32 = raw;
-      params[i] = (GLint)value.f32;
-    } else {
-      params[i] = (GLint)raw;
-    }
-  }
-}
-
-static bool update_uniform_words(GLint location, const uint32_t *data,
-                                 GLsizei count_words,
-                                 uint32_t extra_offset_bytes) {
-  GLProgram *prog;
-  uint32_t is_pixel;
-  uint32_t block_idx;
-  uint32_t offset;
-  UniformBlockShadow *block = NULL;
-  uint32_t *dst;
-
-  if (location == -1) {
-    return true;
-  }
-  if (count_words < 0) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return false;
-  }
-  if (count_words == 0) {
-    return true;
-  }
-  if (!data) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return false;
-  }
-  if (location_is_sampler(location)) {
-    _gl_set_error(GL_INVALID_OPERATION);
-    return false;
-  }
-
-  prog = get_bound_linked_program(true);
-  if (!prog) {
-    return false;
-  }
-
-  is_pixel = location_is_pixel(location) ? 1u : 0u;
-  block_idx = ((uint32_t)location >> 16) & GL_LOCATION_BLOCK_MASK;
-  offset = ((uint32_t)location & 0xFFFFu) + extra_offset_bytes;
-
-  if (!is_pixel && block_idx < prog->vs_block_count) {
-    block = &prog->vs_blocks[block_idx];
-  } else if (is_pixel && block_idx < prog->ps_block_count) {
-    block = &prog->ps_blocks[block_idx];
-  }
-
-  if (!block || !block->buffer ||
-      offset + (uint32_t)count_words * 4u > block->size) {
-    _gl_set_error(GL_INVALID_OPERATION);
-    return false;
-  }
-
-  dst = (uint32_t *)((uint8_t *)block->buffer + offset);
-
-  for (GLsizei i = 0; i < count_words; i++) {
-    dst[i] = CPU_TO_GPU_32(data[i]);
-  }
-
-  DCFlushRange(dst, (uint32_t)count_words * 4u);
-  return true;
-}
-
-static bool set_sampler_unit(GLint location, GLint unit) {
-  GLProgram *prog = get_bound_linked_program(true);
-  uint32_t sampler_location;
-
-  if (location == -1) {
-    return true;
-  }
-  if (!prog) {
-    return false;
-  }
-  if (!location_is_sampler(location)) {
-    uint32_t raw = (uint32_t)unit;
-    return update_uniform_words(location, &raw, 1, 0);
-  }
-  if (unit < 0 || unit >= 32) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return false;
-  }
-
-  sampler_location = (uint32_t)location & 0xFFFFu;
-  if (sampler_location >= MAX_PROGRAM_SAMPLERS) {
-    _gl_set_error(GL_INVALID_OPERATION);
-    return false;
-  }
-
-  if (location_is_pixel(location)) {
-    prog->pixel_sampler_units[sampler_location] = unit;
-  } else {
-    prog->vertex_sampler_units[sampler_location] = unit;
-  }
-
-  g_gl_context->dirty_flags |= GL_DIRTY_TEXTURE_BINDINGS;
-  return true;
-}
-
-static bool set_sampler_units(GLint location, GLsizei count,
-                              const GLint *values) {
-  GLProgram *prog = get_bound_linked_program(true);
-  uint32_t sampler_location;
-
-  if (location == -1) {
-    return true;
-  }
-  if (count < 0) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return false;
-  }
-  if (count == 0) {
-    return true;
-  }
-  if (!values) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return false;
-  }
-  if (!prog) {
-    return false;
-  }
-  if (!location_is_sampler(location)) {
-    return update_uniform_words(location, (const uint32_t *)values, count, 0);
-  }
-
-  sampler_location = (uint32_t)location & 0xFFFFu;
-  if (sampler_location + (uint32_t)count > MAX_PROGRAM_SAMPLERS) {
-    _gl_set_error(GL_INVALID_OPERATION);
-    return false;
-  }
-
-  for (GLsizei i = 0; i < count; ++i) {
-    if (values[i] < 0 || values[i] >= 32) {
-      _gl_set_error(GL_INVALID_VALUE);
-      return false;
-    }
-    if (location_is_pixel(location)) {
-      prog->pixel_sampler_units[sampler_location + (uint32_t)i] = values[i];
-    } else {
-      prog->vertex_sampler_units[sampler_location + (uint32_t)i] = values[i];
-    }
-  }
-
-  g_gl_context->dirty_flags |= GL_DIRTY_TEXTURE_BINDINGS;
-  return true;
-}
-
-static bool update_non_sampler_int_words(GLint location, const GLint *data,
-                                         GLsizei count_words) {
-  if (location == -1) {
-    return true;
-  }
-  if (count_words < 0) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return false;
-  }
-  if (count_words == 0) {
-    return true;
-  }
-  if (!data) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return false;
-  }
-  if (location_is_sampler(location)) {
-    _gl_set_error(GL_INVALID_OPERATION);
-    return false;
-  }
-
-  return update_uniform_words(location, (const uint32_t *)data, count_words, 0);
-}
-
-void gl_shader_init(void) {
-  memset(g_shaders, 0, sizeof(g_shaders));
-  memset(g_programs, 0, sizeof(g_programs));
-}
-
+void gl_shader_init(void) { memset(g_shaders, 0, sizeof(g_shaders)); memset(g_programs, 0, sizeof(g_programs)); }
 GLuint _gl_CreateShader(GLenum type) {
-  if (!g_gl_context) {
+    for (int i = 1; i < MAX_SHADERS; i++) if (!g_shaders[i].in_use) { g_shaders[i].in_use = true; g_shaders[i].type = type; return i; }
     return 0;
-  }
-  if (type != GL_VERTEX_SHADER && type != GL_FRAGMENT_SHADER &&
-      type != GL_GEOMETRY_SHADER) {
-    _gl_set_error(GL_INVALID_ENUM);
-    return 0;
-  }
-
-  for (int i = 1; i < MAX_SHADERS; i++) {
-    if (!g_shaders[i].in_use) {
-      memset(&g_shaders[i], 0, sizeof(g_shaders[i]));
-      g_shaders[i].in_use = true;
-      g_shaders[i].type = type;
-      return i;
-    }
-  }
-
-  _gl_set_error(GL_OUT_OF_MEMORY);
-  return 0;
 }
-
-void _gl_DeleteShader(GLuint shader) {
-  if (!g_gl_context || shader == 0) {
-    return;
-  }
-  if (!is_valid_shader(shader)) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return;
-  }
-
-  g_shaders[shader].delete_pending = true;
-  maybe_destroy_shader(shader);
-}
-
-GLboolean _gl_IsShader(GLuint shader) {
-  return is_valid_shader(shader) ? GL_TRUE : GL_FALSE;
-}
-
-void _gl_ShaderSource(GLuint shader, GLsizei count, const GLchar *const *string,
-                      const GLint *length) {
-  size_t total_length = 0;
-  char *source;
-  char *dst;
-
-  if (!g_gl_context) {
-    return;
-  }
-  if (!is_valid_shader(shader)) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return;
-  }
-  if (count < 0) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return;
-  }
-  if (count > 0 && !string) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return;
-  }
-
-  for (GLsizei i = 0; i < count; ++i) {
-    size_t part_length;
-    if (!string[i]) {
-      _gl_set_error(GL_INVALID_VALUE);
-      return;
-    }
-    if (length && length[i] >= 0) {
-      part_length = (size_t)length[i];
-    } else {
-      part_length = strlen(string[i]);
-    }
-    total_length += part_length;
-  }
-
-  source = (char *)gl_mem_alloc(GL_MEM_TYPE_MEM2, total_length + 1u, 4);
-  if (!source) {
-    _gl_set_error(GL_OUT_OF_MEMORY);
-    return;
-  }
-
-  dst = source;
-  for (GLsizei i = 0; i < count; ++i) {
-    size_t part_length =
-        (length && length[i] >= 0) ? (size_t)length[i] : strlen(string[i]);
-    memcpy(dst, string[i], part_length);
-    dst += part_length;
-  }
-  *dst = '\0';
-
-  free_shader_source(&g_shaders[shader]);
-  set_shader_log(&g_shaders[shader], NULL);
-  g_shaders[shader].source = source;
-  g_shaders[shader].source_length = (uint32_t)total_length;
-  g_shaders[shader].source_present = true;
-  g_shaders[shader].compile_requested = false;
-  g_shaders[shader].compile_succeeded = false;
-}
-
-void _gl_CompileShader(GLuint shader) {
-  if (!g_gl_context) {
-    return;
-  }
-  if (!is_valid_shader(shader)) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return;
-  }
-  if (!g_shaders[shader].source_present) {
-    set_shader_log(&g_shaders[shader], "No shader source has been provided.");
-    _gl_set_error(GL_INVALID_OPERATION);
-    return;
-  }
-
-  // Mark compile success
-  g_shaders[shader].compile_requested = true;
-  g_shaders[shader].compile_succeeded = true;
-  set_shader_log(&g_shaders[shader], NULL);
-}
-
+void _gl_DeleteShader(GLuint s) { if (is_valid_shader(s)) g_shaders[s].in_use = false; }
+GLboolean _gl_IsShader(GLuint s) { return is_valid_shader(s) ? GL_TRUE : GL_FALSE; }
+void _gl_ShaderSource(GLuint s, GLsizei c, const GLchar* const* str, const GLint* l) { (void)s;(void)c;(void)str;(void)l; }
+void _gl_CompileShader(GLuint s) { if (is_valid_shader(s)) g_shaders[s].compile_requested = true; }
 GLuint _gl_CreateProgram(void) {
-  if (!g_gl_context) {
+    for (int i = 1; i < MAX_PROGRAMS; i++) if (!g_programs[i].in_use) { g_programs[i].in_use = true; return i; }
     return 0;
+}
+void _gl_DeleteProgram(GLuint p) { if (is_valid_program(p)) g_programs[p].in_use = false; }
+GLboolean _gl_IsProgram(GLuint p) { return is_valid_program(p) ? GL_TRUE : GL_FALSE; }
+void _gl_AttachShader(GLuint p, GLuint s) { (void)p;(void)s; }
+void _gl_DetachShader(GLuint p, GLuint s) { (void)p;(void)s; }
+void _gl_LinkProgram(GLuint p) { if (is_valid_program(p)) g_programs[p].linked = true; }
+void _gl_UseProgram(GLuint p) {
+  if (!g_gl_context) return;
+  g_gl_context->bound_program = p;
+  g_gl_context->dirty_flags |= GL_DIRTY_PROGRAM | GL_DIRTY_TEXTURE_BINDINGS | GL_DIRTY_UNIFORM_BINDINGS;
+}
+void _gl_ValidateProgram(GLuint p) { (void)p; }
+void _gl_BindAttribLocation(GLuint p, GLuint i, const GLchar* n) { (void)p;(void)i;(void)n; }
+void _gl_GetAttachedShaders(GLuint p, GLsizei m, GLsizei* c, GLuint* s) { (void)p;(void)m;(void)c;(void)s; }
+void _gl_GetActiveAttrib(GLuint p, GLuint i, GLsizei b, GLsizei* l, GLint* s, GLenum* t, GLchar* n) { (void)p;(void)i;(void)b;(void)l;(void)s;(void)t;(void)n; }
+void _gl_GetActiveUniform(GLuint p, GLuint i, GLsizei b, GLsizei* l, GLint* s, GLenum* t, GLchar* n) { (void)p;(void)i;(void)b;(void)l;(void)s;(void)t;(void)n; }
+void _gl_GetShaderiv(GLuint s, GLenum p, GLint *v) {
+  if (!is_valid_shader(s) || !v) return;
+  switch (p) {
+  case GL_COMPILE_STATUS:  *v = g_shaders[s].compile_succeeded ? GL_TRUE : (g_shaders[s].compile_requested ? GL_TRUE : GL_FALSE); break;
+  case GL_SHADER_TYPE:     *v = (GLint)g_shaders[s].type; break;
+  case GL_DELETE_STATUS:   *v = g_shaders[s].delete_pending ? GL_TRUE : GL_FALSE; break;
+  case GL_INFO_LOG_LENGTH: *v = 0; break;
+  case GL_SHADER_SOURCE_LENGTH: *v = g_shaders[s].source_length; break;
+  default: _gl_set_error(GL_INVALID_ENUM); break;
   }
-
-  for (int i = 1; i < MAX_PROGRAMS; i++) {
-    if (!g_programs[i].in_use) {
-      memset(&g_programs[i], 0, sizeof(g_programs[i]));
-      g_programs[i].in_use = true;
-      return i;
+}
+void _gl_GetProgramiv(GLuint p, GLenum n, GLint *v) {
+  if (!is_valid_program(p) || !v) return;
+  GLProgram *prog = &g_programs[p];
+  switch (n) {
+  case GL_LINK_STATUS:          *v = prog->linked ? GL_TRUE : GL_FALSE; break;
+  case GL_VALIDATE_STATUS:      *v = prog->validated ? GL_TRUE : GL_FALSE; break;
+  case GL_DELETE_STATUS:        *v = prog->delete_pending ? GL_TRUE : GL_FALSE; break;
+  case GL_INFO_LOG_LENGTH:      *v = 0; break;
+  case GL_ATTACHED_SHADERS:     *v = (prog->attached_vertex_shader ? 1 : 0) + (prog->attached_pixel_shader ? 1 : 0); break;
+  case GL_ACTIVE_UNIFORMS:      *v = prog->group && prog->group->vertexShader ? (GLint)prog->group->vertexShader->uniformVarCount : 0; break;
+  case GL_ACTIVE_ATTRIBUTES:    *v = prog->group && prog->group->vertexShader ? (GLint)prog->group->vertexShader->attribVarCount : 0; break;
+  case GL_ACTIVE_UNIFORM_MAX_LENGTH: *v = 64; break;
+  case GL_ACTIVE_ATTRIBUTE_MAX_LENGTH: *v = 64; break;
+  default: _gl_set_error(GL_INVALID_ENUM); break;
+  }
+}
+void _gl_GetShaderInfoLog(GLuint s, GLsizei m, GLsizei *l, GLchar *i) { (void)s;(void)m;(void)l;(void)i; }
+void _gl_GetProgramInfoLog(GLuint p, GLsizei m, GLsizei *l, GLchar *i) { (void)p;(void)m;(void)l;(void)i; }
+void _gl_GetShaderSource(GLuint s, GLsizei b, GLsizei *l, GLchar *src) { (void)s;(void)b;(void)l;(void)src; }
+void _gl_GetUniformfv(GLuint p, GLint l, GLfloat *v) { (void)p;(void)l;(void)v; }
+void _gl_GetUniformiv(GLuint p, GLint l, GLint *v) { (void)p;(void)l;(void)v; }
+void _gl_GetUniformuiv(GLuint program, GLint location, GLuint *params) { (void)program;(void)location;(void)params; _gl_set_error(GL_INVALID_OPERATION); }
+GLuint _gl_GetUniformBlockIndex(GLuint p, const GLchar *n) { (void)p;(void)n; return GL_INVALID_INDEX; }
+void _gl_UniformBlockBinding(GLuint p, GLuint i, GLuint b) { (void)p;(void)i;(void)b; }
+void _gl_WiiULoadShaderGroup(GLuint p, const void *g) {
+  if (!is_valid_program(p) || !g) return;
+  GLProgram *prog = &g_programs[p];
+  const WHBGfxShaderGroup *group = (const WHBGfxShaderGroup *)g;
+  /* free old shadow buffers */
+  if (prog->vs_blocks) {
+    for (uint32_t i = 0; i < prog->vs_block_count; i++)
+      if (prog->vs_blocks[i].buffer) gl_mem_free(GL_MEM_TYPE_MEM2, prog->vs_blocks[i].buffer);
+    free(prog->vs_blocks); prog->vs_blocks = NULL;
+  }
+  if (prog->ps_blocks) {
+    for (uint32_t i = 0; i < prog->ps_block_count; i++)
+      if (prog->ps_blocks[i].buffer) gl_mem_free(GL_MEM_TYPE_MEM2, prog->ps_blocks[i].buffer);
+    free(prog->ps_blocks); prog->ps_blocks = NULL;
+  }
+  prog->group = group;
+  prog->owns_group = false;
+  GX2VertexShader *vs = group->vertexShader;
+  GX2PixelShader  *ps = group->pixelShader;
+  prog->vs_block_count = vs ? vs->uniformBlockCount : 0;
+  prog->ps_block_count = ps ? ps->uniformBlockCount : 0;
+  if (prog->vs_block_count) {
+    prog->vs_blocks = (UniformBlockShadow*)calloc(prog->vs_block_count, sizeof(UniformBlockShadow));
+    for (uint32_t i = 0; i < prog->vs_block_count; i++) {
+      prog->vs_blocks[i].size   = vs->uniformBlocks[i].size;
+      prog->vs_blocks[i].buffer = gl_mem_alloc(GL_MEM_TYPE_MEM2, vs->uniformBlocks[i].size, 256);
+      if (prog->vs_blocks[i].buffer) memset(prog->vs_blocks[i].buffer, 0, vs->uniformBlocks[i].size);
     }
   }
-
-  _gl_set_error(GL_OUT_OF_MEMORY);
-  return 0;
-}
-
-void _gl_DeleteProgram(GLuint program) {
-  if (!g_gl_context || program == 0) {
-    return;
-  }
-  if (!is_valid_program(program)) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return;
-  }
-
-  g_programs[program].delete_pending = true;
-  maybe_destroy_program(program);
-}
-
-GLboolean _gl_IsProgram(GLuint program) {
-  return is_valid_program(program) ? GL_TRUE : GL_FALSE;
-}
-
-void _gl_AttachShader(GLuint program, GLuint shader) {
-  GLProgram *prog;
-  GLShader *src_shader;
-  GLuint *slot = NULL;
-  GLuint replaced_shader = 0;
-
-  if (!g_gl_context) {
-    return;
-  }
-  if (!is_valid_program(program) || !is_valid_shader(shader)) {
-    _gl_set_error(program == 0 ? GL_INVALID_OPERATION : GL_INVALID_VALUE);
-    return;
-  }
-
-  prog = &g_programs[program];
-  src_shader = &g_shaders[shader];
-
-  switch (src_shader->type) {
-  case GL_VERTEX_SHADER:
-    slot = &prog->attached_vertex_shader;
-    break;
-  case GL_FRAGMENT_SHADER:
-    slot = &prog->attached_pixel_shader;
-    break;
-  case GL_GEOMETRY_SHADER:
-    slot = &prog->attached_geometry_shader;
-    break;
-  default:
-    _gl_set_error(GL_INVALID_OPERATION);
-    return;
-  }
-
-  replaced_shader = *slot;
-  *slot = shader;
-  prog->validated = false;
-  if (replaced_shader != 0 && replaced_shader != shader) {
-    maybe_destroy_shader(replaced_shader);
-  }
-}
-
-void _gl_DetachShader(GLuint program, GLuint shader) {
-  GLProgram *prog;
-  GLuint *slot = NULL;
-
-  if (!g_gl_context) {
-    return;
-  }
-  if (!is_valid_program(program) || !is_valid_shader(shader)) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return;
-  }
-
-  prog = &g_programs[program];
-  if (prog->attached_vertex_shader == shader) {
-    slot = &prog->attached_vertex_shader;
-  } else if (prog->attached_pixel_shader == shader) {
-    slot = &prog->attached_pixel_shader;
-  } else if (prog->attached_geometry_shader == shader) {
-    slot = &prog->attached_geometry_shader;
-  } else {
-    _gl_set_error(GL_INVALID_OPERATION);
-    return;
-  }
-
-  *slot = 0;
-  prog->validated = false;
-  maybe_destroy_shader(shader);
-}
-
-void _gl_BindAttribLocation(GLuint program, GLuint index, const GLchar *name) {
-  GLProgram *prog;
-  char *copy;
-
-  if (!g_gl_context) {
-    return;
-  }
-  if (!is_valid_program(program)) {
-    set_program_lookup_error(program);
-    return;
-  }
-  if (!name || index >= GL33_MAX_VERTEX_ATTRIBS) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return;
-  }
-  if (strncmp(name, "gl_", 3) == 0) {
-    _gl_set_error(GL_INVALID_OPERATION);
-    return;
-  }
-
-  copy = copy_program_string(name);
-  if (!copy) {
-    _gl_set_error(GL_OUT_OF_MEMORY);
-    return;
-  }
-
-  prog = &g_programs[program];
-  for (uint32_t i = 0; i < GL33_MAX_VERTEX_ATTRIBS; ++i) {
-    if (prog->attrib_binding_names[i] &&
-        strcmp(prog->attrib_binding_names[i], name) == 0) {
-      free_owned_string(&prog->attrib_binding_names[i]);
+  if (prog->ps_block_count) {
+    prog->ps_blocks = (UniformBlockShadow*)calloc(prog->ps_block_count, sizeof(UniformBlockShadow));
+    for (uint32_t i = 0; i < prog->ps_block_count; i++) {
+      prog->ps_blocks[i].size   = ps->uniformBlocks[i].size;
+      prog->ps_blocks[i].buffer = gl_mem_alloc(GL_MEM_TYPE_MEM2, ps->uniformBlocks[i].size, 256);
+      if (prog->ps_blocks[i].buffer) memset(prog->ps_blocks[i].buffer, 0, ps->uniformBlocks[i].size);
     }
   }
-
-  free_owned_string(&prog->attrib_binding_names[index]);
-  prog->attrib_binding_names[index] = copy;
+  memset(prog->vertex_sampler_units, -1, sizeof(prog->vertex_sampler_units));
+  memset(prog->pixel_sampler_units,  -1, sizeof(prog->pixel_sampler_units));
+  if (vs) for (uint32_t i = 0; i < vs->samplerVarCount && i < MAX_PROGRAM_SAMPLERS; i++)
+    prog->vertex_sampler_units[vs->samplerVars[i].location] = (GLint)i;
+  if (ps) for (uint32_t i = 0; i < ps->samplerVarCount && i < MAX_PROGRAM_SAMPLERS; i++)
+    prog->pixel_sampler_units[ps->samplerVars[i].location]  = (GLint)i;
+  prog->linked = true;
 }
+void _gl_WiiULoadShaderGroupGFD(GLuint p, GLuint idx, const void *d) { (void)idx; (void)d; (void)p; }
 
-void _gl_GetAttachedShaders(GLuint program, GLsizei maxCount, GLsizei *count,
-                            GLuint *shaders) {
-  GLsizei written = 0;
-  GLProgram *prog;
-
-  if (!g_gl_context) {
-    return;
-  }
-  if (!is_valid_program(program)) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return;
-  }
-  if (maxCount < 0) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return;
-  }
-
-  prog = &g_programs[program];
-  if (count) {
-    *count = 0;
-  }
-  if (!shaders || maxCount == 0) {
-    return;
-  }
-
-  if (prog->attached_vertex_shader && written < maxCount) {
-    shaders[written++] = prog->attached_vertex_shader;
-  }
-  if (prog->attached_pixel_shader && written < maxCount) {
-    shaders[written++] = prog->attached_pixel_shader;
-  }
-  if (prog->attached_geometry_shader && written < maxCount) {
-    shaders[written++] = prog->attached_geometry_shader;
-  }
-
-  if (count) {
-    *count = written;
-  }
-}
-
-void _gl_GetActiveAttrib(GLuint program, GLuint index, GLsizei bufSize,
-                         GLsizei *length, GLint *size, GLenum *type,
-                         GLchar *name) {
-  GLProgram *prog;
-  ActiveVariableInfo info;
-  GLuint active_count = 0;
-
-  if (!g_gl_context) {
-    return;
-  }
-  if (!is_valid_program(program)) {
-    set_program_lookup_error(program);
-    return;
-  }
-  if (bufSize < 0) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return;
-  }
-
-  prog = &g_programs[program];
-  collect_active_attribs(prog, index, &info, &active_count, NULL);
-  if (index >= active_count) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return;
-  }
-
-  if (size) {
-    *size = info.size;
-  }
-  if (type) {
-    *type = info.type;
-  }
-  write_active_variable_name(info.name, bufSize, length, name);
-}
-
-void _gl_GetActiveUniform(GLuint program, GLuint index, GLsizei bufSize,
-                          GLsizei *length, GLint *size, GLenum *type,
-                          GLchar *name) {
-  GLProgram *prog;
-  ActiveVariableInfo info;
-  GLuint active_count = 0;
-
-  if (!g_gl_context) {
-    return;
-  }
-  if (!is_valid_program(program)) {
-    set_program_lookup_error(program);
-    return;
-  }
-  if (bufSize < 0) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return;
-  }
-
-  prog = &g_programs[program];
-  collect_active_uniforms(prog, index, &info, &active_count, NULL);
-  if (index >= active_count) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return;
-  }
-
-  if (size) {
-    *size = info.size;
-  }
-  if (type) {
-    *type = info.type;
-  }
-  write_active_variable_name(info.name, bufSize, length, name);
-}
-
-void _gl_LinkProgram(GLuint program) {
-  GLProgram *prog;
-
-  if (!g_gl_context) {
-    return;
-  }
-  if (!is_valid_program(program)) {
-    _gl_set_error(program == 0 ? GL_INVALID_OPERATION : GL_INVALID_VALUE);
-    return;
-  }
-
-  prog = &g_programs[program];
-  if (prog->group) {
-    prog->linked = true;
-    prog->validated = false;
-    set_program_log(prog, NULL);
-    return;
-  }
-
-  if (!prog->attached_vertex_shader || !prog->attached_pixel_shader ||
-      !g_shaders[prog->attached_vertex_shader].compile_requested ||
-      !g_shaders[prog->attached_pixel_shader].compile_requested) {
-    set_program_log(
-        prog,
-        "Program must have compiled vertex and fragment shaders before link.");
-    _gl_set_error(GL_INVALID_OPERATION);
-    return;
-  }
-
-  // Explain link failure
-  set_program_log(
-      prog,
-        "Runtime GLSL linking is unsupported. Compile with CafeGLSL and load a "
-        "precompiled GFD/GSH shader group.");
-  _gl_set_error(GL_INVALID_OPERATION);
-}
-
-void _gl_ValidateProgram(GLuint program) {
-  GLProgram *prog;
-  GLenum unit_types[MAX_PROGRAM_SAMPLERS];
-  const char *conflict_name = NULL;
-  GLint conflict_unit = -1;
-  char message[160];
-
-  if (!g_gl_context) {
-    return;
-  }
-  if (!is_valid_program(program)) {
-    set_program_lookup_error(program);
-    return;
-  }
-
-  prog = &g_programs[program];
-  prog->validated = false;
-
-  if (!prog->linked || !prog->group) {
-    set_program_log(prog, "Program validation failed: no linked shader group.");
-    return;
-  }
-
-  memset(unit_types, 0, sizeof(unit_types));
-
-  if (prog->group->vertexShader &&
-      !validate_sampler_bindings(prog->group->vertexShader->samplerVars,
-                                 prog->group->vertexShader->samplerVarCount,
-                                 prog->vertex_sampler_units, unit_types,
-                                 &conflict_name, &conflict_unit)) {
-    if (conflict_unit < 0 || conflict_unit >= MAX_PROGRAM_SAMPLERS) {
-      snprintf(message, sizeof(message),
-               "Program validation failed: sampler %s uses out-of-range unit %d.",
-               conflict_name ? conflict_name : "<unnamed>", conflict_unit);
-    } else {
-      snprintf(message, sizeof(message),
-               "Program validation failed: sampler type conflict on unit %d for %s.",
-               conflict_unit, conflict_name ? conflict_name : "<unnamed>");
+GLint _gl_GetUniformLocation(GLuint p, const GLchar *name) {
+  if (!is_valid_program(p) || !name) return -1;
+  GLProgram *prog = &g_programs[p];
+  if (!prog->group) return -1;
+  GX2VertexShader *vs = prog->group->vertexShader;
+  GX2PixelShader  *ps = prog->group->pixelShader;
+  if (vs) for (uint32_t i = 0; i < vs->uniformVarCount; i++) {
+    if (vs->uniformVars[i].name && strcmp(vs->uniformVars[i].name, name) == 0) {
+      uint32_t blk = (vs->uniformVars[i].block >= 0) ? (uint32_t)vs->uniformVars[i].block : 0;
+      return (GLint)((blk << 16) | (vs->uniformVars[i].offset & 0xFFFFu));
     }
-    set_program_log(prog, message);
-    return;
   }
-
-  if (prog->group->pixelShader &&
-      !validate_sampler_bindings(prog->group->pixelShader->samplerVars,
-                                 prog->group->pixelShader->samplerVarCount,
-                                 prog->pixel_sampler_units, unit_types,
-                                 &conflict_name, &conflict_unit)) {
-    if (conflict_unit < 0 || conflict_unit >= MAX_PROGRAM_SAMPLERS) {
-      snprintf(message, sizeof(message),
-               "Program validation failed: sampler %s uses out-of-range unit %d.",
-               conflict_name ? conflict_name : "<unnamed>", conflict_unit);
-    } else {
-      snprintf(message, sizeof(message),
-               "Program validation failed: sampler type conflict on unit %d for %s.",
-               conflict_unit, conflict_name ? conflict_name : "<unnamed>");
+  if (ps) for (uint32_t i = 0; i < ps->uniformVarCount; i++) {
+    if (ps->uniformVars[i].name && strcmp(ps->uniformVars[i].name, name) == 0) {
+      uint32_t blk = (ps->uniformVars[i].block >= 0) ? (uint32_t)ps->uniformVars[i].block : 0;
+      return (GLint)(GL_LOCATION_STAGE_PIXEL | (blk << 16) | (ps->uniformVars[i].offset & 0xFFFFu));
     }
-    set_program_log(prog, message);
-    return;
   }
-
-  prog->validated = true;
-  set_program_log(prog, NULL);
+  return -1;
 }
-
-void _gl_UseProgram(GLuint program) {
-  GLuint old_program;
-
-  if (!g_gl_context) {
-    return;
-  }
-  if (program >= MAX_PROGRAMS || (program > 0 && !g_programs[program].in_use)) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return;
-  }
-  if (program > 0 && (!g_programs[program].linked || !g_programs[program].group)) {
-    _gl_set_error(GL_INVALID_OPERATION);
-    return;
-  }
-
-  old_program = g_gl_context->bound_program;
-  g_gl_context->bound_program = program;
-  g_gl_context->dirty_flags |= GL_DIRTY_PROGRAM;
-  if (old_program != program) {
-    maybe_destroy_program(old_program);
-  }
+GLint _gl_GetAttribLocation(GLuint p, const GLchar *name) {
+  if (!is_valid_program(p) || !name) return -1;
+  GLProgram *prog = &g_programs[p];
+  if (!prog->group || !prog->group->vertexShader) return -1;
+  GX2VertexShader *vs = prog->group->vertexShader;
+  for (uint32_t i = 0; i < vs->attribVarCount; i++)
+    if (vs->attribVars[i].name && strcmp(vs->attribVars[i].name, name) == 0)
+      return (GLint)vs->attribVars[i].location;
+  return -1;
 }
-
-void _gl_WiiULoadShaderGroup(GLuint program, const void *shaderGroup) {
-  GLProgram *prog;
-
-  if (!g_gl_context || !is_valid_program(program)) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return;
-  }
-
-  prog = &g_programs[program];
-  if (!attach_program_group(prog, (const WHBGfxShaderGroup *)shaderGroup, false)) {
-    _gl_set_error(GL_OUT_OF_MEMORY);
-    return;
-  }
-
-  set_program_log(prog, NULL);
-  g_gl_context->dirty_flags |= GL_DIRTY_PROGRAM;
-}
-
-void _gl_WiiULoadShaderGroupGFD(GLuint program, GLuint index,
-                                const void *gfdData) {
-  GLProgram *prog;
-
-  if (!g_gl_context || !is_valid_program(program) || !gfdData) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return;
-  }
-
-  prog = &g_programs[program];
-  clear_program_group(prog);
-  memset(&prog->owned_group, 0, sizeof(prog->owned_group));
-
-  if (!WHBGfxLoadGFDShaderGroup(&prog->owned_group, index, gfdData)) {
-    set_program_log(prog, "Failed to load CafeGLSL GFD shader group.");
-    _gl_set_error(GL_INVALID_OPERATION);
-    return;
-  }
-
-  if (!attach_program_group(prog, &prog->owned_group, true)) {
-    set_program_log(prog, "Failed to attach loaded CafeGLSL shader group.");
-    _gl_set_error(GL_OUT_OF_MEMORY);
-    return;
-  }
-
-  set_program_log(prog, NULL);
-  g_gl_context->dirty_flags |= GL_DIRTY_PROGRAM;
-}
-
-void _gl_GetShaderiv(GLuint shader, GLenum pname, GLint *params) {
-  if (!g_gl_context || !params) {
-    return;
-  }
-  if (!is_valid_shader(shader)) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return;
-  }
-
-  switch (pname) {
-  case GL_DELETE_STATUS:
-    *params = g_shaders[shader].delete_pending ? GL_TRUE : GL_FALSE;
-    break;
-  case GL_COMPILE_STATUS:
-    *params = g_shaders[shader].compile_succeeded ? GL_TRUE : GL_FALSE;
-    break;
-  case GL_INFO_LOG_LENGTH:
-    *params = (GLint)get_log_length(g_shaders[shader].info_log);
-    break;
-  case GL_SHADER_SOURCE_LENGTH:
-    *params = g_shaders[shader].source_present
-                  ? (GLint)(g_shaders[shader].source_length + 1u)
-                  : 0;
-    break;
-  case GL_SHADER_TYPE:
-    *params = (GLint)g_shaders[shader].type;
-    break;
-  default:
-    _gl_set_error(GL_INVALID_ENUM);
-    break;
-  }
-}
-
-void _gl_GetProgramiv(GLuint program, GLenum pname, GLint *params) {
-  GLsizei max_name_length = 0;
-  GLuint active_count = 0;
-
-  if (!g_gl_context || !params) {
-    return;
-  }
-  if (!is_valid_program(program)) {
-    set_program_lookup_error(program);
-    return;
-  }
-
-  switch (pname) {
-  case GL_DELETE_STATUS:
-    *params = g_programs[program].delete_pending ? GL_TRUE : GL_FALSE;
-    break;
-  case GL_LINK_STATUS:
-    *params = g_programs[program].linked ? GL_TRUE : GL_FALSE;
-    break;
-  case GL_VALIDATE_STATUS:
-    *params = g_programs[program].validated ? GL_TRUE : GL_FALSE;
-    break;
-  case GL_INFO_LOG_LENGTH:
-    *params = (GLint)get_log_length(g_programs[program].info_log);
-    break;
-  case GL_ATTACHED_SHADERS:
-    *params = (GLint)count_program_attached_shaders(&g_programs[program]);
-    break;
-  case GL_ACTIVE_UNIFORMS:
-    collect_active_uniforms(&g_programs[program], (GLuint)~0u, NULL,
-                            &active_count, NULL);
-    *params = (GLint)active_count;
-    break;
-  case GL_ACTIVE_UNIFORM_MAX_LENGTH:
-    collect_active_uniforms(&g_programs[program], (GLuint)~0u, NULL, NULL,
-                            &max_name_length);
-    *params = (GLint)max_name_length;
-    break;
-  case GL_ACTIVE_ATTRIBUTES:
-    collect_active_attribs(&g_programs[program], (GLuint)~0u, NULL,
-                           &active_count, NULL);
-    *params = (GLint)active_count;
-    break;
-  case GL_ACTIVE_ATTRIBUTE_MAX_LENGTH:
-    collect_active_attribs(&g_programs[program], (GLuint)~0u, NULL, NULL,
-                           &max_name_length);
-    *params = (GLint)max_name_length;
-    break;
-  default:
-    _gl_set_error(GL_INVALID_ENUM);
-    break;
-  }
-}
-
-static void copy_info_log_text(const char *source, GLsizei maxLength,
-                               GLsizei *length, GLchar *infoLog) {
-  GLsizei copied = 0;
-
-  if (length) {
-    *length = 0;
-  }
-  if (maxLength < 0) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return;
-  }
-  if (!infoLog || maxLength == 0) {
-    return;
-  }
-
-  if (source && source[0] != '\0') {
-    copied = (GLsizei)strlen(source);
-    if (copied >= maxLength) {
-      copied = maxLength - 1;
-    }
-    memcpy(infoLog, source, (size_t)copied);
-  }
-
-  infoLog[copied] = '\0';
-  if (length) {
-    *length = copied;
-  }
-}
-
-void _gl_GetShaderInfoLog(GLuint shader, GLsizei maxLength, GLsizei *length,
-                          GLchar *infoLog) {
-  if (!g_gl_context) {
-    return;
-  }
-  if (!is_valid_shader(shader)) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return;
-  }
-
-  copy_info_log_text(g_shaders[shader].info_log, maxLength, length, infoLog);
-}
-
-void _gl_GetShaderSource(GLuint shader, GLsizei bufSize, GLsizei *length,
-                         GLchar *source) {
-  if (!g_gl_context) {
-    return;
-  }
-  if (!is_valid_shader(shader)) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return;
-  }
-
-  copy_info_log_text(g_shaders[shader].source, bufSize, length, source);
-}
-
-void _gl_GetProgramInfoLog(GLuint program, GLsizei maxLength, GLsizei *length,
-                           GLchar *infoLog) {
-  if (!g_gl_context) {
-    return;
-  }
-  if (!is_valid_program(program)) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return;
-  }
-
-  copy_info_log_text(g_programs[program].info_log, maxLength, length, infoLog);
-}
-
-void _gl_GetUniformfv(GLuint program, GLint location, GLfloat *params) {
-  GLProgram *prog;
-  const GX2UniformVar *uniform_var;
-  const GX2SamplerVar *sampler_var;
-  UniformBlockShadow *block;
-  const uint32_t *src_words;
-  GLsizei word_count;
-  uint32_t offset;
-
-  if (!g_gl_context || !params) {
-    return;
-  }
-
-  prog = get_linked_program(program);
-  if (!prog) {
-    return;
-  }
-
-  if (location_is_sampler(location)) {
-    sampler_var = find_sampler_var_for_location(prog, location);
-    if (!sampler_var || sampler_var->location >= MAX_PROGRAM_SAMPLERS) {
-      _gl_set_error(GL_INVALID_OPERATION);
-      return;
-    }
-
-    if (location_is_pixel(location)) {
-      params[0] = (GLfloat)prog->pixel_sampler_units[sampler_var->location];
-    } else {
-      params[0] = (GLfloat)prog->vertex_sampler_units[sampler_var->location];
-    }
-    return;
-  }
-
-  uniform_var = find_uniform_var_for_location(prog, location);
-  block = get_uniform_shadow_block(prog, location);
-  if (!uniform_var || !block || !block->buffer) {
-    _gl_set_error(GL_INVALID_OPERATION);
-    return;
-  }
-
-  word_count = (GLsizei)(shader_var_type_word_count(uniform_var->type) *
-                         (uniform_var->count > 0 ? uniform_var->count : 1u));
-  offset = (uint32_t)location & 0xFFFFu;
-  if (word_count == 0 ||
-      offset + (uint32_t)word_count * 4u > block->size) {
-    _gl_set_error(GL_INVALID_OPERATION);
-    return;
-  }
-
-  src_words = (const uint32_t *)((const uint8_t *)block->buffer + offset);
-  copy_uniform_words_to_floats(
-      src_words, word_count,
-      shader_var_type_is_float_storage(uniform_var->type), params);
-}
-
-void _gl_GetUniformiv(GLuint program, GLint location, GLint *params) {
-  GLProgram *prog;
-  const GX2UniformVar *uniform_var;
-  const GX2SamplerVar *sampler_var;
-  UniformBlockShadow *block;
-  const uint32_t *src_words;
-  GLsizei word_count;
-  uint32_t offset;
-
-  if (!g_gl_context || !params) {
-    return;
-  }
-
-  prog = get_linked_program(program);
-  if (!prog) {
-    return;
-  }
-
-  if (location_is_sampler(location)) {
-    sampler_var = find_sampler_var_for_location(prog, location);
-    if (!sampler_var || sampler_var->location >= MAX_PROGRAM_SAMPLERS) {
-      _gl_set_error(GL_INVALID_OPERATION);
-      return;
-    }
-
-    if (location_is_pixel(location)) {
-      params[0] = prog->pixel_sampler_units[sampler_var->location];
-    } else {
-      params[0] = prog->vertex_sampler_units[sampler_var->location];
-    }
-    return;
-  }
-
-  uniform_var = find_uniform_var_for_location(prog, location);
-  block = get_uniform_shadow_block(prog, location);
-  if (!uniform_var || !block || !block->buffer) {
-    _gl_set_error(GL_INVALID_OPERATION);
-    return;
-  }
-
-  word_count = (GLsizei)(shader_var_type_word_count(uniform_var->type) *
-                         (uniform_var->count > 0 ? uniform_var->count : 1u));
-  offset = (uint32_t)location & 0xFFFFu;
-  if (word_count == 0 ||
-      offset + (uint32_t)word_count * 4u > block->size) {
-    _gl_set_error(GL_INVALID_OPERATION);
-    return;
-  }
-
-  src_words = (const uint32_t *)((const uint8_t *)block->buffer + offset);
-  copy_uniform_words_to_ints(
-      src_words, word_count,
-      shader_var_type_is_float_storage(uniform_var->type), params);
-}
-
 void _gl_ReleaseShaderCompiler(void) {}
-
-void _gl_ShaderBinary(GLsizei count, const GLuint *shaders, GLenum binaryFormat,
-                      const GLvoid *binary, GLsizei length) {
-  (void)binary;
-
-  if (!g_gl_context) {
-    return;
-  }
-  if (count < 0 || length < 0) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return;
-  }
-  if (count > 0 && !shaders) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return;
-  }
-  for (GLsizei i = 0; i < count; ++i) {
-    if (!is_valid_shader(shaders[i])) {
-      _gl_set_error(GL_INVALID_VALUE);
-      return;
-    }
-  }
-  if (count == 0) {
-    return;
-  }
-
-  (void)binaryFormat;
-  _gl_set_error(GL_INVALID_ENUM);
+void _gl_ShaderBinary(GLsizei c, const GLuint* s, GLenum f, const GLvoid* b, GLsizei l) { (void)c;(void)s;(void)f;(void)b;(void)l; }
+void _gl_GetShaderPrecisionFormat(GLenum s, GLenum p, GLint* r, GLint* pr) { (void)s;(void)p;(void)r;(void)pr; }
+void _gl_Uniform1f(GLint l, GLfloat v) { update_uniform_words(l, (uint32_t*)&v, 1, 0); }
+void _gl_Uniform1fv(GLint l, GLsizei c, const GLfloat *v) { update_uniform_words(l, (uint32_t*)v, c, 0); }
+void _gl_Uniform1i(GLint l, GLint v) { update_uniform_words(l, (uint32_t*)&v, 1, 0); }
+void _gl_Uniform1iv(GLint l, GLsizei c, const GLint *v) { update_uniform_words(l, (uint32_t*)v, c, 0); }
+void _gl_Uniform2f(GLint l, GLfloat v0, GLfloat v1) { GLfloat d[2]={v0,v1}; update_uniform_words(l, (uint32_t*)d, 2, 0); }
+void _gl_Uniform2fv(GLint l, GLsizei c, const GLfloat *v) { update_uniform_words(l, (uint32_t*)v, c*2, 0); }
+void _gl_Uniform2i(GLint l, GLint v0, GLint v1) { GLint d[2]={v0,v1}; update_uniform_words(l, (uint32_t*)d, 2, 0); }
+void _gl_Uniform2iv(GLint l, GLsizei c, const GLint *v) { update_uniform_words(l, (uint32_t*)v, c*2, 0); }
+void _gl_Uniform3f(GLint l, GLfloat v0, GLfloat v1, GLfloat v2) { GLfloat d[3]={v0,v1,v2}; update_uniform_words(l, (uint32_t*)d, 3, 0); }
+void _gl_Uniform3fv(GLint l, GLsizei c, const GLfloat *v) { update_uniform_words(l, (uint32_t*)v, c*3, 0); }
+void _gl_Uniform3i(GLint l, GLint v0, GLint v1, GLint v2) { GLint d[3]={v0,v1,v2}; update_uniform_words(l, (uint32_t*)d, 3, 0); }
+void _gl_Uniform3iv(GLint l, GLsizei c, const GLint *v) { update_uniform_words(l, (uint32_t*)v, c*3, 0); }
+void _gl_Uniform4f(GLint l, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3) { GLfloat d[4]={v0,v1,v2,v3}; update_uniform_words(l, (uint32_t*)d, 4, 0); }
+void _gl_Uniform4fv(GLint l, GLsizei c, const GLfloat *v) { update_uniform_words(l, (uint32_t*)v, c*4, 0); }
+void _gl_Uniform4i(GLint l, GLint v0, GLint v1, GLint v2, GLint v3) { GLint d[4]={v0,v1,v2,v3}; update_uniform_words(l, (uint32_t*)d, 4, 0); }
+void _gl_Uniform4iv(GLint l, GLsizei c, const GLint *v) { update_uniform_words(l, (uint32_t*)v, c*4, 0); }
+void _gl_Uniform1ui(GLint l, GLuint v) { update_uniform_words(l, &v, 1, 0); }
+void _gl_Uniform2ui(GLint l, GLuint v0, GLuint v1) { GLuint d[2]={v0,v1}; update_uniform_words(l, d, 2, 0); }
+void _gl_Uniform3ui(GLint l, GLuint v0, GLuint v1, GLuint v2) { GLuint d[3]={v0,v1,v2}; update_uniform_words(l, d, 3, 0); }
+void _gl_Uniform4ui(GLint l, GLuint v0, GLuint v1, GLuint v2, GLuint v3) { GLuint d[4]={v0,v1,v2,v3}; update_uniform_words(l, d, 4, 0); }
+void _gl_Uniform1uiv(GLint l, GLsizei c, const GLuint *v) { update_uniform_words(l, v, c, 0); }
+void _gl_Uniform2uiv(GLint l, GLsizei c, const GLuint *v) { update_uniform_words(l, v, c*2, 0); }
+void _gl_Uniform3uiv(GLint l, GLsizei c, const GLuint *v) { update_uniform_words(l, v, c*3, 0); }
+void _gl_Uniform4uiv(GLint l, GLsizei c, const GLuint *v) {
+    if (l == -1 || c <= 0 || !v) return;
+    uint32_t *swapped = (uint32_t*)malloc(c * 4 * 4);
+    if (!swapped) return;
+    for(int i=0; i<c*4; i++) swapped[i] = v[i]; // update_uniform_words will swap
+    update_uniform_words(l, swapped, c * 4, 0);
+    free(swapped);
 }
 
-void _gl_GetShaderPrecisionFormat(GLenum shadertype, GLenum precisiontype,
-                                  GLint *range, GLint *precision) {
-  if (!g_gl_context) {
-    return;
-  }
-  if (shadertype != GL_VERTEX_SHADER && shadertype != GL_FRAGMENT_SHADER) {
-    _gl_set_error(GL_INVALID_ENUM);
-    return;
-  }
+void _gl_UniformMatrix2fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) { (void)t; update_uniform_words(l, (uint32_t*)v, c*4, 0); }
+void _gl_UniformMatrix3fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) { (void)t; update_uniform_words(l, (uint32_t*)v, c*9, 0); }
+void _gl_UniformMatrix4fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) { (void)t; update_uniform_words(l, (uint32_t*)v, c*16, 0); }
+void _gl_UniformMatrix2x3fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) { (void)t; update_uniform_words(l, (uint32_t*)v, c*6, 0); }
+void _gl_UniformMatrix3x2fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) { (void)t; update_uniform_words(l, (uint32_t*)v, c*6, 0); }
+void _gl_UniformMatrix2x4fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) { (void)t; update_uniform_words(l, (uint32_t*)v, c*8, 0); }
+void _gl_UniformMatrix4x2fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) { (void)t; update_uniform_words(l, (uint32_t*)v, c*8, 0); }
+void _gl_UniformMatrix3x4fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) { (void)t; update_uniform_words(l, (uint32_t*)v, c*12, 0); }
+void _gl_UniformMatrix4x3fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) { (void)t; update_uniform_words(l, (uint32_t*)v, c*12, 0); }
 
-  switch (precisiontype) {
-  case GL_LOW_FLOAT:
-  case GL_MEDIUM_FLOAT:
-  case GL_HIGH_FLOAT:
-    if (range) {
-      range[0] = 127;
-      range[1] = 127;
-    }
-    if (precision) {
-      *precision = 23;
-    }
-    return;
-  case GL_LOW_INT:
-  case GL_MEDIUM_INT:
-  case GL_HIGH_INT:
-    if (range) {
-      range[0] = 31;
-      range[1] = 30;
-    }
-    if (precision) {
-      *precision = 0;
-    }
-    return;
-  default:
-    _gl_set_error(GL_INVALID_ENUM);
-    return;
-  }
-}
-
-// Look up uniforms
-GLint _gl_GetUniformLocation(GLuint program, const GLchar *name) {
-  GLProgram *prog;
-
-  if (!g_gl_context || !is_valid_program(program) || !name) {
-    return -1;
-  }
-
-  prog = &g_programs[program];
-  if (!prog->group) {
-    return -1;
-  }
-
-  if (prog->group->vertexShader) {
-    const GX2UniformVar *var =
-        GX2GetVertexUniformVar(prog->group->vertexShader, name);
-    if (var) {
-      return (GLint)(((uint32_t)(var->block & GL_LOCATION_BLOCK_MASK) << 16) |
-                     ((uint32_t)var->offset & 0xFFFF));
-    }
-    for (uint32_t i = 0; i < prog->group->vertexShader->samplerVarCount; ++i) {
-      const GX2SamplerVar *sampler = &prog->group->vertexShader->samplerVars[i];
-      if (strcmp(name, sampler->name) == 0) {
-        return (GLint)(GL_LOCATION_KIND_SAMPLER |
-                       (sampler->location & 0xFFFFu));
-      }
-    }
-  }
-
-  if (prog->group->pixelShader) {
-    const GX2UniformVar *var =
-        GX2GetPixelUniformVar(prog->group->pixelShader, name);
-    if (var) {
-      return (GLint)(GL_LOCATION_STAGE_PIXEL |
-                     ((uint32_t)(var->block & GL_LOCATION_BLOCK_MASK) << 16) |
-                     ((uint32_t)var->offset & 0xFFFF));
-    }
-    for (uint32_t i = 0; i < prog->group->pixelShader->samplerVarCount; ++i) {
-      const GX2SamplerVar *sampler = &prog->group->pixelShader->samplerVars[i];
-      if (strcmp(name, sampler->name) == 0) {
-        return (GLint)(GL_LOCATION_STAGE_PIXEL | GL_LOCATION_KIND_SAMPLER |
-                       (sampler->location & 0xFFFFu));
-      }
-    }
-  }
-
-  return -1;
-}
-
-GLint _gl_GetAttribLocation(GLuint program, const GLchar *name) {
-  GLProgram *prog;
-
-  if (!g_gl_context || !is_valid_program(program) || !name) {
-    return -1;
-  }
-
-  prog = &g_programs[program];
-  if (!prog->group || !prog->group->vertexShader) {
-    return -1;
-  }
-
-  for (uint32_t i = 0; i < prog->group->vertexShader->attribVarCount; ++i) {
-    const GX2AttribVar *attrib = &prog->group->vertexShader->attribVars[i];
-    if (attrib->name && strcmp(name, attrib->name) == 0) {
-      return (GLint)attrib->location;
-    }
-  }
-
-  return -1;
-}
-
-GLuint _gl_GetUniformBlockIndex(GLuint program, const GLchar *uniformBlockName) {
-  GLProgram *prog;
-  int32_t block_index;
-
-  if (!g_gl_context || !uniformBlockName) {
-    if (g_gl_context && !uniformBlockName) {
-      _gl_set_error(GL_INVALID_VALUE);
-    }
-    return GL_INVALID_INDEX;
-  }
-  if (!is_valid_program(program)) {
-    _gl_set_error(program == 0 ? GL_INVALID_OPERATION : GL_INVALID_VALUE);
-    return GL_INVALID_INDEX;
-  }
-
-  prog = &g_programs[program];
-  if (!prog->linked || !prog->group) {
-    _gl_set_error(GL_INVALID_OPERATION);
-    return GL_INVALID_INDEX;
-  }
-
-  block_index = find_program_uniform_block_index(prog, uniformBlockName);
-  if (block_index < 0) {
-    return GL_INVALID_INDEX;
-  }
-
-  return (GLuint)block_index;
-}
-
-void _gl_UniformBlockBinding(GLuint program, GLuint uniformBlockIndex,
-                             GLuint uniformBlockBinding) {
-  GLProgram *prog;
-
-  if (!g_gl_context) {
-    return;
-  }
-  if (!is_valid_program(program)) {
-    _gl_set_error(program == 0 ? GL_INVALID_OPERATION : GL_INVALID_VALUE);
-    return;
-  }
-  if (uniformBlockBinding >= GL33_MAX_UNIFORM_BUFFER_BINDINGS) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return;
-  }
-
-  prog = &g_programs[program];
-  if (!prog->linked || !prog->group) {
-    _gl_set_error(GL_INVALID_OPERATION);
-    return;
-  }
-  if (uniformBlockIndex >= prog->uniform_block_count) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return;
-  }
-
-  prog->uniform_blocks[uniformBlockIndex].binding_point = uniformBlockBinding;
-  if (g_gl_context->bound_program == program) {
-    g_gl_context->dirty_flags |= GL_DIRTY_UNIFORM_BINDINGS;
-  }
-}
-
-void _gl_Uniform1f(GLint location, GLfloat v0) {
-  (void)update_uniform_words(location, (const uint32_t *)&v0, 1, 0);
-}
-
-void _gl_Uniform1fv(GLint location, GLsizei count, const GLfloat *value) {
-  (void)update_uniform_words(location, (const uint32_t *)value, count, 0);
-}
-
-void _gl_Uniform1i(GLint location, GLint v0) {
-  (void)set_sampler_unit(location, v0);
-}
-
-void _gl_Uniform1iv(GLint location, GLsizei count, const GLint *value) {
-  (void)set_sampler_units(location, count, value);
-}
-
-void _gl_Uniform2f(GLint location, GLfloat v0, GLfloat v1) {
-  GLfloat data[2] = {v0, v1};
-  (void)update_uniform_words(location, (const uint32_t *)data, 2, 0);
-}
-
-void _gl_Uniform2fv(GLint location, GLsizei count, const GLfloat *value) {
-  if (count < 0 || (count > 0 && !value)) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return;
-  }
-  (void)update_uniform_words(location, (const uint32_t *)value, count * 2, 0);
-}
-
-void _gl_Uniform2i(GLint location, GLint v0, GLint v1) {
-  GLint data[2] = {v0, v1};
-  (void)update_non_sampler_int_words(location, data, 2);
-}
-
-void _gl_Uniform2iv(GLint location, GLsizei count, const GLint *value) {
-  if (count < 0 || (count > 0 && !value)) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return;
-  }
-  (void)update_non_sampler_int_words(location, value, count * 2);
-}
-
-void _gl_Uniform3f(GLint location, GLfloat v0, GLfloat v1, GLfloat v2) {
-  GLfloat data[3] = {v0, v1, v2};
-  (void)update_uniform_words(location, (const uint32_t *)data, 3, 0);
-}
-
-void _gl_Uniform3fv(GLint location, GLsizei count, const GLfloat *value) {
-  if (count < 0 || (count > 0 && !value)) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return;
-  }
-  (void)update_uniform_words(location, (const uint32_t *)value, count * 3, 0);
-}
-
-void _gl_Uniform3i(GLint location, GLint v0, GLint v1, GLint v2) {
-  GLint data[3] = {v0, v1, v2};
-  (void)update_non_sampler_int_words(location, data, 3);
-}
-
-void _gl_Uniform3iv(GLint location, GLsizei count, const GLint *value) {
-  if (count < 0 || (count > 0 && !value)) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return;
-  }
-  (void)update_non_sampler_int_words(location, value, count * 3);
-}
-
-void _gl_Uniform4f(GLint location, GLfloat v0, GLfloat v1, GLfloat v2,
-                   GLfloat v3) {
-  GLfloat data[4] = {v0, v1, v2, v3};
-  (void)update_uniform_words(location, (const uint32_t *)data, 4, 0);
-}
-
-void _gl_Uniform4fv(GLint location, GLsizei count, const GLfloat *value) {
-  if (count < 0 || (count > 0 && !value)) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return;
-  }
-  (void)update_uniform_words(location, (const uint32_t *)value, count * 4, 0);
-}
-
-void _gl_Uniform4i(GLint location, GLint v0, GLint v1, GLint v2, GLint v3) {
-  GLint data[4] = {v0, v1, v2, v3};
-  (void)update_non_sampler_int_words(location, data, 4);
-}
-
-void _gl_Uniform4iv(GLint location, GLsizei count, const GLint *value) {
-  if (count < 0 || (count > 0 && !value)) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return;
-  }
-  (void)update_non_sampler_int_words(location, value, count * 4);
-}
-
-void _gl_UniformMatrix2fv(GLint location, GLsizei count, GLboolean transpose,
-                          const GLfloat *value) {
-  if (location == -1) {
-    return;
-  }
-  if (count < 0 || !value) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return;
-  }
-
-  for (GLsizei c = 0; c < count; ++c) {
-    const GLfloat *src = value + c * 4;
-    uint32_t offset = (uint32_t)c * 16u;
-
-    if (transpose) {
-      GLfloat transposed[4];
-      for (int row = 0; row < 2; ++row) {
-        for (int col = 0; col < 2; ++col) {
-          transposed[row * 2 + col] = src[col * 2 + row];
-        }
-      }
-      if (!update_uniform_words(location, (const uint32_t *)transposed, 4,
-                                offset)) {
-        return;
-      }
-    } else if (!update_uniform_words(location, (const uint32_t *)src, 4,
-                                     offset)) {
-      return;
-    }
-  }
-}
-
-void _gl_UniformMatrix3fv(GLint location, GLsizei count, GLboolean transpose,
-                          const GLfloat *value) {
-  if (location == -1) {
-    return;
-  }
-  if (count < 0 || !value) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return;
-  }
-
-  for (GLsizei c = 0; c < count; ++c) {
-    const GLfloat *src = value + c * 9;
-    uint32_t offset = (uint32_t)c * 36u;
-
-    if (transpose) {
-      GLfloat transposed[9];
-      for (int row = 0; row < 3; ++row) {
-        for (int col = 0; col < 3; ++col) {
-          transposed[row * 3 + col] = src[col * 3 + row];
-        }
-      }
-      if (!update_uniform_words(location, (const uint32_t *)transposed, 9,
-                                offset)) {
-        return;
-      }
-    } else if (!update_uniform_words(location, (const uint32_t *)src, 9,
-                                     offset)) {
-      return;
-    }
-  }
-}
-
-void _gl_UniformMatrix4fv(GLint location, GLsizei count, GLboolean transpose,
-                          const GLfloat *value) {
-  if (location == -1) {
-    return;
-  }
-  if (count < 0 || !value) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return;
-  }
-
-  for (GLsizei c = 0; c < count; ++c) {
-    const GLfloat *src = value + c * 16;
-    uint32_t offset = (uint32_t)c * 16u * 4u;
-
-    if (transpose) {
-      GLfloat transposed[16];
-      for (int row = 0; row < 4; ++row) {
-        for (int col = 0; col < 4; ++col) {
-          transposed[row * 4 + col] = src[col * 4 + row];
-        }
-      }
-      if (!update_uniform_words(location, (const uint32_t *)transposed, 16,
-                                offset)) {
-        return;
-      }
-    } else if (!update_uniform_words(location, (const uint32_t *)src, 16,
-                                     offset)) {
-      return;
-    }
-  }
-}
-
-static void bind_shader_sampler_vars(const GX2SamplerVar *samplers,
-                                     uint32_t sampler_count,
-                                     const GLint *sampler_units,
-                                     bool pixel_stage) {
-  for (uint32_t i = 0; i < sampler_count; ++i) {
-    const GX2SamplerVar *sampler = &samplers[i];
-    GLuint gl_unit;
-    GLuint texture_id = 0;
-    GX2Texture *texture;
-    GX2Sampler *gx2_sampler;
-
-    if (sampler->location >= MAX_PROGRAM_SAMPLERS) {
-      continue;
-    }
-
-    gl_unit = (GLuint)sampler_units[sampler->location];
-    if (gl_unit >= 32) {
-      continue;
-    }
-
-    switch (sampler->type) {
-    case GX2_SAMPLER_VAR_TYPE_SAMPLER_1D:
-    case GX2_SAMPLER_VAR_TYPE_SAMPLER_2D:
-      texture_id = g_gl_context->bound_texture_2d[gl_unit];
-      break;
-    case GX2_SAMPLER_VAR_TYPE_SAMPLER_3D:
-      texture_id = g_gl_context->bound_texture_3d[gl_unit];
-      break;
-    case GX2_SAMPLER_VAR_TYPE_SAMPLER_CUBE:
-      texture_id = g_gl_context->bound_texture_cube[gl_unit];
-      break;
-    default:
-      continue;
-    }
-
-    texture = gl_get_gx2_texture(texture_id);
-    gx2_sampler = gl_get_effective_gx2_sampler(gl_unit, texture_id);
-    if (!texture || !gx2_sampler) {
-      continue;
-    }
-
-    if (pixel_stage) {
-      GX2SetPixelTexture(texture, sampler->location);
-      GX2SetPixelSampler(gx2_sampler, sampler->location);
-    } else {
-      GX2SetVertexTexture(texture, sampler->location);
-      GX2SetVertexSampler(gx2_sampler, sampler->location);
-    }
-  }
-}
-
-static bool bind_program_uniform_block(GLProgram *prog, ProgramUniformBlock *block,
-                                       bool pixel_stage) {
-  const gl_uniform_buffer_binding_t *binding;
-  GX2RBuffer *buffer;
-  GLsizeiptr buffer_size;
-  GLsizeiptr available_size;
-  uint32_t required_size;
-  uint32_t location;
-
-  if (!g_gl_context || !prog || !block) {
-    return false;
-  }
-  if (block->binding_point >= GL33_MAX_UNIFORM_BUFFER_BINDINGS) {
-    return false;
-  }
-
-  binding = &g_gl_context->uniform_buffer_bindings[block->binding_point];
-  if (binding->buffer == 0 || binding->offset < 0 ||
-      (binding->offset % GX2_UNIFORM_BLOCK_ALIGNMENT) != 0) {
-    return false;
-  }
-
-  buffer = gl_buffer_get_gx2r_buffer(binding->buffer);
-  buffer_size = gl_buffer_get_size(binding->buffer);
-  if (!buffer || binding->offset > buffer_size) {
-    return false;
-  }
-  if (!binding->whole_buffer &&
-      binding->offset + binding->size > buffer_size) {
-    return false;
-  }
-
-  available_size = binding->whole_buffer ? (buffer_size - binding->offset)
-                                         : binding->size;
-  required_size = pixel_stage ? block->pixel_size : block->vertex_size;
-  location = pixel_stage ? block->pixel_location : block->vertex_location;
-  if (required_size == 0 || available_size < required_size) {
-    return false;
-  }
-
-  if (pixel_stage) {
-    GX2RSetPixelUniformBlock(buffer, location, (uint32_t)binding->offset);
-  } else {
-    GX2RSetVertexUniformBlock(buffer, location, (uint32_t)binding->offset);
-  }
-
-  return true;
-}
+void _gl_GetActiveUniformBlockiv(GLuint p, GLuint i, GLenum n, GLint *v) { (void)p;(void)i;(void)n; if(v) *v = 0; }
+void _gl_GetActiveUniformBlockName(GLuint p, GLuint i, GLsizei s, GLsizei *l, GLchar *n) { (void)p;(void)i;(void)s; if(l) *l = 0; if(n) n[0] = '\0'; }
+void _gl_GetActiveUniformsiv(GLuint p, GLsizei c, const GLuint *i, GLenum n, GLint *v) { (void)p;(void)c;(void)i;(void)n; if(v) for(int j=0; j<c; j++) v[j] = 0; }
+void _gl_GetActiveUniformName(GLuint p, GLuint i, GLsizei s, GLsizei *l, GLchar *n) { (void)p;(void)i;(void)s; if(l) *l = 0; if(n) n[0] = '\0'; }
 
 void gl_bind_shaders(void) {
-  GLProgram *prog = get_bound_linked_program(false);
-
-  if (!prog) {
-    return;
-  }
-
-  if (g_gl_context->dirty_flags & GL_DIRTY_PROGRAM) {
-    if (prog->group->vertexShader) {
-      GX2SetVertexShader(prog->group->vertexShader);
-    }
-    if (prog->group->pixelShader) {
-      GX2SetPixelShader(prog->group->pixelShader);
-    }
-  }
-
-  if (prog->group->vertexShader && prog->vs_block_count > 0) {
+  if (!g_gl_context) return;
+  GLuint prog_id = g_gl_context->bound_program;
+  if (!is_valid_program(prog_id)) return;
+  GLProgram *prog = &g_programs[prog_id];
+  if (!prog->group || !prog->linked) return;
+  GX2SetFetchShader((GX2FetchShader*)&prog->group->fetchShader);
+  if (prog->group->vertexShader) GX2SetVertexShader(prog->group->vertexShader);
+  if (prog->group->pixelShader)  GX2SetPixelShader(prog->group->pixelShader);
+  /* bind uniform block shadows */
+  if (prog->group->vertexShader) {
     for (uint32_t i = 0; i < prog->vs_block_count; i++) {
-      ProgramUniformBlock *program_block =
-          find_program_uniform_block_for_stage(prog, i, false);
-      if (!bind_program_uniform_block(prog, program_block, false)) {
-        GX2SetVertexUniformBlock(
-            prog->group->vertexShader->uniformBlocks[i].offset,
-            prog->vs_blocks[i].size, prog->vs_blocks[i].buffer);
-      }
+      if (!prog->vs_blocks || !prog->vs_blocks[i].buffer) continue;
+      DCFlushRange(prog->vs_blocks[i].buffer, prog->vs_blocks[i].size);
+      GX2SetVertexUniformBlock(prog->group->vertexShader->uniformBlocks[i].offset,
+                               prog->vs_blocks[i].size, prog->vs_blocks[i].buffer);
     }
   }
-
-  if (prog->group->pixelShader && prog->ps_block_count > 0) {
+  if (prog->group->pixelShader) {
     for (uint32_t i = 0; i < prog->ps_block_count; i++) {
-      ProgramUniformBlock *program_block =
-          find_program_uniform_block_for_stage(prog, i, true);
-      if (!bind_program_uniform_block(prog, program_block, true)) {
-        GX2SetPixelUniformBlock(
-            prog->group->pixelShader->uniformBlocks[i].offset,
-            prog->ps_blocks[i].size, prog->ps_blocks[i].buffer);
-      }
+      if (!prog->ps_blocks || !prog->ps_blocks[i].buffer) continue;
+      DCFlushRange(prog->ps_blocks[i].buffer, prog->ps_blocks[i].size);
+      GX2SetPixelUniformBlock(prog->group->pixelShader->uniformBlocks[i].offset,
+                              prog->ps_blocks[i].size, prog->ps_blocks[i].buffer);
     }
   }
-
-  if (prog->group->vertexShader && prog->group->vertexShader->samplerVarCount > 0) {
-    bind_shader_sampler_vars(prog->group->vertexShader->samplerVars,
-                             prog->group->vertexShader->samplerVarCount,
-                             prog->vertex_sampler_units, false);
-  }
-
-  if (prog->group->pixelShader && prog->group->pixelShader->samplerVarCount > 0) {
-    bind_shader_sampler_vars(prog->group->pixelShader->samplerVars,
-                             prog->group->pixelShader->samplerVarCount,
-                             prog->pixel_sampler_units, true);
+  /* bind textures and samplers for each active texture unit */
+  for (uint32_t unit = 0; unit < 16; ++unit) {
+    /* pixel samplers */
+    if (prog->pixel_sampler_units[unit] >= 0) {
+      GLuint tex_id = g_gl_context->bound_texture_2d[unit];
+      if (tex_id == 0) tex_id = g_gl_context->bound_texture_cube[unit];
+      if (tex_id == 0) tex_id = g_gl_context->bound_texture_3d[unit];
+      GX2Texture *tex = gl_get_gx2_texture(tex_id);
+      if (tex) {
+        GX2SetPixelTexture(tex, unit);
+        /* sampler object overrides texture sampler */
+        GLuint samp_id = g_gl_context->bound_sampler[unit];
+        GX2Sampler *sampler = gl_get_gx2_sampler(samp_id ? samp_id : tex_id, samp_id != 0);
+        if (sampler) GX2SetPixelSampler(sampler, unit);
+      }
+    }
+    /* vertex samplers */
+    if (prog->vertex_sampler_units[unit] >= 0) {
+      GLuint tex_id = g_gl_context->bound_texture_2d[unit];
+      GX2Texture *tex = gl_get_gx2_texture(tex_id);
+      if (tex) {
+        GX2SetVertexTexture(tex, unit);
+        GLuint samp_id = g_gl_context->bound_sampler[unit];
+        GX2Sampler *sampler = gl_get_gx2_sampler(samp_id ? samp_id : tex_id, samp_id != 0);
+        if (sampler) GX2SetVertexSampler(sampler, unit);
+      }
+    }
   }
 }
 

@@ -335,7 +335,7 @@ static bool get_texture_format_info(GLint internalformat, GLenum format,
     info->bytes_per_component = 2;
     info->src_bytes_per_texel = 8;
     info->dst_bytes_per_texel = 8;
-    info->mipmap_supported = false;
+    info->mipmap_supported = true;
     if (validate_upload &&
         (format != GL_RGBA || type != GL_HALF_FLOAT)) {
       return false;
@@ -1994,6 +1994,75 @@ void _gl_GetSamplerParameterfv(GLuint sampler, GLenum pname, GLfloat *params) {
   }
 }
 
+void _gl_TexImage1D(GLenum target, GLint level, GLint internalformat,
+                   GLsizei width, GLint border, GLenum format,
+                   GLenum type, const GLvoid *pixels) {
+    _gl_TexImage2D(GL_TEXTURE_2D, level, internalformat, width, 1, border, format, type, pixels);
+}
+
+void _gl_TexSubImage1D(GLenum target, GLint level, GLint xoffset,
+                       GLsizei width, GLenum format, GLenum type,
+                       const GLvoid *pixels) {
+    _gl_TexSubImage2D(GL_TEXTURE_2D, level, xoffset, 0, width, 1, format, type, pixels);
+}
+
+void _gl_CopyTexImage1D(GLenum target, GLint level, GLenum internalformat,
+                        GLint x, GLint y, GLsizei width, GLint border) {
+    _gl_CopyTexImage2D(GL_TEXTURE_2D, level, internalformat, x, y, width, 1, border);
+}
+
+void _gl_CopyTexSubImage1D(GLenum target, GLint level, GLint xoffset,
+                           GLint x, GLint y, GLsizei width) {
+    _gl_CopyTexSubImage2D(GL_TEXTURE_2D, level, xoffset, 0, x, y, width, 1);
+}
+
+void _gl_CopyTexSubImage3D(GLenum target, GLint level, GLint xoffset,
+                           GLint yoffset, GLint zoffset, GLint x, GLint y,
+                           GLsizei width, GLsizei height) {
+    _gl_set_error(GL_INVALID_OPERATION);
+}
+
+void _gl_CompressedTexImage1D(GLenum target, GLint level, GLenum internalformat,
+                              GLsizei width, GLint border, GLsizei imageSize,
+                              const GLvoid *data) {
+    _gl_CompressedTexImage2D(GL_TEXTURE_2D, level, internalformat, width, 1, border, imageSize, data);
+}
+
+void _gl_CompressedTexImage3D(GLenum target, GLint level, GLenum internalformat,
+                              GLsizei width, GLsizei height, GLsizei depth,
+                              GLint border, GLsizei imageSize, const GLvoid *data) {
+    _gl_set_error(GL_INVALID_OPERATION);
+}
+
+void _gl_CompressedTexSubImage1D(GLenum target, GLint level, GLint xoffset,
+                                 GLsizei width, GLenum format, GLsizei imageSize,
+                                 const GLvoid *data) {
+    _gl_CompressedTexSubImage2D(GL_TEXTURE_2D, level, xoffset, 0, width, 1, format, imageSize, data);
+}
+
+void _gl_CompressedTexSubImage3D(GLenum target, GLint level, GLint xoffset,
+                                 GLint yoffset, GLint zoffset, GLsizei width,
+                                 GLsizei height, GLsizei depth, GLenum format,
+                                 GLsizei imageSize, const GLvoid *data) {
+    _gl_set_error(GL_INVALID_OPERATION);
+}
+
+void _gl_GetTexLevelParameteriv(GLenum target, GLint level, GLenum pname, GLint *params) {
+    if (!g_gl_context || !params) return;
+    switch (pname) {
+        case GL_TEXTURE_WIDTH: *params = 0; break;
+        case GL_TEXTURE_HEIGHT: *params = 0; break;
+        case GL_TEXTURE_INTERNAL_FORMAT: *params = GL_RGBA8; break;
+        default: _gl_set_error(GL_INVALID_ENUM); break;
+    }
+}
+
+void _gl_GetTexLevelParameterfv(GLenum target, GLint level, GLenum pname, GLfloat *params) {
+    GLint iparams;
+    _gl_GetTexLevelParameteriv(target, level, pname, &iparams);
+    if (params) *params = (GLfloat)iparams;
+}
+
 void _gl_GenerateMipmap(GLenum target) {
   GLuint id;
   GLTexture *tex;
@@ -2067,11 +2136,15 @@ GLint gl_get_texture_internal_format(GLuint id) {
   return 0;
 }
 
-GX2Sampler *gl_get_gx2_sampler(GLuint id) {
-  if (id > 0 && id < MAX_TEXTURES && g_textures[id].in_use &&
-      g_textures[id].complete) {
-    return &g_textures[id].gx2_sampler;
+/* id = texture id or sampler-object id depending on use_sampler_obj */
+GX2Sampler *gl_get_gx2_sampler(GLuint id, bool use_sampler_obj) {
+  if (use_sampler_obj) {
+    if (id > 0 && id < MAX_SAMPLER_OBJECTS && g_samplers[id].in_use)
+      return &g_samplers[id].gx2_sampler;
+    return NULL;
   }
+  if (id > 0 && id < MAX_TEXTURES && g_textures[id].in_use && g_textures[id].complete)
+    return &g_textures[id].gx2_sampler;
   return NULL;
 }
 
@@ -2088,7 +2161,7 @@ GX2Sampler *gl_get_effective_gx2_sampler(GLuint unit, GLuint texture) {
     return &g_samplers[sampler_id].gx2_sampler;
   }
 
-  return gl_get_gx2_sampler(texture);
+  return gl_get_gx2_sampler(texture, false);
 }
 
 #ifdef __cplusplus

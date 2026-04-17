@@ -35,7 +35,7 @@ add_library(gl33_gx2_core STATIC ${SOURCES})
 
 # Build RPX
 add_executable(gl33_test tests/test_main.cpp tests/gles2_compile.cpp)
-target_link_libraries(gl33_test gl33_gx2_core wut gx2 coreinit)
+target_link_libraries(gl33_test gl33_gx2_core wut)
 
 # Output will be gl33_test ELF format, converted via elf2rpl in script or post-build
 # wiiu_add_rpx(gl33_test)
