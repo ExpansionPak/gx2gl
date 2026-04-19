@@ -1,0 +1,12 @@
+Copy `glslcompiler.rpl` into this directory to bundle it into the WUHB content root.
+
+At build time gx2gl looks for the runtime compiler in common locations, including:
+- `glslcompiler.rpl`
+
+
+You can either:
+- place the file here as `templates/wuhb/cafeglsl/content/glslcompiler.rpl`, or
+- point CMake/`compile.py` at an external copy with `GX2GL_CAFEGLSL_RPL`
+
+This note is removed from the staged WUHB content automatically when a real
+`glslcompiler.rpl` is provided.

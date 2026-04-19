@@ -5,3 +5,6 @@ build/
 build_wsl/
 # Generated files
 *.log
+src/core/gx2gl_proc_table.inc
+tests/generated/
+templates/wuhb/cafeglsl/content/glslcompiler.rpl
