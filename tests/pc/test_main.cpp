@@ -544,6 +544,31 @@ static int run_compare_suite(const char *reference_ppm_path) {
         fail("GL_MAX_TEXTURE_LOD_BIAS returned unexpected values.");
     }
 
+    GLint max_combined_textures = 0;
+    GLint max_combined_uniform_blocks = 0;
+    glGetIntegerv(GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS, &max_combined_textures);
+    check_gl_error("glGetIntegerv(GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS)");
+    glGetIntegerv(GL_MAX_COMBINED_UNIFORM_BLOCKS, &max_combined_uniform_blocks);
+    check_gl_error("glGetIntegerv(GL_MAX_COMBINED_UNIFORM_BLOCKS)");
+    if (max_combined_textures >= 48 && max_combined_uniform_blocks >= 36) {
+        pass("GL 3.3 combined limit queries meet core minimums.");
+    } else {
+        fail("combined limit queries were below GL 3.3 core minimums.");
+    }
+
+    glActiveTexture(GL_TEXTURE0 + 47);
+    check_gl_error("glActiveTexture(GL_TEXTURE0 + 47)");
+    GLint active_texture_query = 0;
+    glGetIntegerv(GL_ACTIVE_TEXTURE, &active_texture_query);
+    check_gl_error("glGetIntegerv(GL_ACTIVE_TEXTURE high unit)");
+    if (active_texture_query == GL_TEXTURE0 + 47) {
+        pass("GL_ACTIVE_TEXTURE returned the active texture enum.");
+    } else {
+        fail("GL_ACTIVE_TEXTURE returned an unexpected value.");
+    }
+    glActiveTexture(GL_TEXTURE0);
+    check_gl_error("glActiveTexture(GL_TEXTURE0 restore)");
+
     glViewport(10, 20, 320, 180);
     glScissor(4, 8, 64, 32);
     check_gl_error("glViewport/glScissor");

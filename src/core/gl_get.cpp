@@ -177,10 +177,10 @@ extern "C" {
 #define GX2GL_MAX_TEXTURE_SIZE 8192
 #define GX2GL_MAX_3D_TEXTURE_SIZE 2048
 #define GX2GL_MAX_ARRAY_TEXTURE_LAYERS 2048
-#define GX2GL_MAX_TEXTURE_IMAGE_UNITS 16
-#define GX2GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS 32
+#define GX2GL_MAX_TEXTURE_IMAGE_UNITS GL33_MAX_TEXTURE_IMAGE_UNITS
+#define GX2GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS GL33_MAX_COMBINED_TEXTURE_IMAGE_UNITS
 #define GX2GL_MAX_UNIFORM_BLOCKS_PER_STAGE 12
-#define GX2GL_MAX_COMBINED_UNIFORM_BLOCKS 24
+#define GX2GL_MAX_COMBINED_UNIFORM_BLOCKS 36
 #define GX2GL_MAX_UNIFORM_BLOCK_SIZE 65536
 #define GX2GL_UNIFORM_BUFFER_ALIGNMENT 256
 #define GX2GL_MAX_VARYING_COMPONENTS 64
@@ -220,12 +220,10 @@ static const char g_version[] = "3.3.0 gx2gl";
 static const char g_sl_version[] = "3.30 gx2gl";
 
 static unsigned active_texture_unit(void) {
-  unsigned unit;
-
-  if (!g_gl_context || g_gl_context->active_texture < GL_TEXTURE0) return 0;
-
-  unit = (unsigned)(g_gl_context->active_texture - GL_TEXTURE0);
-  return unit < 32 ? unit : 0;
+  if (!g_gl_context) return 0;
+  return g_gl_context->active_texture < GL33_MAX_TEXTURE_UNITS
+             ? (unsigned)g_gl_context->active_texture
+             : 0;
 }
 
 static GLboolean bool_value(GLboolean value) {
@@ -433,7 +431,7 @@ static bool get_context_value(GLenum pname, GetValue *value) {
   case GL_CURRENT_PROGRAM:
     return set_int1(value, (GLint)g_gl_context->bound_program);
   case GL_ACTIVE_TEXTURE:
-    return set_int1(value, (GLint)g_gl_context->active_texture);
+    return set_int1(value, (GLint)(GL_TEXTURE0 + g_gl_context->active_texture));
   case GL_ARRAY_BUFFER_BINDING:
     return set_int1(value, (GLint)g_gl_context->bound_array_buffer);
   case GL_ELEMENT_ARRAY_BUFFER_BINDING:

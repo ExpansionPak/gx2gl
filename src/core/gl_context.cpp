@@ -227,7 +227,7 @@ static void gl_context_init_raster_state(gl_context_t *ctx) {
 
   gl_context_default_framebuffer_size(&default_width, &default_height);
 
-  ctx->active_texture = GL_TEXTURE0;
+  ctx->active_texture = 0;
   ctx->viewport.x = 0;
   ctx->viewport.y = 0;
   ctx->viewport.width = default_width;

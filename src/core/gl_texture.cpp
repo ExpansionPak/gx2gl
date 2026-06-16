@@ -1875,7 +1875,7 @@ void _gl_DeleteTextures(GLsizei n, const GLuint *textures) {
     if (id > 0 && id < MAX_TEXTURES &&
         (g_textures[id].reserved || g_textures[id].in_use)) {
       gl_framebuffer_mark_texture_dirty(id);
-      for (int u = 0; u < 32; u++) {
+      for (int u = 0; u < GL33_MAX_TEXTURE_UNITS; u++) {
         if (g_gl_context->bound_texture_1d[u] == id) {
           g_gl_context->bound_texture_1d[u] = 0;
         }
@@ -1951,7 +1951,7 @@ void _gl_DeleteSamplers(GLsizei n, const GLuint *samplers) {
       continue;
     }
 
-    for (int unit = 0; unit < 32; ++unit) {
+    for (int unit = 0; unit < GL33_MAX_TEXTURE_UNITS; ++unit) {
       if (g_gl_context->bound_sampler[unit] == id) {
         g_gl_context->bound_sampler[unit] = 0;
       }
@@ -1998,7 +1998,7 @@ void _gl_BindSampler(GLuint unit, GLuint sampler) {
   if (!g_gl_context) {
     return;
   }
-  if (unit >= 32) {
+  if (unit >= GL33_MAX_TEXTURE_UNITS) {
     _gl_set_error(GL_INVALID_VALUE);
     return;
   }
@@ -2016,7 +2016,8 @@ void _gl_ActiveTexture(GLenum texture) {
   if (!g_gl_context) {
     return;
   }
-  if (texture < GL_TEXTURE0 || texture > GL_TEXTURE0 + 31) {
+  if (texture < GL_TEXTURE0 ||
+      texture >= GL_TEXTURE0 + GL33_MAX_TEXTURE_UNITS) {
     _gl_set_error(GL_INVALID_ENUM);
     return;
   }

@@ -901,6 +901,33 @@ int main(int argc, char **argv) {
     glGetIntegerv(GL_MAX_UNIFORM_BUFFER_BINDINGS, &max_ubo_bindings);
     check_gl_error("glGetIntegerv(GL_MAX_UNIFORM_BUFFER_BINDINGS)");
 
+    GLint max_combined_textures = 0;
+    GLint max_combined_uniform_blocks = 0;
+    glGetIntegerv(GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS, &max_combined_textures);
+    check_gl_error("glGetIntegerv(GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS)");
+    glGetIntegerv(GL_MAX_COMBINED_UNIFORM_BLOCKS, &max_combined_uniform_blocks);
+    check_gl_error("glGetIntegerv(GL_MAX_COMBINED_UNIFORM_BLOCKS)");
+    if (max_combined_textures >= 48 && max_combined_uniform_blocks >= 36) {
+        OSReport("[PASS] GL 3.3 combined limit queries meet core minimums.\n");
+    } else {
+        OSReport("[FAIL] Combined limits were textures=%d uniform_blocks=%d\n",
+                 max_combined_textures, max_combined_uniform_blocks);
+    }
+
+    glActiveTexture(GL_TEXTURE0 + 47);
+    check_gl_error("glActiveTexture(GL_TEXTURE0 + 47)");
+    GLint active_texture_query = 0;
+    glGetIntegerv(GL_ACTIVE_TEXTURE, &active_texture_query);
+    check_gl_error("glGetIntegerv(GL_ACTIVE_TEXTURE high unit)");
+    if (active_texture_query == GL_TEXTURE0 + 47) {
+        OSReport("[PASS] GL_ACTIVE_TEXTURE returned the active texture enum.\n");
+    } else {
+        OSReport("[FAIL] GL_ACTIVE_TEXTURE returned 0x%04X\n",
+                 active_texture_query);
+    }
+    glActiveTexture(GL_TEXTURE0);
+    check_gl_error("glActiveTexture(GL_TEXTURE0 restore)");
+
     GLint ubo_alignment = 0;
     glGetIntegerv(GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT, &ubo_alignment);
     check_gl_error("glGetIntegerv(GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT)");

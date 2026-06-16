@@ -262,8 +262,11 @@ typedef struct {
 
 #define GL_ERROR_QUEUE_SIZE 8
 #define GL33_MAX_VERTEX_ATTRIBS 16
+#define GL33_MAX_TEXTURE_IMAGE_UNITS 16
+#define GL33_MAX_COMBINED_TEXTURE_IMAGE_UNITS 48
 #define GL33_MAX_UNIFORM_BUFFER_BINDINGS 36
 #define GL33_MAX_TRANSFORM_FEEDBACK_BUFFER_BINDINGS 4
+#define GL33_MAX_TEXTURE_UNITS GL33_MAX_COMBINED_TEXTURE_IMAGE_UNITS
 
 typedef struct {
     GLuint buffer;
@@ -285,11 +288,11 @@ typedef struct {
     gl_uniform_buffer_binding_t uniform_buffer_bindings[GL33_MAX_UNIFORM_BUFFER_BINDINGS];
     gl_uniform_buffer_binding_t transform_feedback_buffer_bindings[GL33_MAX_TRANSFORM_FEEDBACK_BUFFER_BINDINGS];
     GLuint active_texture;
-    GLuint bound_texture_1d[32];
-    GLuint bound_texture_2d[32];
-    GLuint bound_texture_3d[32];
-    GLuint bound_texture_cube[32];
-    GLuint bound_sampler[32];
+    GLuint bound_texture_1d[GL33_MAX_TEXTURE_UNITS];
+    GLuint bound_texture_2d[GL33_MAX_TEXTURE_UNITS];
+    GLuint bound_texture_3d[GL33_MAX_TEXTURE_UNITS];
+    GLuint bound_texture_cube[GL33_MAX_TEXTURE_UNITS];
+    GLuint bound_sampler[GL33_MAX_TEXTURE_UNITS];
     GLuint bound_renderbuffer;
     GLuint bound_framebuffer;
     GLuint bound_read_framebuffer;
