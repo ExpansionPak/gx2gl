@@ -59,17 +59,7 @@ static bool gx2gl_cafeglsl_load_exports(OSDynLoad_Module module) {
 
 bool gx2gl_cafeglsl_init(void) {
     static const char *const candidates[] = {
-        "/vol/content/glslcompiler.rpl",
-        "/vol/content/wuhb-content/glslcompiler.rpl",
-        "./content/glslcompiler.rpl",
-        "./wuhb-content/glslcompiler.rpl",
-        "/vol/code/glslcompiler.rpl",
-        "./glslcompiler.rpl",
-        "glslcompiler.rpl",
         "glslcompiler",
-        "/vol/external01/glslcompiler.rpl",
-        "/vol/external01/wiiu/libs/glslcompiler",
-        "/vol/external01/wiiu/libs/glslcompiler.rpl",
         "~/wiiu/libs/glslcompiler.rpl",
     };
 

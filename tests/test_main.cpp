@@ -1699,7 +1699,10 @@ int main(int argc, char **argv) {
     GLuint pshader = glCreateShader(GL_FRAGMENT_SHADER);
     check_gl_error("glCreateShader(GL_FRAGMENT_SHADER)");
 
-    const char* psrc = "#version 330 core\nout vec4 FragColor;\nvoid main() { FragColor = vec4(1.0); }";
+    const char* psrc =
+        "#version 330 core\n"
+        "layout(location = 0) out vec4 FragColor;\n"
+        "void main() { FragColor = vec4(1.0); }";
     glShaderSource(pshader, 1, &psrc, NULL);
     check_gl_error("glShaderSource(fragment)");
 

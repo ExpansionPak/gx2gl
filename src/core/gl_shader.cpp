@@ -36,6 +36,7 @@ extern "C" {
 #define GL_LOCATION_KIND_DIRECT 0x20000000u
 #define GL_LOCATION_BLOCK_MASK 0x3FFFu
 #define GX2GL_INFO_LOG_CAPACITY 4096
+#define GX2GL_CAFEGLSL_VIRTUAL_UNIFORM_BLOCK_LOCATION 15u
 
 #ifndef GL_UNIFORM_BLOCK_BINDING
 #define GL_UNIFORM_BLOCK_BINDING 0x8A3F
@@ -129,6 +130,8 @@ typedef struct {
   uint32_t vertex_size;
   uint32_t pixel_size;
   GLuint binding_point;
+  bool binding_initialized;
+  bool implicit;
 } ProgramUniformBlock;
 
 typedef struct {
@@ -155,6 +158,7 @@ typedef struct {
   char *info_log;
   const WHBGfxShaderGroup *group;
   bool owns_group;
+  bool owns_whb_group;
   WHBGfxShaderGroup owned_group;
   UniformBlockShadow *vs_blocks;
   uint32_t vs_block_count;
@@ -191,6 +195,7 @@ static bool location_is_pixel(GLint l);
 static bool location_is_direct(GLint l);
 static void free_program_uniform_blocks(GLProgram *prog);
 static void free_program_attrib_reflection(GLProgram *prog);
+static bool is_cafeglsl_implicit_uniform_block(const GX2UniformBlock *block);
 
 static void invalidate_shader_program_memory(void *program, uint32_t size) {
   if (!program || size == 0) return;
@@ -414,7 +419,12 @@ static bool get_active_uniform_info(GLProgram *prog, GLuint index, ActiveUniform
       info->name = vs->uniformVars[i].name;
       info->size = (GLint)vs->uniformVars[i].count;
       info->type = shader_var_type_to_gl_enum(vs->uniformVars[i].type);
-      info->block_index = vs->uniformVars[i].block;
+      info->block_index =
+          (vs->uniformVars[i].block >= 0 &&
+           (uint32_t)vs->uniformVars[i].block < vs->uniformBlockCount &&
+           is_cafeglsl_implicit_uniform_block(&vs->uniformBlocks[vs->uniformVars[i].block]))
+              ? -1
+              : vs->uniformVars[i].block;
       info->offset = (GLint)vs->uniformVars[i].offset;
       return info->type != 0;
     }
@@ -425,7 +435,12 @@ static bool get_active_uniform_info(GLProgram *prog, GLuint index, ActiveUniform
       info->name = ps->uniformVars[i].name;
       info->size = (GLint)ps->uniformVars[i].count;
       info->type = shader_var_type_to_gl_enum(ps->uniformVars[i].type);
-      info->block_index = ps->uniformVars[i].block;
+      info->block_index =
+          (ps->uniformVars[i].block >= 0 &&
+           (uint32_t)ps->uniformVars[i].block < ps->uniformBlockCount &&
+           is_cafeglsl_implicit_uniform_block(&ps->uniformBlocks[ps->uniformVars[i].block]))
+              ? -1
+              : ps->uniformVars[i].block;
       info->offset = (GLint)ps->uniformVars[i].offset;
       return info->type != 0;
     }
@@ -819,7 +834,9 @@ static void clear_program_runtime_state(GLProgram *prog) {
   free_program_uniform_blocks(prog);
   free_program_attrib_reflection(prog);
 
-  if (prog->owns_group && prog->owned_group.fetchShaderProgram) {
+  if (prog->owns_whb_group) {
+    WHBGfxFreeShaderGroup(&prog->owned_group);
+  } else if (prog->owns_group && prog->owned_group.fetchShaderProgram) {
     gl_mem_free(GL_MEM_TYPE_MEM2, prog->owned_group.fetchShaderProgram);
   }
   if (prog->dynamic_fetch_shader_program) {
@@ -833,6 +850,7 @@ static void clear_program_runtime_state(GLProgram *prog) {
   prog->dynamic_fetch_shader_attrib_count = 0;
   prog->group = NULL;
   prog->owns_group = false;
+  prog->owns_whb_group = false;
   prog->linked = false;
   prog->validated = false;
   memset(prog->vertex_sampler_units, -1, sizeof(prog->vertex_sampler_units));
@@ -877,31 +895,62 @@ static void free_program_attrib_reflection(GLProgram *prog) {
 static ProgramUniformBlock *find_program_uniform_block(GLProgram *prog, const char *name) {
   if (!prog || !name) return NULL;
   for (uint32_t i = 0; i < prog->uniform_block_count; ++i) {
-    if (prog->uniform_blocks[i].name && strcmp(prog->uniform_blocks[i].name, name) == 0) {
+    if (!prog->uniform_blocks[i].implicit &&
+        prog->uniform_blocks[i].name &&
+        strcmp(prog->uniform_blocks[i].name, name) == 0) {
       return &prog->uniform_blocks[i];
     }
   }
   return NULL;
 }
 
-static ProgramUniformBlock *append_program_uniform_block(GLProgram *prog, const char *name) {
+static ProgramUniformBlock *find_program_implicit_uniform_block(GLProgram *prog) {
+  if (!prog) return NULL;
+  for (uint32_t i = 0; i < prog->uniform_block_count; ++i) {
+    if (prog->uniform_blocks[i].implicit) {
+      return &prog->uniform_blocks[i];
+    }
+  }
+  return NULL;
+}
+
+static ProgramUniformBlock *append_program_uniform_block(GLProgram *prog, const char *name,
+                                                         bool implicit) {
   ProgramUniformBlock *blocks;
   ProgramUniformBlock *block;
 
-  if (!prog || !name) return NULL;
+  if (!prog || (!name && !implicit)) return NULL;
   blocks = (ProgramUniformBlock *)realloc(
       prog->uniform_blocks, (prog->uniform_block_count + 1) * sizeof(ProgramUniformBlock));
   if (!blocks) return NULL;
   prog->uniform_blocks = blocks;
   block = &prog->uniform_blocks[prog->uniform_block_count];
   memset(block, 0, sizeof(*block));
-  block->name = strdup(name);
-  if (!block->name) return NULL;
+  if (name) {
+    block->name = strdup(name);
+    if (!block->name) return NULL;
+  }
   block->vertex_block_index = -1;
   block->pixel_block_index = -1;
   block->binding_point = prog->uniform_block_count;
+  block->implicit = implicit;
   ++prog->uniform_block_count;
   return block;
+}
+
+static bool is_cafeglsl_implicit_uniform_block(const GX2UniformBlock *block) {
+  if (!block) return false;
+  return (!block->name || block->name[0] == '\0') &&
+         block->offset == GX2GL_CAFEGLSL_VIRTUAL_UNIFORM_BLOCK_LOCATION;
+}
+
+static void initialize_program_uniform_block_binding(ProgramUniformBlock *block,
+                                                     uint32_t gx2_location) {
+  if (!block || block->binding_initialized) return;
+  if (gx2_location < GL33_MAX_UNIFORM_BUFFER_BINDINGS) {
+    block->binding_point = gx2_location;
+  }
+  block->binding_initialized = true;
 }
 
 static void build_program_uniform_blocks(GLProgram *prog) {
@@ -918,24 +967,36 @@ static void build_program_uniform_blocks(GLProgram *prog) {
   if (vs) {
     for (uint32_t i = 0; i < vs->uniformBlockCount; ++i) {
       const GX2UniformBlock *shader_block = &vs->uniformBlocks[i];
-      ProgramUniformBlock *block = find_program_uniform_block(prog, shader_block->name);
-      if (!block) block = append_program_uniform_block(prog, shader_block->name);
+      bool implicit = is_cafeglsl_implicit_uniform_block(shader_block);
+      ProgramUniformBlock *block = implicit ? find_program_implicit_uniform_block(prog)
+                                            : find_program_uniform_block(prog, shader_block->name);
+      if (!block) block = append_program_uniform_block(prog, shader_block->name, implicit);
       if (!block) continue;
       block->vertex_block_index = (int32_t)i;
       block->vertex_location = shader_block->offset;
       block->vertex_size = shader_block->size;
+      if (implicit) {
+        block->implicit = true;
+      }
+      initialize_program_uniform_block_binding(block, shader_block->offset);
     }
   }
 
   if (ps) {
     for (uint32_t i = 0; i < ps->uniformBlockCount; ++i) {
       const GX2UniformBlock *shader_block = &ps->uniformBlocks[i];
-      ProgramUniformBlock *block = find_program_uniform_block(prog, shader_block->name);
-      if (!block) block = append_program_uniform_block(prog, shader_block->name);
+      bool implicit = is_cafeglsl_implicit_uniform_block(shader_block);
+      ProgramUniformBlock *block = implicit ? find_program_implicit_uniform_block(prog)
+                                            : find_program_uniform_block(prog, shader_block->name);
+      if (!block) block = append_program_uniform_block(prog, shader_block->name, implicit);
       if (!block) continue;
       block->pixel_block_index = (int32_t)i;
       block->pixel_location = shader_block->offset;
       block->pixel_size = shader_block->size;
+      if (implicit) {
+        block->implicit = true;
+      }
+      initialize_program_uniform_block_binding(block, shader_block->offset);
     }
   }
 }
@@ -1078,6 +1139,7 @@ static void initialize_program_sampler_tables(GLProgram *prog, GX2VertexShader *
       if (location < MAX_PROGRAM_SAMPLERS) {
         prog->vertex_sampler_units[location] = (GLint)i;
       }
+      prog->vertex_sampler_bindings[i] = (GLint)location;
     }
   }
   if (ps) {
@@ -1086,11 +1148,13 @@ static void initialize_program_sampler_tables(GLProgram *prog, GX2VertexShader *
       if (location < MAX_PROGRAM_SAMPLERS) {
         prog->pixel_sampler_units[location] = (GLint)i;
       }
+      prog->pixel_sampler_bindings[i] = (GLint)location;
     }
   }
 }
 
-static bool initialize_program_from_group(GLProgram *prog, const WHBGfxShaderGroup *group, bool owns_group) {
+static bool initialize_program_from_group(GLProgram *prog, const WHBGfxShaderGroup *group,
+                                          bool owns_group, bool owns_whb_group) {
   WHBGfxShaderGroup owned_group_copy;
   GX2VertexShader *vs;
   GX2PixelShader *ps;
@@ -1111,6 +1175,7 @@ static bool initialize_program_from_group(GLProgram *prog, const WHBGfxShaderGro
     prog->group = group;
   }
   prog->owns_group = owns_group;
+  prog->owns_whb_group = owns_whb_group;
   vs = group->vertexShader;
   ps = group->pixelShader;
 
@@ -1318,13 +1383,15 @@ static void bind_program_uniform_blocks(GLProgram *prog) {
 
   for (uint32_t i = 0; i < prog->uniform_block_count; ++i) {
     ProgramUniformBlock *block = &prog->uniform_blocks[i];
-    gl_uniform_buffer_binding_t *binding;
+    gl_uniform_buffer_binding_t *binding = NULL;
 
-    if (block->binding_point >= GL33_MAX_UNIFORM_BUFFER_BINDINGS) continue;
-    binding = &g_gl_context->uniform_buffer_bindings[block->binding_point];
+    if (!block->implicit && block->binding_point < GL33_MAX_UNIFORM_BUFFER_BINDINGS) {
+      binding = &g_gl_context->uniform_buffer_bindings[block->binding_point];
+    }
 
     if (block->vertex_block_index >= 0) {
-      if (binding->buffer != 0) {
+      uint32_t gx2_location = block->vertex_location;
+      if (binding && binding->buffer != 0) {
         GLsizeiptr total_size = gl_buffer_get_size(binding->buffer);
         uint32_t bind_offset = binding->whole_buffer ? 0u : (uint32_t)binding->offset;
         uint32_t bind_size = total_size > (GLsizeiptr)bind_offset
@@ -1333,16 +1400,17 @@ static void bind_program_uniform_blocks(GLProgram *prog) {
                                         : (uint32_t)binding->size)
                                  : 0u;
         bind_uniform_block_buffer(binding->buffer, bind_offset, bind_size, block->vertex_size,
-                                  false, (uint32_t)block->vertex_block_index);
+                                  false, gx2_location);
       } else if (prog->vs_blocks && (uint32_t)block->vertex_block_index < prog->vs_block_count &&
                  prog->vs_blocks[block->vertex_block_index].buffer) {
-        GX2SetVertexUniformBlock((uint32_t)block->vertex_block_index, prog->vs_blocks[block->vertex_block_index].size,
+        GX2SetVertexUniformBlock(gx2_location, prog->vs_blocks[block->vertex_block_index].size,
                                  prog->vs_blocks[block->vertex_block_index].buffer);
       }
     }
 
     if (block->pixel_block_index >= 0) {
-      if (binding->buffer != 0) {
+      uint32_t gx2_location = block->pixel_location;
+      if (binding && binding->buffer != 0) {
         GLsizeiptr total_size = gl_buffer_get_size(binding->buffer);
         uint32_t bind_offset = binding->whole_buffer ? 0u : (uint32_t)binding->offset;
         uint32_t bind_size = total_size > (GLsizeiptr)bind_offset
@@ -1351,10 +1419,10 @@ static void bind_program_uniform_blocks(GLProgram *prog) {
                                         : (uint32_t)binding->size)
                                  : 0u;
         bind_uniform_block_buffer(binding->buffer, bind_offset, bind_size, block->pixel_size,
-                                  true, (uint32_t)block->pixel_block_index);
+                                  true, gx2_location);
       } else if (prog->ps_blocks && (uint32_t)block->pixel_block_index < prog->ps_block_count &&
                  prog->ps_blocks[block->pixel_block_index].buffer) {
-        GX2SetPixelUniformBlock((uint32_t)block->pixel_block_index, prog->ps_blocks[block->pixel_block_index].size,
+        GX2SetPixelUniformBlock(gx2_location, prog->ps_blocks[block->pixel_block_index].size,
                                 prog->ps_blocks[block->pixel_block_index].buffer);
       }
     }
@@ -1770,9 +1838,16 @@ void _gl_CompileShader(GLuint s) {
     return;
   }
 
-  prepared_source = gx2gl_prepare_shader_source_for_cafeglsl(shader->source, shader->type);
+  prepared_source = gx2gl_prepare_shader_source_for_cafeglsl_ex(shader->source,
+                                                                shader->type,
+                                                                info_log_buffer,
+                                                                (int)sizeof(info_log_buffer));
   if (!prepared_source) {
-    replace_owned_string(&shader->info_log, "Failed to prepare shader source for CafeGLSL.");
+    if (info_log_buffer[0] == '\0') {
+      snprintf(info_log_buffer, sizeof(info_log_buffer),
+               "Failed to prepare shader source for CafeGLSL.");
+    }
+    replace_owned_string(&shader->info_log, info_log_buffer);
     return;
   }
 
@@ -1940,7 +2015,7 @@ void _gl_LinkProgram(GLuint p) {
   prog->owned_group.vertexShader = vertex_shader->compiled_vertex_shader;
   prog->owned_group.pixelShader = pixel_shader->compiled_pixel_shader;
 
-  if (!initialize_program_from_group(prog, &prog->owned_group, true)) {
+  if (!initialize_program_from_group(prog, &prog->owned_group, true, false)) {
     replace_owned_string(&prog->info_log,
                          "Failed to build the GX2 shader group or fetch shader for this program.");
     clear_program_runtime_state(prog);
@@ -2245,13 +2320,34 @@ void _gl_UniformBlockBinding(GLuint p, GLuint i, GLuint b) {
 }
 void _gl_WiiULoadShaderGroup(GLuint p, const void *g) {
   if (!is_valid_program(p) || !g) return;
-  if (!initialize_program_from_group(&g_programs[p], (const WHBGfxShaderGroup *)g, false)) {
+  if (!initialize_program_from_group(&g_programs[p], (const WHBGfxShaderGroup *)g, false, false)) {
     replace_owned_string(&g_programs[p].info_log, "Failed to initialize the supplied Wii U shader group.");
   } else {
     replace_owned_string(&g_programs[p].info_log, "");
   }
 }
-void _gl_WiiULoadShaderGroupGFD(GLuint p, GLuint idx, const void *d) { (void)idx; (void)d; (void)p; }
+void _gl_WiiULoadShaderGroupGFD(GLuint p, GLuint idx, const void *d) {
+  WHBGfxShaderGroup loaded_group;
+
+  if (!is_valid_program(p) || !d) return;
+
+  memset(&loaded_group, 0, sizeof(loaded_group));
+  if (!WHBGfxLoadGFDShaderGroup(&loaded_group, idx, d)) {
+    replace_owned_string(&g_programs[p].info_log,
+                         "Failed to load CafeGLSL .gsh shader group with WHBGfxLoadGFDShaderGroup.");
+    clear_program_runtime_state(&g_programs[p]);
+    return;
+  }
+
+  if (!initialize_program_from_group(&g_programs[p], &loaded_group, true, true)) {
+    replace_owned_string(&g_programs[p].info_log,
+                         "Failed to initialize the loaded CafeGLSL .gsh shader group.");
+    clear_program_runtime_state(&g_programs[p]);
+    return;
+  }
+
+  replace_owned_string(&g_programs[p].info_log, "");
+}
 
 GLint _gl_GetUniformLocation(GLuint p, const GLchar *name) {
   if (!is_valid_program(p) || !name) return -1;
