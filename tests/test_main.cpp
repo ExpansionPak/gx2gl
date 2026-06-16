@@ -862,9 +862,40 @@ int main(int argc, char **argv) {
     glGetString(GL_INVALID_ENUM);
     expect_error("glGetString(GL_INVALID_ENUM)", GL_INVALID_ENUM);
 
+    GLint gl_major = 0;
+    GLint gl_minor = 0;
+    GLint gl_profile = 0;
+    glGetIntegerv(GL_MAJOR_VERSION, &gl_major);
+    check_gl_error("glGetIntegerv(GL_MAJOR_VERSION)");
+    glGetIntegerv(GL_MINOR_VERSION, &gl_minor);
+    check_gl_error("glGetIntegerv(GL_MINOR_VERSION)");
+    glGetIntegerv(GL_CONTEXT_PROFILE_MASK, &gl_profile);
+    check_gl_error("glGetIntegerv(GL_CONTEXT_PROFILE_MASK)");
+    if (gl_major == 3 && gl_minor == 3 &&
+        (gl_profile & GL_CONTEXT_CORE_PROFILE_BIT)) {
+        OSReport("[PASS] GL version/profile getters reported 3.3 core.\n");
+    } else {
+        OSReport("[FAIL] GL version/profile getters reported %d.%d mask 0x%04X\n",
+                 gl_major, gl_minor, gl_profile);
+    }
+
     GLint max_tex_size = 0;
     glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_tex_size);
     check_gl_error("glGetIntegerv");
+
+    GLfloat max_lod_bias = 0.0f;
+    GLint max_lod_bias_i = 0;
+    glGetFloatv(GL_MAX_TEXTURE_LOD_BIAS, &max_lod_bias);
+    check_gl_error("glGetFloatv(GL_MAX_TEXTURE_LOD_BIAS)");
+    glGetIntegerv(GL_MAX_TEXTURE_LOD_BIAS, &max_lod_bias_i);
+    check_gl_error("glGetIntegerv(GL_MAX_TEXTURE_LOD_BIAS)");
+    if (max_lod_bias > 14.9f && max_lod_bias < 15.1f &&
+        max_lod_bias_i == 15) {
+        OSReport("[PASS] GL_MAX_TEXTURE_LOD_BIAS converted across getter types.\n");
+    } else {
+        OSReport("[FAIL] GL_MAX_TEXTURE_LOD_BIAS returned %f / %d\n",
+                 max_lod_bias, max_lod_bias_i);
+    }
 
     GLint max_ubo_bindings = 0;
     glGetIntegerv(GL_MAX_UNIFORM_BUFFER_BINDINGS, &max_ubo_bindings);

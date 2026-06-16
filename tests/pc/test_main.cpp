@@ -504,6 +504,22 @@ static int run_compare_suite(const char *reference_ppm_path) {
         fail("glGetString returned a null identity string.");
     }
 
+    GLint gl_major = 0;
+    GLint gl_minor = 0;
+    GLint gl_profile = 0;
+    glGetIntegerv(GL_MAJOR_VERSION, &gl_major);
+    check_gl_error("glGetIntegerv(GL_MAJOR_VERSION)");
+    glGetIntegerv(GL_MINOR_VERSION, &gl_minor);
+    check_gl_error("glGetIntegerv(GL_MINOR_VERSION)");
+    glGetIntegerv(GL_CONTEXT_PROFILE_MASK, &gl_profile);
+    check_gl_error("glGetIntegerv(GL_CONTEXT_PROFILE_MASK)");
+    if (gl_major == 3 && gl_minor == 3 &&
+        (gl_profile & GL_CONTEXT_CORE_PROFILE_BIT)) {
+        pass("version/profile getters reported 3.3 core.");
+    } else {
+        fail("version/profile getters reported unexpected values.");
+    }
+
     GLint num_extensions = 0;
     glGetIntegerv(GL_NUM_EXTENSIONS, &num_extensions);
     check_gl_error("glGetIntegerv(GL_NUM_EXTENSIONS)");
@@ -515,6 +531,18 @@ static int run_compare_suite(const char *reference_ppm_path) {
 
     glGetString(GL_EXTENSIONS);
     expect_error("glGetString(GL_EXTENSIONS)", GL_INVALID_ENUM);
+
+    GLfloat max_lod_bias = 0.0f;
+    GLint max_lod_bias_i = 0;
+    glGetFloatv(GL_MAX_TEXTURE_LOD_BIAS, &max_lod_bias);
+    check_gl_error("glGetFloatv(GL_MAX_TEXTURE_LOD_BIAS)");
+    glGetIntegerv(GL_MAX_TEXTURE_LOD_BIAS, &max_lod_bias_i);
+    check_gl_error("glGetIntegerv(GL_MAX_TEXTURE_LOD_BIAS)");
+    if (approx_equalf(max_lod_bias, 15.0f, 1e-6f) && max_lod_bias_i == 15) {
+        pass("GL_MAX_TEXTURE_LOD_BIAS converted across getter types.");
+    } else {
+        fail("GL_MAX_TEXTURE_LOD_BIAS returned unexpected values.");
+    }
 
     glViewport(10, 20, 320, 180);
     glScissor(4, 8, 64, 32);
