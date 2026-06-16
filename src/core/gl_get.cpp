@@ -216,8 +216,10 @@ static const uint32_t g_extension_count =
 
 static const char g_vendor[] = "Wii U Homebrew";
 static const char g_renderer[] = "gx2gl on AMD Latte";
-static const char g_version[] = "3.3.0 gx2gl";
-static const char g_sl_version[] = "3.30 gx2gl";
+static const char g_version[] =
+    "0.1.0 gx2gl (OpenGL 3.3 core target; not Khronos-conformant)";
+static const char g_sl_version[] =
+    "0.1 gx2gl-CafeGLSL (vertex/fragment runtime path)";
 
 static unsigned active_texture_unit(void) {
   if (!g_gl_context) return 0;
@@ -316,13 +318,13 @@ static bool get_context_value(GLenum pname, GetValue *value) {
 
   switch (pname) {
   case GL_MAJOR_VERSION:
-    return set_int1(value, 3);
+    return set_int1(value, 0);
   case GL_MINOR_VERSION:
-    return set_int1(value, 3);
+    return set_int1(value, 1);
   case GL_CONTEXT_FLAGS:
     return set_int1(value, 0);
   case GL_CONTEXT_PROFILE_MASK:
-    return set_int1(value, GL_CONTEXT_CORE_PROFILE_BIT);
+    return set_int1(value, 0);
   case GL_NUM_EXTENSIONS:
     return set_int1(value, (GLint)g_extension_count);
   case GL_VENDOR:

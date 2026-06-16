@@ -1740,7 +1740,7 @@ void gl_bind_program_fetch_shader(void) {
 }
 
 static bool is_supported_shader_type(GLenum type) {
-  return type == GL_VERTEX_SHADER || type == GL_FRAGMENT_SHADER || type == GL_GEOMETRY_SHADER;
+  return type == GL_VERTEX_SHADER || type == GL_FRAGMENT_SHADER;
 }
 
 static char *concatenate_shader_source(GLsizei count, const GLchar *const *strings,

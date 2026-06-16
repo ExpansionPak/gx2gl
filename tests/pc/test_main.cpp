@@ -513,12 +513,20 @@ static int run_compare_suite(const char *reference_ppm_path) {
     check_gl_error("glGetIntegerv(GL_MINOR_VERSION)");
     glGetIntegerv(GL_CONTEXT_PROFILE_MASK, &gl_profile);
     check_gl_error("glGetIntegerv(GL_CONTEXT_PROFILE_MASK)");
+#ifdef GX2GL_COMPARE_WIIU
+    if (gl_major == 0 && gl_minor == 1 && gl_profile == 0) {
+        pass("version/profile getters reported gx2gl WIP surface.");
+    } else {
+        fail("gx2gl version/profile getters advertised a Khronos GL profile.");
+    }
+#else
     if (gl_major == 3 && gl_minor == 3 &&
         (gl_profile & GL_CONTEXT_CORE_PROFILE_BIT)) {
         pass("version/profile getters reported 3.3 core.");
     } else {
         fail("version/profile getters reported unexpected values.");
     }
+#endif
 
     GLint num_extensions = 0;
     glGetIntegerv(GL_NUM_EXTENSIONS, &num_extensions);
@@ -531,6 +539,19 @@ static int run_compare_suite(const char *reference_ppm_path) {
 
     glGetString(GL_EXTENSIONS);
     expect_error("glGetString(GL_EXTENSIONS)", GL_INVALID_ENUM);
+
+#ifdef GX2GL_COMPARE_WIIU
+    {
+        GLuint gshader = glCreateShader(GL_GEOMETRY_SHADER);
+        if (gshader == 0) {
+            pass("glCreateShader(GL_GEOMETRY_SHADER) rejected unsupported CafeGLSL stage.");
+        } else {
+            glDeleteShader(gshader);
+            fail("glCreateShader(GL_GEOMETRY_SHADER) returned an object.");
+        }
+        expect_error("glCreateShader(GL_GEOMETRY_SHADER)", GL_INVALID_ENUM);
+    }
+#endif
 
     GLfloat max_lod_bias = 0.0f;
     GLint max_lod_bias_i = 0;
@@ -713,6 +734,37 @@ static int run_compare_suite(const char *reference_ppm_path) {
         pass("vertex attrib queries returned expected values.");
     } else {
         fail("vertex attrib queries returned unexpected values.");
+    }
+
+    GLbyte normalized_bytes[4] = {
+        (GLbyte)-128, (GLbyte)-1, (GLbyte)0, (GLbyte)127
+    };
+    GLfloat current_attrib[4] = {0, 0, 0, 0};
+    glVertexAttrib4Nbv(1, normalized_bytes);
+    check_gl_error("glVertexAttrib4Nbv(edge values)");
+    glGetVertexAttribfv(1, GL_CURRENT_VERTEX_ATTRIB, current_attrib);
+    check_gl_error("glGetVertexAttribfv(GL_CURRENT_VERTEX_ATTRIB normalized byte)");
+    if (approx_equalf(current_attrib[0], -1.0f, 0.0001f) &&
+        approx_equalf(current_attrib[1], -1.0f / 255.0f, 0.0001f) &&
+        approx_equalf(current_attrib[2], 1.0f / 255.0f, 0.0001f) &&
+        approx_equalf(current_attrib[3], 1.0f, 0.0001f)) {
+        pass("glVertexAttrib4Nbv followed signed normalized conversion.");
+    } else {
+        fail("glVertexAttrib4Nbv returned unexpected values.");
+    }
+    GLuint packed_snorm = (0x200u << 0u) | (0x000u << 10u) |
+                          (0x1FFu << 20u) | (0x1u << 30u);
+    glVertexAttribP4ui(1, GL_INT_2_10_10_10_REV, GL_TRUE, packed_snorm);
+    check_gl_error("glVertexAttribP4ui(GL_INT_2_10_10_10_REV)");
+    glGetVertexAttribfv(1, GL_CURRENT_VERTEX_ATTRIB, current_attrib);
+    check_gl_error("glGetVertexAttribfv(GL_CURRENT_VERTEX_ATTRIB packed)");
+    if (approx_equalf(current_attrib[0], -1.0f, 0.0001f) &&
+        approx_equalf(current_attrib[1], 1.0f / 1023.0f, 0.0001f) &&
+        approx_equalf(current_attrib[2], 1.0f, 0.0001f) &&
+        approx_equalf(current_attrib[3], 1.0f, 0.0001f)) {
+        pass("glVertexAttribP4ui followed packed signed normalized conversion.");
+    } else {
+        fail("glVertexAttribP4ui returned unexpected values.");
     }
 
     glEnablei(GL_SCISSOR_TEST, 0);

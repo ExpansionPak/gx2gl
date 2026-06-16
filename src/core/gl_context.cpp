@@ -1850,6 +1850,16 @@ static GLint sign_extend_packed(GLuint value, uint32_t bits) {
     return (GLint)((value ^ sign_bit) - sign_bit);
 }
 
+static GLfloat normalize_signed_vertex_value(GLint value, uint32_t bits) {
+    const double max_encoded = (double)(((uint64_t)1 << bits) - 1u);
+    return (GLfloat)((((double)value * 2.0) + 1.0) / max_encoded);
+}
+
+static GLfloat normalize_unsigned_vertex_value(GLuint value, uint32_t bits) {
+    const double max_encoded = (double)(((uint64_t)1 << bits) - 1u);
+    return (GLfloat)((double)value / max_encoded);
+}
+
 static GLfloat unpack_signed_component(GLuint value, uint32_t bits, GLboolean normalized) {
     const GLint signed_value = sign_extend_packed(value, bits);
 
@@ -1857,10 +1867,7 @@ static GLfloat unpack_signed_component(GLuint value, uint32_t bits, GLboolean no
         return (GLfloat)signed_value;
     }
 
-    if (signed_value == -(1 << (bits - 1u))) {
-        return -1.0f;
-    }
-    return (GLfloat)signed_value / (GLfloat)((1 << (bits - 1u)) - 1);
+    return normalize_signed_vertex_value(signed_value, bits);
 }
 
 static GLfloat unpack_unsigned_component(GLuint value, uint32_t bits, GLboolean normalized) {
@@ -1871,7 +1878,7 @@ static GLfloat unpack_unsigned_component(GLuint value, uint32_t bits, GLboolean 
         return (GLfloat)value;
     }
 
-    return (GLfloat)value / (GLfloat)mask;
+    return normalize_unsigned_vertex_value(value, bits);
 }
 
 static void set_vertex_attrib_packed(GLuint index, GLuint packed, GLenum type,
@@ -2132,13 +2139,51 @@ void glVertexAttrib3d(GLuint index, GLdouble x, GLdouble y, GLdouble z) { glVert
 void glVertexAttrib3dv(GLuint index, const GLdouble *v) { if(v) glVertexAttrib3f(index, (GLfloat)v[0], (GLfloat)v[1], (GLfloat)v[2]); }
 void glVertexAttrib3s(GLuint index, GLshort x, GLshort y, GLshort z) { glVertexAttrib3f(index, (GLfloat)x, (GLfloat)y, (GLfloat)z); }
 void glVertexAttrib3sv(GLuint index, const GLshort *v) { if(v) glVertexAttrib3f(index, (GLfloat)v[0], (GLfloat)v[1], (GLfloat)v[2]); }
-void glVertexAttrib4Nbv(GLuint index, const GLbyte *v) { if(v) glVertexAttrib4f(index, v[0]/127.0f, v[1]/127.0f, v[2]/127.0f, v[3]/127.0f); }
-void glVertexAttrib4Niv(GLuint index, const GLint *v) { if(v) glVertexAttrib4f(index, v[0]/2147483647.0f, v[1]/2147483647.0f, v[2]/2147483647.0f, v[3]/2147483647.0f); }
-void glVertexAttrib4Nsv(GLuint index, const GLshort *v) { if(v) glVertexAttrib4f(index, v[0]/32767.0f, v[1]/32767.0f, v[2]/32767.0f, v[3]/32767.0f); }
-void glVertexAttrib4Nub(GLuint index, GLubyte x, GLubyte y, GLubyte z, GLubyte w) { glVertexAttrib4f(index, x/255.0f, y/255.0f, z/255.0f, w/255.0f); }
-void glVertexAttrib4Nubv(GLuint index, const GLubyte *v) { if(v) glVertexAttrib4f(index, v[0]/255.0f, v[1]/255.0f, v[2]/255.0f, v[3]/255.0f); }
-void glVertexAttrib4Nuiv(GLuint index, const GLuint *v) { if(v) glVertexAttrib4f(index, v[0]/4294967295.0f, v[1]/4294967295.0f, v[2]/4294967295.0f, v[3]/4294967295.0f); }
-void glVertexAttrib4Nusv(GLuint index, const GLushort *v) { if(v) glVertexAttrib4f(index, v[0]/65535.0f, v[1]/65535.0f, v[2]/65535.0f, v[3]/65535.0f); }
+void glVertexAttrib4Nbv(GLuint index, const GLbyte *v) {
+    if (v) glVertexAttrib4f(index,
+                            normalize_signed_vertex_value(v[0], 8),
+                            normalize_signed_vertex_value(v[1], 8),
+                            normalize_signed_vertex_value(v[2], 8),
+                            normalize_signed_vertex_value(v[3], 8));
+}
+void glVertexAttrib4Niv(GLuint index, const GLint *v) {
+    if (v) glVertexAttrib4f(index,
+                            normalize_signed_vertex_value(v[0], 32),
+                            normalize_signed_vertex_value(v[1], 32),
+                            normalize_signed_vertex_value(v[2], 32),
+                            normalize_signed_vertex_value(v[3], 32));
+}
+void glVertexAttrib4Nsv(GLuint index, const GLshort *v) {
+    if (v) glVertexAttrib4f(index,
+                            normalize_signed_vertex_value(v[0], 16),
+                            normalize_signed_vertex_value(v[1], 16),
+                            normalize_signed_vertex_value(v[2], 16),
+                            normalize_signed_vertex_value(v[3], 16));
+}
+void glVertexAttrib4Nub(GLuint index, GLubyte x, GLubyte y, GLubyte z, GLubyte w) {
+    glVertexAttrib4f(index,
+                     normalize_unsigned_vertex_value(x, 8),
+                     normalize_unsigned_vertex_value(y, 8),
+                     normalize_unsigned_vertex_value(z, 8),
+                     normalize_unsigned_vertex_value(w, 8));
+}
+void glVertexAttrib4Nubv(GLuint index, const GLubyte *v) {
+    if (v) glVertexAttrib4Nub(index, v[0], v[1], v[2], v[3]);
+}
+void glVertexAttrib4Nuiv(GLuint index, const GLuint *v) {
+    if (v) glVertexAttrib4f(index,
+                            normalize_unsigned_vertex_value(v[0], 32),
+                            normalize_unsigned_vertex_value(v[1], 32),
+                            normalize_unsigned_vertex_value(v[2], 32),
+                            normalize_unsigned_vertex_value(v[3], 32));
+}
+void glVertexAttrib4Nusv(GLuint index, const GLushort *v) {
+    if (v) glVertexAttrib4f(index,
+                            normalize_unsigned_vertex_value(v[0], 16),
+                            normalize_unsigned_vertex_value(v[1], 16),
+                            normalize_unsigned_vertex_value(v[2], 16),
+                            normalize_unsigned_vertex_value(v[3], 16));
+}
 void glVertexAttrib4bv(GLuint index, const GLbyte *v) { if(v) glVertexAttrib4f(index, (GLfloat)v[0], (GLfloat)v[1], (GLfloat)v[2], (GLfloat)v[3]); }
 void glVertexAttrib4d(GLuint index, GLdouble x, GLdouble y, GLdouble z, GLdouble w) { glVertexAttrib4f(index, (GLfloat)x, (GLfloat)y, (GLfloat)z, (GLfloat)w); }
 void glVertexAttrib4dv(GLuint index, const GLdouble *v) { if(v) glVertexAttrib4f(index, (GLfloat)v[0], (GLfloat)v[1], (GLfloat)v[2], (GLfloat)v[3]); }

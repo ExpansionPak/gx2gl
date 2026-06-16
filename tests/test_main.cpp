@@ -787,6 +787,14 @@ static GLboolean nearly_equal_double(GLdouble a, GLdouble b, GLdouble epsilon) {
     return diff <= epsilon ? GL_TRUE : GL_FALSE;
 }
 
+static GLboolean nearly_equal_float(GLfloat a, GLfloat b, GLfloat epsilon) {
+    GLfloat diff = a - b;
+    if (diff < 0.0f) {
+        diff = -diff;
+    }
+    return diff <= epsilon ? GL_TRUE : GL_FALSE;
+}
+
 static void init_fake_shader_group(
     WHBGfxShaderGroup *group, GX2VertexShader *vertex_shader,
     GX2PixelShader *pixel_shader, GX2UniformBlock *vertex_blocks,
@@ -857,6 +865,15 @@ int main(int argc, char **argv) {
     OSReport("-> Testing Limits & Capabilities (Phase 11)...\n");
     const GLubyte* vendor = glGetString(GL_VENDOR);
     check_gl_error("glGetString(GL_VENDOR)");
+    const GLubyte* version_string = glGetString(GL_VERSION);
+    check_gl_error("glGetString(GL_VERSION)");
+    const GLubyte* shading_version_string = glGetString(GL_SHADING_LANGUAGE_VERSION);
+    check_gl_error("glGetString(GL_SHADING_LANGUAGE_VERSION)");
+    if (vendor && version_string && shading_version_string) {
+        OSReport("[PASS] GL identity strings returned vendor/version/shading version.\n");
+    } else {
+        OSReport("[FAIL] GL identity strings returned null.\n");
+    }
 
     OSReport("   Negative test: Invalid string query\n");
     glGetString(GL_INVALID_ENUM);
@@ -871,9 +888,8 @@ int main(int argc, char **argv) {
     check_gl_error("glGetIntegerv(GL_MINOR_VERSION)");
     glGetIntegerv(GL_CONTEXT_PROFILE_MASK, &gl_profile);
     check_gl_error("glGetIntegerv(GL_CONTEXT_PROFILE_MASK)");
-    if (gl_major == 3 && gl_minor == 3 &&
-        (gl_profile & GL_CONTEXT_CORE_PROFILE_BIT)) {
-        OSReport("[PASS] GL version/profile getters reported 3.3 core.\n");
+    if (gl_major == 0 && gl_minor == 1 && gl_profile == 0) {
+        OSReport("[PASS] GL version/profile getters reported gx2gl WIP surface.\n");
     } else {
         OSReport("[FAIL] GL version/profile getters reported %d.%d mask 0x%04X\n",
                  gl_major, gl_minor, gl_profile);
@@ -1961,6 +1977,14 @@ int main(int argc, char **argv) {
     // Try bad shader
     glCreateShader(GL_INVALID_ENUM);
     expect_error("glCreateShader(GL_INVALID_ENUM)", GL_INVALID_ENUM);
+    GLuint gshader = glCreateShader(GL_GEOMETRY_SHADER);
+    if (gshader == 0) {
+        OSReport("[PASS] glCreateShader(GL_GEOMETRY_SHADER) rejected unsupported CafeGLSL stage.\n");
+    } else {
+        OSReport("[FAIL] glCreateShader(GL_GEOMETRY_SHADER) returned %u.\n", gshader);
+        glDeleteShader(gshader);
+    }
+    expect_error("glCreateShader(GL_GEOMETRY_SHADER)", GL_INVALID_ENUM);
 
     const char* vsrc =
         "#version 330 core\n"
@@ -2664,6 +2688,39 @@ int main(int argc, char **argv) {
         OSReport("[FAIL] glGetVertexAttribfv(GL_CURRENT_VERTEX_ATTRIB) returned {%f, %f, %f, %f}\n",
                  current_attrib[0], current_attrib[1], current_attrib[2],
                  current_attrib[3]);
+    }
+    GLbyte normalized_bytes[4] = {
+        (GLbyte)-128, (GLbyte)-1, (GLbyte)0, (GLbyte)127
+    };
+    glVertexAttrib4Nbv(1, normalized_bytes);
+    check_gl_error("glVertexAttrib4Nbv(edge values)");
+    glGetVertexAttribfv(1, GL_CURRENT_VERTEX_ATTRIB, current_attrib);
+    check_gl_error("glGetVertexAttribfv(GL_CURRENT_VERTEX_ATTRIB normalized byte)");
+    if (nearly_equal_float(current_attrib[0], -1.0f, 0.0001f) &&
+        nearly_equal_float(current_attrib[1], -1.0f / 255.0f, 0.0001f) &&
+        nearly_equal_float(current_attrib[2], 1.0f / 255.0f, 0.0001f) &&
+        nearly_equal_float(current_attrib[3], 1.0f, 0.0001f)) {
+        OSReport("[PASS] glVertexAttrib4Nbv followed signed normalized conversion.\n");
+    } else {
+        OSReport("[FAIL] glVertexAttrib4Nbv returned {%f, %f, %f, %f}.\n",
+                 current_attrib[0], current_attrib[1],
+                 current_attrib[2], current_attrib[3]);
+    }
+    GLuint packed_snorm = (0x200u << 0u) | (0x000u << 10u) |
+                          (0x1FFu << 20u) | (0x1u << 30u);
+    glVertexAttribP4ui(1, GL_INT_2_10_10_10_REV, GL_TRUE, packed_snorm);
+    check_gl_error("glVertexAttribP4ui(GL_INT_2_10_10_10_REV)");
+    glGetVertexAttribfv(1, GL_CURRENT_VERTEX_ATTRIB, current_attrib);
+    check_gl_error("glGetVertexAttribfv(GL_CURRENT_VERTEX_ATTRIB packed)");
+    if (nearly_equal_float(current_attrib[0], -1.0f, 0.0001f) &&
+        nearly_equal_float(current_attrib[1], 1.0f / 1023.0f, 0.0001f) &&
+        nearly_equal_float(current_attrib[2], 1.0f, 0.0001f) &&
+        nearly_equal_float(current_attrib[3], 1.0f, 0.0001f)) {
+        OSReport("[PASS] glVertexAttribP4ui followed packed signed normalized conversion.\n");
+    } else {
+        OSReport("[FAIL] glVertexAttribP4ui returned {%f, %f, %f, %f}.\n",
+                 current_attrib[0], current_attrib[1],
+                 current_attrib[2], current_attrib[3]);
     }
     glVertexAttribI4i(1, -7, 8, -9, 10);
     check_gl_error("glVertexAttribI4i");
