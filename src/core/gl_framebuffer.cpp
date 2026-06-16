@@ -30,39 +30,6 @@ extern "C" {
 #ifndef GL_TEXTURE_CUBE_MAP_NEGATIVE_Z
 #define GL_TEXTURE_CUBE_MAP_NEGATIVE_Z 0x851A
 #endif
-#ifndef GL_QUERY_COUNTER_BITS
-#define GL_QUERY_COUNTER_BITS 0x8864
-#endif
-#ifndef GL_CURRENT_QUERY
-#define GL_CURRENT_QUERY 0x8865
-#endif
-#ifndef GL_QUERY_RESULT
-#define GL_QUERY_RESULT 0x8866
-#endif
-#ifndef GL_QUERY_RESULT_AVAILABLE
-#define GL_QUERY_RESULT_AVAILABLE 0x8867
-#endif
-#ifndef GL_SAMPLES_PASSED
-#define GL_SAMPLES_PASSED 0x8914
-#endif
-#ifndef GL_ANY_SAMPLES_PASSED
-#define GL_ANY_SAMPLES_PASSED 0x8C2F
-#endif
-#ifndef GL_ANY_SAMPLES_PASSED_CONSERVATIVE
-#define GL_ANY_SAMPLES_PASSED_CONSERVATIVE 0x8D6A
-#endif
-#ifndef GL_QUERY_WAIT
-#define GL_QUERY_WAIT 0x8E13
-#endif
-#ifndef GL_QUERY_NO_WAIT
-#define GL_QUERY_NO_WAIT 0x8E14
-#endif
-#ifndef GL_QUERY_BY_REGION_WAIT
-#define GL_QUERY_BY_REGION_WAIT 0x8E15
-#endif
-#ifndef GL_QUERY_BY_REGION_NO_WAIT
-#define GL_QUERY_BY_REGION_NO_WAIT 0x8E16
-#endif
 
 #define MAX_FRAMEBUFFERS 128
 #define MAX_RENDERBUFFERS 256
@@ -127,28 +94,6 @@ static GLRenderbuffer *get_renderbuffer(GLuint id);
 static GX2ColorBuffer *get_default_color_buffer(void);
 static void clear_attachment_ref(GLAttachmentRef *attachment);
 static void free_framebuffer_texture_target(GLFramebuffer *fb, uint32_t index);
-
-static bool is_query_target(GLenum target) {
-    return target == GL_SAMPLES_PASSED ||
-           target == GL_ANY_SAMPLES_PASSED ||
-           target == GL_ANY_SAMPLES_PASSED_CONSERVATIVE ||
-           target == GL_TIME_ELAPSED;
-}
-
-static bool is_query_pname(GLenum pname) {
-    return pname == GL_CURRENT_QUERY || pname == GL_QUERY_COUNTER_BITS;
-}
-
-static bool is_query_object_pname(GLenum pname) {
-    return pname == GL_QUERY_RESULT || pname == GL_QUERY_RESULT_AVAILABLE;
-}
-
-static bool is_conditional_render_mode(GLenum mode) {
-    return mode == GL_QUERY_WAIT ||
-           mode == GL_QUERY_NO_WAIT ||
-           mode == GL_QUERY_BY_REGION_WAIT ||
-           mode == GL_QUERY_BY_REGION_NO_WAIT;
-}
 
 static void detach_renderbuffer_from_framebuffer(GLuint framebuffer,
                                                 GLuint renderbuffer) {
@@ -1741,81 +1686,6 @@ void _gl_BlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLi
 
 void _gl_RenderbufferStorageMultisample(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height) {
     renderbuffer_storage(target, samples, internalformat, width, height);
-}
-
-void _gl_GenQueries(GLsizei n, GLuint *ids) {
-    if (n < 0) { _gl_set_error(GL_INVALID_VALUE); return; }
-    if (n > 0 && !ids) { _gl_set_error(GL_INVALID_VALUE); return; }
-    if (ids) for (int i = 0; i < n; i++) ids[i] = 0;
-    if (n > 0) _gl_set_error(GL_INVALID_OPERATION);
-}
-void _gl_DeleteQueries(GLsizei n, const GLuint *ids) {
-    if (n < 0) { _gl_set_error(GL_INVALID_VALUE); return; }
-    if (n > 0 && !ids) { _gl_set_error(GL_INVALID_VALUE); return; }
-}
-GLboolean _gl_IsQuery(GLuint id) { (void)id; return GL_FALSE; }
-void _gl_BeginQuery(GLenum target, GLuint id) {
-    if (!is_query_target(target)) { _gl_set_error(GL_INVALID_ENUM); return; }
-    if (id == 0) { _gl_set_error(GL_INVALID_OPERATION); return; }
-    _gl_set_error(GL_INVALID_OPERATION);
-}
-void _gl_EndQuery(GLenum target) {
-    if (!is_query_target(target)) { _gl_set_error(GL_INVALID_ENUM); return; }
-    _gl_set_error(GL_INVALID_OPERATION);
-}
-void _gl_GetQueryiv(GLenum target, GLenum pname, GLint *params) {
-    if (!params) return;
-    if (!is_query_target(target) || !is_query_pname(pname)) { _gl_set_error(GL_INVALID_ENUM); return; }
-    *params = 0;
-    _gl_set_error(GL_INVALID_OPERATION);
-}
-void _gl_GetQueryObjectiv(GLuint id, GLenum pname, GLint *params) {
-    if (!params) return;
-    if (!is_query_object_pname(pname)) { _gl_set_error(GL_INVALID_ENUM); return; }
-    *params = 0;
-    if (id == 0) { _gl_set_error(GL_INVALID_OPERATION); return; }
-    _gl_set_error(GL_INVALID_OPERATION);
-}
-void _gl_GetQueryObjectuiv(GLuint id, GLenum pname, GLuint *params) {
-    if (!params) return;
-    if (!is_query_object_pname(pname)) { _gl_set_error(GL_INVALID_ENUM); return; }
-    *params = 0;
-    if (id == 0) { _gl_set_error(GL_INVALID_OPERATION); return; }
-    _gl_set_error(GL_INVALID_OPERATION);
-}
-void _gl_BeginConditionalRender(GLuint id, GLenum mode) {
-    if (!is_conditional_render_mode(mode)) { _gl_set_error(GL_INVALID_ENUM); return; }
-    if (id == 0) { _gl_set_error(GL_INVALID_OPERATION); return; }
-    _gl_set_error(GL_INVALID_OPERATION);
-}
-void _gl_EndConditionalRender(void) { _gl_set_error(GL_INVALID_OPERATION); }
-void _gl_BeginQueryIndexed(GLenum target, GLuint index, GLuint id) {
-    if (!is_query_target(target)) { _gl_set_error(GL_INVALID_ENUM); return; }
-    if (index != 0) { _gl_set_error(GL_INVALID_VALUE); return; }
-    if (id == 0) { _gl_set_error(GL_INVALID_OPERATION); return; }
-    _gl_set_error(GL_INVALID_OPERATION);
-}
-void _gl_EndQueryIndexed(GLenum target, GLuint index) {
-    if (!is_query_target(target)) { _gl_set_error(GL_INVALID_ENUM); return; }
-    if (index != 0) { _gl_set_error(GL_INVALID_VALUE); return; }
-    _gl_set_error(GL_INVALID_OPERATION);
-}
-void _gl_GetQueryIndexediv(GLenum target, GLuint index, GLenum pname, GLint *params) {
-    if (!params) return;
-    if (!is_query_target(target) || !is_query_pname(pname)) { _gl_set_error(GL_INVALID_ENUM); return; }
-    *params = 0;
-    if (index != 0) { _gl_set_error(GL_INVALID_VALUE); return; }
-    _gl_set_error(GL_INVALID_OPERATION);
-}
-void _gl_GenTransformFeedbacks(GLsizei n, GLuint *ids) {
-    if (n < 0) { _gl_set_error(GL_INVALID_VALUE); return; }
-    if (n > 0 && !ids) { _gl_set_error(GL_INVALID_VALUE); return; }
-    if (ids) for (int i = 0; i < n; i++) ids[i] = 0;
-    if (n > 0) _gl_set_error(GL_INVALID_OPERATION);
-}
-void _gl_DeleteTransformFeedbacks(GLsizei n, const GLuint *ids) {
-    if (n < 0) { _gl_set_error(GL_INVALID_VALUE); return; }
-    if (n > 0 && !ids) { _gl_set_error(GL_INVALID_VALUE); return; }
 }
 
 void _gl_DrawBuffer(GLenum buf) {

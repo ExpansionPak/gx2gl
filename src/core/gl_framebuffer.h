@@ -33,22 +33,6 @@ void _gl_DrawBuffers(GLsizei n, const GLenum *bufs);
 void _gl_ReadBuffer(GLenum src);
 void _gl_ReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, GLvoid *pixels);
 
-void _gl_GenQueries(GLsizei n, GLuint *ids);
-void _gl_DeleteQueries(GLsizei n, const GLuint *ids);
-GLboolean _gl_IsQuery(GLuint id);
-void _gl_BeginQuery(GLenum target, GLuint id);
-void _gl_EndQuery(GLenum target);
-void _gl_GetQueryiv(GLenum target, GLenum pname, GLint *params);
-void _gl_GetQueryObjectiv(GLuint id, GLenum pname, GLint *params);
-void _gl_GetQueryObjectuiv(GLuint id, GLenum pname, GLuint *params);
-void _gl_BeginConditionalRender(GLuint id, GLenum mode);
-void _gl_EndConditionalRender(void);
-void _gl_BeginQueryIndexed(GLenum target, GLuint index, GLuint id);
-void _gl_EndQueryIndexed(GLenum target, GLuint index);
-void _gl_GetQueryIndexediv(GLenum target, GLuint index, GLenum pname, GLint *params);
-void _gl_GenTransformFeedbacks(GLsizei n, GLuint *ids);
-void _gl_DeleteTransformFeedbacks(GLsizei n, const GLuint *ids);
-
 void gl_bind_framebuffers(void);
 void gl_framebuffer_set_default_target_drc(GLboolean use_drc);
 GLboolean gl_is_draw_color_buffer_enabled(GLuint index);

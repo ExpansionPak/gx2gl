@@ -114,6 +114,7 @@ void _gl_GetIntegerv(GLenum pname, GLint *data) {
     case GL_IMPLEMENTATION_COLOR_READ_TYPE: *data = GL_UNSIGNED_BYTE; break;
     case GL_GENERATE_MIPMAP_HINT: *data = (GLint)g_gl_context->generate_mipmap_hint; break;
     case GL_PRIMITIVE_RESTART_INDEX: *data = (GLint)g_gl_context->primitive_restart_index; break;
+    case GL_ACTIVE_TEXTURE: *data = (GLint)g_gl_context->active_texture; break;
     case GL_ARRAY_BUFFER_BINDING: *data = (GLint)g_gl_context->bound_array_buffer; break;
     case GL_VERTEX_ARRAY_BINDING: *data = (GLint)g_gl_context->bound_vao; break;
     case GL_ELEMENT_ARRAY_BUFFER_BINDING:

@@ -316,6 +316,15 @@ typedef struct {
     GLboolean polygon_offset_point_enabled, polygon_offset_line_enabled, polygon_offset_fill_enabled, sample_coverage_invert;
     GLfloat sample_coverage_value;
     GLuint primitive_restart_index;
+    GLuint active_query_samples_passed;
+    GLuint active_query_any_samples_passed;
+    GLuint active_query_any_samples_passed_conservative;
+    GLuint active_query_time_elapsed;
+    GLuint active_query_primitives_generated;
+    GLuint active_query_transform_feedback_primitives_written;
+    GLuint conditional_render_query;
+    GLenum conditional_render_mode;
+    GLboolean conditional_render_active;
     GLenum generate_mipmap_hint, error;
     GLenum error_queue[GL_ERROR_QUEUE_SIZE];
     uint32_t error_head, error_tail;
@@ -336,6 +345,21 @@ void _gl_GetBooleanv(GLenum pname, GLboolean *params);
 void _gl_GetDoublev(GLenum pname, GLdouble *params);
 void _gl_GetIntegerv(GLenum pname, GLint *params);
 void _gl_GetFloatv(GLenum pname, GLfloat *params);
+void _gl_GenQueries(GLsizei n, GLuint *ids);
+void _gl_DeleteQueries(GLsizei n, const GLuint *ids);
+GLboolean _gl_IsQuery(GLuint id);
+void _gl_BeginQuery(GLenum target, GLuint id);
+void _gl_EndQuery(GLenum target);
+void _gl_GetQueryiv(GLenum target, GLenum pname, GLint *params);
+void _gl_GetQueryObjectiv(GLuint id, GLenum pname, GLint *params);
+void _gl_GetQueryObjectuiv(GLuint id, GLenum pname, GLuint *params);
+void _gl_BeginConditionalRender(GLuint id, GLenum mode);
+void _gl_EndConditionalRender(void);
+void _gl_BeginQueryIndexed(GLenum target, GLuint index, GLuint id);
+void _gl_EndQueryIndexed(GLenum target, GLuint index);
+void _gl_GetQueryIndexediv(GLenum target, GLuint index, GLenum pname, GLint *params);
+void _gl_GenTransformFeedbacks(GLsizei n, GLuint *ids);
+void _gl_DeleteTransformFeedbacks(GLsizei n, const GLuint *ids);
 
 #ifdef __cplusplus
 }

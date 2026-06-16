@@ -67,19 +67,9 @@ set(SOURCES
     src/mem/gl_mem.cpp
 )
 
-set(GX2VK_SOURCES
-    src/vk/gx2vk_core.cpp
-    src/vk/gx2vk_memory.cpp
-    src/vk/gx2vk_cmd.cpp
-    src/vk/gx2vk_shader.cpp
-    src/vk/gx2vk_pipeline.cpp
-    src/vk/gx2vk_descriptor.cpp
-)
-
 # Build library
 add_library(gl33_gx2_core STATIC ${SOURCES})
 target_include_directories(gl33_gx2_core PRIVATE "${GX2GL_GENERATED_DIR}")
-add_library(gx2vk_core STATIC ${GX2VK_SOURCES})
 
 # Build RPX
 add_executable(gl33_test tests/test_main.cpp tests/gles2_compile.cpp)

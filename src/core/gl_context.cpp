@@ -8,10 +8,12 @@
 #include "gl_framebuffer.h"
 #include "gl_draw.h"
 #include <coreinit/mutex.h>
+#include <coreinit/time.h>
 #include <gx2/event.h>
 #include <gx2/draw.h>
 #include <whb/gfx.h>
 #include <gx2/clear.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -57,6 +59,45 @@
 #endif
 #ifndef GL_QUERY_RESULT_AVAILABLE
 #define GL_QUERY_RESULT_AVAILABLE 0x8867
+#endif
+#ifndef GL_QUERY_COUNTER_BITS
+#define GL_QUERY_COUNTER_BITS 0x8864
+#endif
+#ifndef GL_CURRENT_QUERY
+#define GL_CURRENT_QUERY 0x8865
+#endif
+#ifndef GL_SAMPLES_PASSED
+#define GL_SAMPLES_PASSED 0x8914
+#endif
+#ifndef GL_ANY_SAMPLES_PASSED
+#define GL_ANY_SAMPLES_PASSED 0x8C2F
+#endif
+#ifndef GL_ANY_SAMPLES_PASSED_CONSERVATIVE
+#define GL_ANY_SAMPLES_PASSED_CONSERVATIVE 0x8D6A
+#endif
+#ifndef GL_PRIMITIVES_GENERATED
+#define GL_PRIMITIVES_GENERATED 0x8C87
+#endif
+#ifndef GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN
+#define GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN 0x8C88
+#endif
+#ifndef GL_QUERY_WAIT
+#define GL_QUERY_WAIT 0x8E13
+#endif
+#ifndef GL_QUERY_NO_WAIT
+#define GL_QUERY_NO_WAIT 0x8E14
+#endif
+#ifndef GL_QUERY_BY_REGION_WAIT
+#define GL_QUERY_BY_REGION_WAIT 0x8E15
+#endif
+#ifndef GL_QUERY_BY_REGION_NO_WAIT
+#define GL_QUERY_BY_REGION_NO_WAIT 0x8E16
+#endif
+#ifndef GL_TIME_ELAPSED
+#define GL_TIME_ELAPSED 0x88BF
+#endif
+#ifndef GL_TIMESTAMP
+#define GL_TIMESTAMP 0x8E28
 #endif
 #ifndef GL_POINT_SIZE_MIN
 #define GL_POINT_SIZE_MIN 0x8126
@@ -110,11 +151,54 @@ extern "C" {
 
 gl_context_t *g_gl_context = NULL;
 
-static void gl_context_init_defaults(gl_context_t *ctx) {
+#define GL33_MAX_QUERY_OBJECTS 512
+#define GL33_SYNC_MAGIC 0x33584E53u
+
+typedef struct {
+  bool reserved;
+  bool in_use;
+  bool active;
+  GLenum target;
+  GLuint64 result;
+  GLboolean result_available;
+  OSTime begin_ticks;
+} gl_query_object_t;
+
+struct __GLsync {
+  uint32_t magic;
+  GLenum condition;
+  GLbitfield flags;
+  GLboolean signaled;
+  struct __GLsync *next;
+};
+
+static gl_query_object_t g_query_objects[GL33_MAX_QUERY_OBJECTS];
+static struct __GLsync *g_sync_objects = NULL;
+
+static void gl_context_reset_queries(void) {
+  memset(g_query_objects, 0, sizeof(g_query_objects));
+}
+
+static void gl_context_default_framebuffer_size(GLsizei *width,
+                                                GLsizei *height) {
   GX2ColorBuffer *tv_color;
-  if (!ctx) return;
-  memset(ctx, 0, sizeof(gl_context_t));
-  ctx->active_texture = 0;
+
+  if (width) *width = 0;
+  if (height) *height = 0;
+
+  tv_color = WHBGfxGetTVColourBuffer();
+  if (!tv_color) return;
+
+  if (width) *width = (GLsizei)tv_color->surface.width;
+  if (height) *height = (GLsizei)tv_color->surface.height;
+}
+
+static void gl_context_init_pixel_store(gl_context_t *ctx) {
+  ctx->pack_alignment = 4;
+  ctx->unpack_alignment = 4;
+}
+
+static void gl_context_init_blend_depth_stencil(gl_context_t *ctx) {
   ctx->blend_src_rgb = GL_ONE;
   ctx->blend_dst_rgb = GL_ZERO;
   ctx->blend_src_alpha = GL_ONE;
@@ -123,14 +207,10 @@ static void gl_context_init_defaults(gl_context_t *ctx) {
   ctx->blend_eq_alpha = GL_FUNC_ADD;
   ctx->depth_func = GL_LESS;
   ctx->depth_mask = GL_TRUE;
-  ctx->viewport.near_z = 0.0f;
-  ctx->viewport.far_z = 1.0f;
-  ctx->pack_alignment = 4;
-  ctx->unpack_alignment = 4;
-  ctx->stencil_compare_mask[0] = 0xFFu;
-  ctx->stencil_compare_mask[1] = 0xFFu;
-  ctx->stencil_write_mask[0] = 0xFFu;
-  ctx->stencil_write_mask[1] = 0xFFu;
+  ctx->stencil_compare_mask[0] = 0xFFFFFFFFu;
+  ctx->stencil_compare_mask[1] = 0xFFFFFFFFu;
+  ctx->stencil_write_mask[0] = 0xFFFFFFFFu;
+  ctx->stencil_write_mask[1] = 0xFFFFFFFFu;
   ctx->stencil_func[0] = GL_ALWAYS;
   ctx->stencil_func[1] = GL_ALWAYS;
   ctx->stencil_fail[0] = GL_KEEP;
@@ -139,34 +219,72 @@ static void gl_context_init_defaults(gl_context_t *ctx) {
   ctx->stencil_zfail[1] = GL_KEEP;
   ctx->stencil_zpass[0] = GL_KEEP;
   ctx->stencil_zpass[1] = GL_KEEP;
+}
+
+static void gl_context_init_raster_state(gl_context_t *ctx) {
+  GLsizei default_width = 0;
+  GLsizei default_height = 0;
+
+  gl_context_default_framebuffer_size(&default_width, &default_height);
+
+  ctx->active_texture = GL_TEXTURE0;
+  ctx->viewport.x = 0;
+  ctx->viewport.y = 0;
+  ctx->viewport.width = default_width;
+  ctx->viewport.height = default_height;
+  ctx->viewport.near_z = 0.0f;
+  ctx->viewport.far_z = 1.0f;
+  ctx->scissor.x = 0;
+  ctx->scissor.y = 0;
+  ctx->scissor.width = default_width;
+  ctx->scissor.height = default_height;
   ctx->cull_face_mode = GL_BACK;
   ctx->front_face = GL_CCW;
   ctx->polygon_mode = GL_FILL;
   ctx->line_width = 1.0f;
   ctx->logic_op = GL_COPY;
   ctx->point_size = 1.0f;
+  ctx->sample_coverage_value = 1.0f;
+  ctx->generate_mipmap_hint = GL_DONT_CARE;
+  ctx->primitive_restart_index = 0;
   ctx->color_mask[0] = GL_TRUE;
   ctx->color_mask[1] = GL_TRUE;
   ctx->color_mask[2] = GL_TRUE;
   ctx->color_mask[3] = GL_TRUE;
-  for (uint32_t i = 0; i < GL33_MAX_VERTEX_ATTRIBS; ++i) ctx->current_vertex_attrib[i][3] = 1.0f;
-  ctx->clear_depth = 1.0f;
-  ctx->sample_coverage_value = 1.0f;
-  ctx->generate_mipmap_hint = GL_DONT_CARE;
-  tv_color = WHBGfxGetTVColourBuffer();
-  if (tv_color) {
-    ctx->viewport.width = (GLsizei)tv_color->surface.width;
-    ctx->viewport.height = (GLsizei)tv_color->surface.height;
-    ctx->scissor.width = (GLsizei)tv_color->surface.width;
-    ctx->scissor.height = (GLsizei)tv_color->surface.height;
+}
+
+static void gl_context_init_vertex_defaults(gl_context_t *ctx) {
+  for (uint32_t i = 0; i < GL33_MAX_VERTEX_ATTRIBS; ++i) {
+    ctx->current_vertex_attrib[i][0] = 0.0f;
+    ctx->current_vertex_attrib[i][1] = 0.0f;
+    ctx->current_vertex_attrib[i][2] = 0.0f;
+    ctx->current_vertex_attrib[i][3] = 1.0f;
   }
+}
+
+static void gl_context_init_defaults(gl_context_t *ctx) {
+  if (!ctx) return;
+
+  memset(ctx, 0, sizeof(gl_context_t));
+
+  gl_context_init_pixel_store(ctx);
+  gl_context_init_blend_depth_stencil(ctx);
+  gl_context_init_raster_state(ctx);
+  gl_context_init_vertex_defaults(ctx);
+
+  ctx->clear_depth = 1.0f;
+  ctx->clear_stencil = 0;
+  ctx->error = GL_NO_ERROR;
   ctx->dirty_flags = 0xFFFFFFFF;
 }
 
 void _gl_set_error(GLenum error) {
-  if (!g_gl_context) return;
+  uint32_t next;
+
+  if (!g_gl_context || error == GL_NO_ERROR) return;
+
   OSLockMutex(&g_gl_context->error_mutex);
-  uint32_t next = (g_gl_context->error_head + 1) % GL_ERROR_QUEUE_SIZE;
+  next = (g_gl_context->error_head + 1) % GL_ERROR_QUEUE_SIZE;
   if (next != g_gl_context->error_tail) {
     g_gl_context->error_queue[g_gl_context->error_head] = error;
     g_gl_context->error_head = next;
@@ -175,24 +293,49 @@ void _gl_set_error(GLenum error) {
 }
 
 GLenum glGetError(void) {
+  GLenum error;
+
   if (!g_gl_context) return GL_NO_ERROR;
+
   OSLockMutex(&g_gl_context->error_mutex);
-  if (g_gl_context->error_head == g_gl_context->error_tail) { OSUnlockMutex(&g_gl_context->error_mutex); return GL_NO_ERROR; }
-  GLenum error = g_gl_context->error_queue[g_gl_context->error_tail];
+  if (g_gl_context->error_head == g_gl_context->error_tail) {
+    OSUnlockMutex(&g_gl_context->error_mutex);
+    return GL_NO_ERROR;
+  }
+
+  error = g_gl_context->error_queue[g_gl_context->error_tail];
   g_gl_context->error_tail = (g_gl_context->error_tail + 1) % GL_ERROR_QUEUE_SIZE;
   OSUnlockMutex(&g_gl_context->error_mutex);
   return error;
 }
 
-void _gl_Flush(void) { gl_flush_state(); GX2Flush(); }
-void _gl_Finish(void) { GX2DrawDone(); }
+static void gl_context_signal_all_syncs(void) {
+  for (struct __GLsync *sync = g_sync_objects; sync; sync = sync->next) {
+    sync->signaled = GL_TRUE;
+  }
+}
 
-gl_context_t *gl_context_create(void) {
-  gl_context_t *ctx = (gl_context_t *)gl_mem_alloc(GL_MEM_TYPE_MEM2, sizeof(gl_context_t), 4);
-  if (!ctx) return NULL;
-  gl_context_init_defaults(ctx);
-  OSInitMutex(&ctx->error_mutex);
-  gl_buffer_init(); gl_texture_init(); gl_shader_init(); gl_vao_init(); gl_framebuffer_init();
+void _gl_Flush(void) {
+  gl_flush_state();
+  GX2Flush();
+}
+
+void _gl_Finish(void) {
+  GX2DrawDone();
+  gl_context_signal_all_syncs();
+}
+
+static void gl_context_init_subsystems(void) {
+  gl_buffer_init();
+  gl_texture_init();
+  gl_shader_init();
+  gl_vao_init();
+  gl_framebuffer_init();
+  gl_context_reset_queries();
+}
+
+static void gl_context_init_dispatch(gl_context_t *ctx) {
+  if (!ctx) return;
 
   ctx->dispatch.glGenBuffers = _gl_GenBuffers;
   ctx->dispatch.glDeleteBuffers = _gl_DeleteBuffers;
@@ -424,11 +567,46 @@ gl_context_t *gl_context_create(void) {
   ctx->dispatch.glLineWidth = _gl_LineWidth;
   ctx->dispatch.glPixelStorei = _gl_PixelStorei;
   ctx->dispatch.glPrimitiveRestartIndex = _gl_PrimitiveRestartIndex;
+}
+
+static void gl_context_delete_all_syncs(void) {
+  struct __GLsync *sync = g_sync_objects;
+
+  while (sync) {
+    struct __GLsync *next = sync->next;
+    sync->magic = 0;
+    free(sync);
+    sync = next;
+  }
+
+  g_sync_objects = NULL;
+}
+
+gl_context_t *gl_context_create(void) {
+  gl_context_t *ctx = (gl_context_t *)gl_mem_alloc(GL_MEM_TYPE_MEM2,
+                                                   sizeof(gl_context_t), 4);
+  if (!ctx) return NULL;
+
+  gl_context_init_defaults(ctx);
+  OSInitMutex(&ctx->error_mutex);
+  gl_context_init_subsystems();
+  gl_context_init_dispatch(ctx);
 
   return ctx;
 }
 
-void gl_context_destroy(gl_context_t *ctx) { gl_mem_free(GL_MEM_TYPE_MEM2, ctx); }
+void gl_context_destroy(gl_context_t *ctx) {
+  if (!ctx) return;
+
+  if (g_gl_context == ctx) {
+    _gl_Finish();
+    g_gl_context = NULL;
+  }
+
+  gl_context_delete_all_syncs();
+  gl_context_reset_queries();
+  gl_mem_free(GL_MEM_TYPE_MEM2, ctx);
+}
 
 void glGenBuffers(GLsizei n, GLuint *b) { if(g_gl_context) g_gl_context->dispatch.glGenBuffers(n, b); }
 void glDeleteBuffers(GLsizei n, const GLuint *b) { if(g_gl_context) g_gl_context->dispatch.glDeleteBuffers(n, b); }
@@ -843,6 +1021,395 @@ void glCopyBufferSubData(GLenum readTarget, GLenum writeTarget, GLintptr readOff
     gl_buffer_copy_sub_data(readTarget, writeTarget, readOffset, writeOffset, size);
 }
 
+static bool is_query_begin_target(GLenum target) {
+    switch (target) {
+    case GL_SAMPLES_PASSED:
+    case GL_ANY_SAMPLES_PASSED:
+    case GL_ANY_SAMPLES_PASSED_CONSERVATIVE:
+    case GL_TIME_ELAPSED:
+    case GL_PRIMITIVES_GENERATED:
+    case GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool is_query_info_target(GLenum target) {
+    return is_query_begin_target(target) || target == GL_TIMESTAMP;
+}
+
+static bool is_query_object_pname(GLenum pname) {
+    return pname == GL_QUERY_RESULT ||
+           pname == GL_QUERY_RESULT_AVAILABLE;
+}
+
+static bool is_conditional_render_mode(GLenum mode) {
+    return mode == GL_QUERY_WAIT ||
+           mode == GL_QUERY_NO_WAIT ||
+           mode == GL_QUERY_BY_REGION_WAIT ||
+           mode == GL_QUERY_BY_REGION_NO_WAIT;
+}
+
+static bool query_targets_compatible(GLenum object_target,
+                                     GLenum requested_target) {
+    if (object_target == requested_target) return true;
+    if ((object_target == GL_TIME_ELAPSED || object_target == GL_TIMESTAMP) &&
+        (requested_target == GL_TIME_ELAPSED || requested_target == GL_TIMESTAMP)) {
+        return true;
+    }
+    return false;
+}
+
+static GLuint *active_query_binding(GLenum target) {
+    if (!g_gl_context) return NULL;
+
+    switch (target) {
+    case GL_SAMPLES_PASSED:
+        return &g_gl_context->active_query_samples_passed;
+    case GL_ANY_SAMPLES_PASSED:
+        return &g_gl_context->active_query_any_samples_passed;
+    case GL_ANY_SAMPLES_PASSED_CONSERVATIVE:
+        return &g_gl_context->active_query_any_samples_passed_conservative;
+    case GL_TIME_ELAPSED:
+        return &g_gl_context->active_query_time_elapsed;
+    case GL_PRIMITIVES_GENERATED:
+        return &g_gl_context->active_query_primitives_generated;
+    case GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN:
+        return &g_gl_context->active_query_transform_feedback_primitives_written;
+    default:
+        return NULL;
+    }
+}
+
+static gl_query_object_t *query_object(GLuint id) {
+    if (id == 0 || id >= GL33_MAX_QUERY_OBJECTS) return NULL;
+    if (!g_query_objects[id].in_use) return NULL;
+    return &g_query_objects[id];
+}
+
+static gl_query_object_t *create_or_get_query_object(GLuint id,
+                                                     GLenum target) {
+    gl_query_object_t *query;
+
+    if (id == 0 || id >= GL33_MAX_QUERY_OBJECTS) {
+        _gl_set_error(GL_INVALID_OPERATION);
+        return NULL;
+    }
+
+    query = &g_query_objects[id];
+    if (query->in_use) {
+        if (!query_targets_compatible(query->target, target)) {
+            _gl_set_error(GL_INVALID_OPERATION);
+            return NULL;
+        }
+        return query;
+    }
+
+    memset(query, 0, sizeof(*query));
+    query->in_use = true;
+    query->target = target;
+    query->result_available = GL_FALSE;
+    return query;
+}
+
+static GLuint64 ticks_to_query_nanoseconds(OSTime ticks) {
+    if (ticks <= 0) return 0;
+    return (GLuint64)OSTicksToNanoseconds((uint64_t)ticks);
+}
+
+static void finish_query_object(gl_query_object_t *query) {
+    OSTime end_ticks;
+
+    if (!query) return;
+
+    if (query->target == GL_TIME_ELAPSED) {
+        end_ticks = OSGetTime();
+        query->result = ticks_to_query_nanoseconds(end_ticks - query->begin_ticks);
+    } else {
+        query->result = 0;
+    }
+
+    query->active = false;
+    query->result_available = GL_TRUE;
+}
+
+static bool allocate_query_names(GLsizei n, GLuint *ids) {
+    GLsizei found = 0;
+
+    for (GLuint id = 1; id < GL33_MAX_QUERY_OBJECTS && found < n; ++id) {
+        if (!g_query_objects[id].reserved && !g_query_objects[id].in_use) {
+            ids[found++] = id;
+        }
+    }
+
+    if (found != n) {
+        for (GLsizei i = 0; i < n; ++i) ids[i] = 0;
+        _gl_set_error(GL_INVALID_OPERATION);
+        return false;
+    }
+
+    for (GLsizei i = 0; i < n; ++i) {
+        g_query_objects[ids[i]].reserved = true;
+    }
+    return true;
+}
+
+void _gl_GenQueries(GLsizei n, GLuint *ids) {
+    if (n < 0) {
+        _gl_set_error(GL_INVALID_VALUE);
+        return;
+    }
+    if (n > 0 && !ids) {
+        _gl_set_error(GL_INVALID_VALUE);
+        return;
+    }
+    if (n == 0) return;
+
+    allocate_query_names(n, ids);
+}
+
+void _gl_DeleteQueries(GLsizei n, const GLuint *ids) {
+    if (n < 0) {
+        _gl_set_error(GL_INVALID_VALUE);
+        return;
+    }
+    if (n > 0 && !ids) {
+        _gl_set_error(GL_INVALID_VALUE);
+        return;
+    }
+
+    for (GLsizei i = 0; i < n; ++i) {
+        GLuint id = ids[i];
+        gl_query_object_t *query;
+
+        if (id == 0 || id >= GL33_MAX_QUERY_OBJECTS) continue;
+
+        query = &g_query_objects[id];
+        if (query->in_use && query->active) {
+            GLuint *binding = active_query_binding(query->target);
+            finish_query_object(query);
+            if (binding && *binding == id) *binding = 0;
+        }
+        memset(query, 0, sizeof(*query));
+    }
+}
+
+GLboolean _gl_IsQuery(GLuint id) {
+    return query_object(id) ? GL_TRUE : GL_FALSE;
+}
+
+void _gl_BeginQuery(GLenum target, GLuint id) {
+    GLuint *binding;
+    gl_query_object_t *query;
+
+    if (!is_query_begin_target(target)) {
+        _gl_set_error(GL_INVALID_ENUM);
+        return;
+    }
+
+    binding = active_query_binding(target);
+    if (!binding || *binding != 0) {
+        _gl_set_error(GL_INVALID_OPERATION);
+        return;
+    }
+
+    query = create_or_get_query_object(id, target);
+    if (!query) return;
+    if (query->active) {
+        _gl_set_error(GL_INVALID_OPERATION);
+        return;
+    }
+
+    query->target = target;
+    query->active = true;
+    query->result = 0;
+    query->result_available = GL_FALSE;
+    query->begin_ticks = OSGetTime();
+    *binding = id;
+}
+
+void _gl_EndQuery(GLenum target) {
+    GLuint id;
+    GLuint *binding;
+    gl_query_object_t *query;
+
+    if (!is_query_begin_target(target)) {
+        _gl_set_error(GL_INVALID_ENUM);
+        return;
+    }
+
+    binding = active_query_binding(target);
+    if (!binding || *binding == 0) {
+        _gl_set_error(GL_INVALID_OPERATION);
+        return;
+    }
+
+    id = *binding;
+    query = query_object(id);
+    if (!query || !query->active) {
+        _gl_set_error(GL_INVALID_OPERATION);
+        return;
+    }
+
+    finish_query_object(query);
+    *binding = 0;
+}
+
+void _gl_GetQueryiv(GLenum target, GLenum pname, GLint *params) {
+    if (!params) return;
+    if (!is_query_info_target(target)) {
+        _gl_set_error(GL_INVALID_ENUM);
+        return;
+    }
+
+    if (pname == GL_CURRENT_QUERY) {
+        GLuint *binding;
+
+        if (!is_query_begin_target(target)) {
+            _gl_set_error(GL_INVALID_ENUM);
+            return;
+        }
+        binding = active_query_binding(target);
+        *params = binding ? (GLint)*binding : 0;
+        return;
+    }
+
+    if (pname == GL_QUERY_COUNTER_BITS) {
+        *params = (target == GL_TIME_ELAPSED || target == GL_TIMESTAMP) ? 64 : 32;
+        return;
+    }
+
+    _gl_set_error(GL_INVALID_ENUM);
+}
+
+static bool get_query_result(GLuint id, GLenum pname, GLuint64 *result) {
+    gl_query_object_t *query;
+
+    if (!result) return false;
+    if (!is_query_object_pname(pname)) {
+        _gl_set_error(GL_INVALID_ENUM);
+        return false;
+    }
+
+    query = query_object(id);
+    if (!query) {
+        _gl_set_error(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (query->active) {
+        _gl_set_error(GL_INVALID_OPERATION);
+        return false;
+    }
+
+    if (pname == GL_QUERY_RESULT_AVAILABLE) {
+        *result = query->result_available ? GL_TRUE : GL_FALSE;
+    } else {
+        *result = query->result;
+    }
+    return true;
+}
+
+void _gl_GetQueryObjectiv(GLuint id, GLenum pname, GLint *params) {
+    GLuint64 result = 0;
+
+    if (!params) return;
+    if (!get_query_result(id, pname, &result)) return;
+    *params = (GLint)result;
+}
+
+void _gl_GetQueryObjectuiv(GLuint id, GLenum pname, GLuint *params) {
+    GLuint64 result = 0;
+
+    if (!params) return;
+    if (!get_query_result(id, pname, &result)) return;
+    *params = (GLuint)result;
+}
+
+void _gl_BeginConditionalRender(GLuint id, GLenum mode) {
+    gl_query_object_t *query;
+
+    if (!is_conditional_render_mode(mode)) {
+        _gl_set_error(GL_INVALID_ENUM);
+        return;
+    }
+    if (!g_gl_context || g_gl_context->conditional_render_active) {
+        _gl_set_error(GL_INVALID_OPERATION);
+        return;
+    }
+
+    query = query_object(id);
+    if (!query || query->active) {
+        _gl_set_error(GL_INVALID_OPERATION);
+        return;
+    }
+
+    g_gl_context->conditional_render_query = id;
+    g_gl_context->conditional_render_mode = mode;
+    g_gl_context->conditional_render_active = GL_TRUE;
+}
+
+void _gl_EndConditionalRender(void) {
+    if (!g_gl_context || !g_gl_context->conditional_render_active) {
+        _gl_set_error(GL_INVALID_OPERATION);
+        return;
+    }
+
+    g_gl_context->conditional_render_query = 0;
+    g_gl_context->conditional_render_mode = 0;
+    g_gl_context->conditional_render_active = GL_FALSE;
+}
+
+void _gl_BeginQueryIndexed(GLenum target, GLuint index, GLuint id) {
+    if (index != 0) {
+        _gl_set_error(GL_INVALID_VALUE);
+        return;
+    }
+    _gl_BeginQuery(target, id);
+}
+
+void _gl_EndQueryIndexed(GLenum target, GLuint index) {
+    if (index != 0) {
+        _gl_set_error(GL_INVALID_VALUE);
+        return;
+    }
+    _gl_EndQuery(target);
+}
+
+void _gl_GetQueryIndexediv(GLenum target, GLuint index, GLenum pname, GLint *params) {
+    if (index != 0) {
+        _gl_set_error(GL_INVALID_VALUE);
+        return;
+    }
+    _gl_GetQueryiv(target, pname, params);
+}
+
+void _gl_GenTransformFeedbacks(GLsizei n, GLuint *ids) {
+    if (n < 0) {
+        _gl_set_error(GL_INVALID_VALUE);
+        return;
+    }
+    if (n > 0 && !ids) {
+        _gl_set_error(GL_INVALID_VALUE);
+        return;
+    }
+    if (ids) {
+        for (GLsizei i = 0; i < n; ++i) ids[i] = 0;
+    }
+    if (n > 0) _gl_set_error(GL_INVALID_OPERATION);
+}
+
+void _gl_DeleteTransformFeedbacks(GLsizei n, const GLuint *ids) {
+    if (n < 0) {
+        _gl_set_error(GL_INVALID_VALUE);
+        return;
+    }
+    if (n > 0 && !ids) {
+        _gl_set_error(GL_INVALID_VALUE);
+        return;
+    }
+}
+
 
 void glGetUniformIndices(GLuint program, GLsizei count, const GLchar *const *names, GLuint *indices) {
     GLint active_uniforms = 0;
@@ -1035,9 +1602,21 @@ void glProvokingVertex(GLenum mode) {
 }
 
 
-struct __GLsync { int dummy; };
-static struct __GLsync g_sync_sentinel = {1};
+static struct __GLsync *find_sync_object(GLsync sync) {
+    struct __GLsync *candidate = (struct __GLsync *)sync;
+
+    if (!candidate) return NULL;
+    for (struct __GLsync *it = g_sync_objects; it; it = it->next) {
+        if (it == candidate && it->magic == GL33_SYNC_MAGIC) {
+            return it;
+        }
+    }
+    return NULL;
+}
+
 GLsync glFenceSync(GLenum condition, GLbitfield flags) {
+    struct __GLsync *sync;
+
     if (condition != GL_SYNC_GPU_COMMANDS_COMPLETE) {
         _gl_set_error(GL_INVALID_ENUM);
         return NULL;
@@ -1046,18 +1625,51 @@ GLsync glFenceSync(GLenum condition, GLbitfield flags) {
         _gl_set_error(GL_INVALID_VALUE);
         return NULL;
     }
-    GX2DrawDone();
-    return &g_sync_sentinel;
-}
-GLboolean glIsSync(GLsync sync) { return (sync == &g_sync_sentinel) ? GL_TRUE : GL_FALSE; }
-void glDeleteSync(GLsync sync) {
-    if (sync != &g_sync_sentinel) {
-        _gl_set_error(GL_INVALID_VALUE);
+
+    sync = (struct __GLsync *)malloc(sizeof(*sync));
+    if (!sync) {
+        _gl_set_error(GL_OUT_OF_MEMORY);
+        return NULL;
     }
+
+    sync->magic = GL33_SYNC_MAGIC;
+    sync->condition = condition;
+    sync->flags = flags;
+    sync->signaled = GL_FALSE;
+    sync->next = g_sync_objects;
+    g_sync_objects = sync;
+
+    GX2Flush();
+    return (GLsync)sync;
 }
+
+GLboolean glIsSync(GLsync sync) {
+    return find_sync_object(sync) ? GL_TRUE : GL_FALSE;
+}
+
+void glDeleteSync(GLsync sync) {
+    struct __GLsync *target = (struct __GLsync *)sync;
+    struct __GLsync **link = &g_sync_objects;
+
+    while (*link && *link != target) {
+        link = &(*link)->next;
+    }
+
+    if (!*link || (*link)->magic != GL33_SYNC_MAGIC) {
+        _gl_set_error(GL_INVALID_VALUE);
+        return;
+    }
+
+    *link = target->next;
+    target->magic = 0;
+    free(target);
+}
+
 GLenum glClientWaitSync(GLsync sync, GLbitfield flags, GLuint64 timeout) {
-    (void)timeout;
-    if (sync != &g_sync_sentinel) {
+    struct __GLsync *object = find_sync_object(sync);
+    GLboolean was_signaled;
+
+    if (!object) {
         _gl_set_error(GL_INVALID_VALUE);
         return GL_WAIT_FAILED;
     }
@@ -1065,11 +1677,26 @@ GLenum glClientWaitSync(GLsync sync, GLbitfield flags, GLuint64 timeout) {
         _gl_set_error(GL_INVALID_VALUE);
         return GL_WAIT_FAILED;
     }
-    GX2DrawDone();
-    return GL_ALREADY_SIGNALED;
+
+    was_signaled = object->signaled;
+    if (!object->signaled) {
+        if ((flags & GL_SYNC_FLUSH_COMMANDS_BIT) != 0) {
+            GX2Flush();
+        }
+        if (timeout == 0) {
+            return GL_TIMEOUT_EXPIRED;
+        }
+        GX2DrawDone();
+        gl_context_signal_all_syncs();
+    }
+
+    return was_signaled ? GL_ALREADY_SIGNALED : GL_CONDITION_SATISFIED;
 }
+
 void glWaitSync(GLsync sync, GLbitfield flags, GLuint64 timeout) {
-    if (sync != &g_sync_sentinel) {
+    struct __GLsync *object = find_sync_object(sync);
+
+    if (!object) {
         _gl_set_error(GL_INVALID_VALUE);
         return;
     }
@@ -1081,16 +1708,25 @@ void glWaitSync(GLsync sync, GLbitfield flags, GLuint64 timeout) {
         _gl_set_error(GL_INVALID_VALUE);
         return;
     }
-    GX2DrawDone();
+    if (!object->signaled) {
+        GX2DrawDone();
+        gl_context_signal_all_syncs();
+    }
 }
+
 void glGetSynciv(GLsync sync, GLenum pname, GLsizei bufSize, GLsizei *length, GLint *values) {
+    struct __GLsync *object = find_sync_object(sync);
     GLint value;
 
-    if (sync != &g_sync_sentinel) {
+    if (!object) {
         _gl_set_error(GL_INVALID_VALUE);
         return;
     }
     if (bufSize < 0) {
+        _gl_set_error(GL_INVALID_VALUE);
+        return;
+    }
+    if (bufSize > 0 && !values) {
         _gl_set_error(GL_INVALID_VALUE);
         return;
     }
@@ -1103,10 +1739,10 @@ void glGetSynciv(GLsync sync, GLenum pname, GLsizei bufSize, GLsizei *length, GL
         value = GL_SYNC_GPU_COMMANDS_COMPLETE;
         break;
     case GL_SYNC_STATUS:
-        value = GL_SIGNALED;
+        value = object->signaled ? GL_SIGNALED : GL_UNSIGNALED;
         break;
     case GL_SYNC_FLAGS:
-        value = 0;
+        value = (GLint)object->flags;
         break;
     default:
         _gl_set_error(GL_INVALID_ENUM);
@@ -1167,39 +1803,43 @@ void glTexImage3DMultisample(GLenum target, GLsizei samples, GLenum internalform
 
 
 void glQueryCounter(GLuint id, GLenum target) {
+    gl_query_object_t *query;
+    OSTime now;
+
     if (target != GL_TIMESTAMP) {
         _gl_set_error(GL_INVALID_ENUM);
         return;
     }
-    if (id == 0) {
+
+    query = create_or_get_query_object(id, target);
+    if (!query) return;
+    if (query->active) {
         _gl_set_error(GL_INVALID_OPERATION);
         return;
     }
-    _gl_set_error(GL_INVALID_OPERATION);
+
+    GX2Flush();
+    now = OSGetTime();
+    query->target = GL_TIMESTAMP;
+    query->active = false;
+    query->result = ticks_to_query_nanoseconds(now);
+    query->result_available = GL_TRUE;
 }
+
 void glGetQueryObjecti64v(GLuint id, GLenum pname, GLint64 *params) {
-    if (params) *params = 0;
-    if (pname != GL_QUERY_RESULT && pname != GL_QUERY_RESULT_AVAILABLE) {
-        _gl_set_error(GL_INVALID_ENUM);
-        return;
-    }
-    if (id == 0) {
-        _gl_set_error(GL_INVALID_OPERATION);
-        return;
-    }
-    _gl_set_error(GL_INVALID_OPERATION);
+    GLuint64 result = 0;
+
+    if (!params) return;
+    if (!get_query_result(id, pname, &result)) return;
+    *params = (GLint64)result;
 }
+
 void glGetQueryObjectui64v(GLuint id, GLenum pname, GLuint64 *params) {
-    if (params) *params = 0;
-    if (pname != GL_QUERY_RESULT && pname != GL_QUERY_RESULT_AVAILABLE) {
-        _gl_set_error(GL_INVALID_ENUM);
-        return;
-    }
-    if (id == 0) {
-        _gl_set_error(GL_INVALID_OPERATION);
-        return;
-    }
-    _gl_set_error(GL_INVALID_OPERATION);
+    GLuint64 result = 0;
+
+    if (!params) return;
+    if (!get_query_result(id, pname, &result)) return;
+    *params = result;
 }
 
 
