@@ -71,7 +71,7 @@ static void gx2glGetAttachedObjectsARB(GLuint program, GLsizei maxCount, GLsizei
 
 }
 
-#include "gx2gl_proc_table.inc"
+#include <gx2gl_proc_table.inc>
 
 static const GX2GLProcEntry kGX2GLAliasProcTable[] = {
     {"GX2GL_BeginFrame", reinterpret_cast<GX2GL_Proc>(GX2GL_BeginFrame)},

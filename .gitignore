@@ -28,6 +28,7 @@ TargetDirectories.txt
 generated/
 desktop_gl_bindings.cpp
 desktop_gl_bindings.h
+src/core/gx2gl_proc_table.inc
 
 # Object, library and binary files
 *.o

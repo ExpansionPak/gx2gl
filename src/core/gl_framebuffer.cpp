@@ -66,6 +66,8 @@ extern "C" {
 
 #define MAX_FRAMEBUFFERS 128
 #define MAX_RENDERBUFFERS 256
+#define GX2GL_MAX_RENDERBUFFER_SIZE 8192
+#define GX2GL_MAX_RENDERBUFFER_SAMPLES 1
 
 typedef enum {
     GL_ATTACHMENT_KIND_NONE = 0,
@@ -76,6 +78,8 @@ typedef enum {
 typedef struct {
     GLAttachmentKind kind;
     GLuint object;
+    GLenum textarget;
+    GLint level;
 } GLAttachmentRef;
 
 typedef struct {
@@ -85,17 +89,20 @@ typedef struct {
 } GLTextureColorTarget;
 
 typedef struct {
+    bool reserved;
     bool in_use;
     bool is_depth;
     GLint internal_format;
     GLsizei width;
     GLsizei height;
+    GLsizei samples;
     GX2Surface surface;
     GX2ColorBuffer color_buffer;
     GX2DepthBuffer depth_buffer;
 } GLRenderbuffer;
 
 typedef struct {
+    bool reserved;
     bool in_use;
     GLAttachmentRef color_attachments[8];
     GLenum draw_buffers[8];
@@ -106,6 +113,7 @@ typedef struct {
     GX2ColorBuffer cb[8];
     GLTextureColorTarget texture_targets[8];
     bool color_needs_resolve[8];
+    bool color_buffer_owns_aux[8];
     GX2DepthBuffer db;
     bool dirty;
 } GLFramebuffer;
@@ -118,6 +126,7 @@ static bool attachment_ref_present(const GLAttachmentRef *attachment);
 static GLRenderbuffer *get_renderbuffer(GLuint id);
 static GX2ColorBuffer *get_default_color_buffer(void);
 static void clear_attachment_ref(GLAttachmentRef *attachment);
+static void free_framebuffer_texture_target(GLFramebuffer *fb, uint32_t index);
 
 static bool is_query_target(GLenum target) {
     return target == GL_SAMPLES_PASSED ||
@@ -141,40 +150,85 @@ static bool is_conditional_render_mode(GLenum mode) {
            mode == GL_QUERY_BY_REGION_NO_WAIT;
 }
 
-static void detach_renderbuffer_from_framebuffers(GLuint renderbuffer) {
+static void detach_renderbuffer_from_framebuffer(GLuint framebuffer,
+                                                GLuint renderbuffer) {
+    GLFramebuffer *fb;
+    bool detached = false;
+
+    if (renderbuffer == 0 || framebuffer == 0 ||
+        framebuffer >= MAX_FRAMEBUFFERS || !g_framebuffers[framebuffer].in_use) {
+        return;
+    }
+
+    fb = &g_framebuffers[framebuffer];
+
+    for (uint32_t j = 0; j < 8; ++j) {
+        if (fb->color_attachments[j].kind == GL_ATTACHMENT_KIND_RENDERBUFFER &&
+            fb->color_attachments[j].object == renderbuffer) {
+            clear_attachment_ref(&fb->color_attachments[j]);
+            fb->color_needs_resolve[j] = false;
+            free_framebuffer_texture_target(fb, j);
+            detached = true;
+        }
+    }
+
+    if (fb->depth_attachment.kind == GL_ATTACHMENT_KIND_RENDERBUFFER &&
+        fb->depth_attachment.object == renderbuffer) {
+        clear_attachment_ref(&fb->depth_attachment);
+        memset(&fb->db, 0, sizeof(fb->db));
+        detached = true;
+    }
+
+    if (fb->stencil_attachment.kind == GL_ATTACHMENT_KIND_RENDERBUFFER &&
+        fb->stencil_attachment.object == renderbuffer) {
+        clear_attachment_ref(&fb->stencil_attachment);
+        memset(&fb->db, 0, sizeof(fb->db));
+        detached = true;
+    }
+
+    if (detached) {
+        fb->dirty = true;
+        if (g_gl_context &&
+            (g_gl_context->bound_framebuffer == framebuffer ||
+             g_gl_context->bound_read_framebuffer == framebuffer)) {
+            g_gl_context->dirty_flags |= GL_DIRTY_FRAMEBUFFER;
+        }
+    }
+}
+
+static void detach_renderbuffer_from_current_framebuffers(GLuint renderbuffer) {
+    if (!g_gl_context || renderbuffer == 0) return;
+
+    detach_renderbuffer_from_framebuffer(g_gl_context->bound_framebuffer,
+                                         renderbuffer);
+    if (g_gl_context->bound_read_framebuffer != g_gl_context->bound_framebuffer) {
+        detach_renderbuffer_from_framebuffer(g_gl_context->bound_read_framebuffer,
+                                             renderbuffer);
+    }
+}
+
+static void mark_framebuffers_for_renderbuffer(GLuint renderbuffer) {
     if (renderbuffer == 0) return;
 
     for (uint32_t i = 0; i < MAX_FRAMEBUFFERS; ++i) {
         GLFramebuffer *fb = &g_framebuffers[i];
-        bool detached = false;
+        bool referenced = false;
 
         if (!fb->in_use) continue;
 
         for (uint32_t j = 0; j < 8; ++j) {
-            if (fb->color_attachments[j].kind == GL_ATTACHMENT_KIND_RENDERBUFFER &&
-                fb->color_attachments[j].object == renderbuffer) {
-                clear_attachment_ref(&fb->color_attachments[j]);
-                fb->color_needs_resolve[j] = false;
-                memset(&fb->cb[j], 0, sizeof(fb->cb[j]));
-                detached = true;
-            }
+            referenced = referenced ||
+                         (fb->color_attachments[j].kind == GL_ATTACHMENT_KIND_RENDERBUFFER &&
+                          fb->color_attachments[j].object == renderbuffer);
         }
 
-        if (fb->depth_attachment.kind == GL_ATTACHMENT_KIND_RENDERBUFFER &&
-            fb->depth_attachment.object == renderbuffer) {
-            clear_attachment_ref(&fb->depth_attachment);
-            memset(&fb->db, 0, sizeof(fb->db));
-            detached = true;
-        }
+        referenced = referenced ||
+                     (fb->depth_attachment.kind == GL_ATTACHMENT_KIND_RENDERBUFFER &&
+                      fb->depth_attachment.object == renderbuffer) ||
+                     (fb->stencil_attachment.kind == GL_ATTACHMENT_KIND_RENDERBUFFER &&
+                      fb->stencil_attachment.object == renderbuffer);
 
-        if (fb->stencil_attachment.kind == GL_ATTACHMENT_KIND_RENDERBUFFER &&
-            fb->stencil_attachment.object == renderbuffer) {
-            clear_attachment_ref(&fb->stencil_attachment);
-            memset(&fb->db, 0, sizeof(fb->db));
-            detached = true;
-        }
-
-        if (detached) {
+        if (referenced) {
             fb->dirty = true;
             if (g_gl_context &&
                 (g_gl_context->bound_framebuffer == i ||
@@ -193,6 +247,20 @@ static bool get_color_attachment_index(GLenum attachment, uint32_t *index) {
         *index = (uint32_t)(attachment - GL_COLOR_ATTACHMENT0);
     }
     return true;
+}
+
+static bool is_color_attachment_name(GLenum attachment, uint32_t *index) {
+    if (attachment < GL_COLOR_ATTACHMENT0) {
+        return false;
+    }
+    if (index) {
+        *index = (uint32_t)(attachment - GL_COLOR_ATTACHMENT0);
+    }
+    return true;
+}
+
+static bool is_default_framebuffer_color_name(GLenum buffer) {
+    return buffer == GL_FRONT || buffer == GL_BACK || buffer == GL_FRONT_AND_BACK;
 }
 
 static GX2RResourceFlags build_framebuffer_surface_flags(GLint internal_format,
@@ -250,7 +318,10 @@ static void free_framebuffer_texture_target(GLFramebuffer *fb, uint32_t index) {
     if (!fb || index >= 8) return;
     free_texture_color_target(&fb->texture_targets[index]);
     fb->color_needs_resolve[index] = false;
-    free_color_buffer_aux(&fb->cb[index]);
+    if (fb->color_buffer_owns_aux[index]) {
+        free_color_buffer_aux(&fb->cb[index]);
+    }
+    fb->color_buffer_owns_aux[index] = false;
     memset(&fb->cb[index], 0, sizeof(fb->cb[index]));
 }
 
@@ -450,10 +521,73 @@ static void clear_attachment_ref(GLAttachmentRef *attachment) {
     if (!attachment) return;
     attachment->kind = GL_ATTACHMENT_KIND_NONE;
     attachment->object = 0;
+    attachment->textarget = 0;
+    attachment->level = 0;
 }
 
 static bool attachment_ref_present(const GLAttachmentRef *attachment) {
     return attachment && attachment->kind != GL_ATTACHMENT_KIND_NONE && attachment->object != 0;
+}
+
+static void set_texture_attachment_ref(GLAttachmentRef *attachment,
+                                       GLuint texture,
+                                       GLenum textarget,
+                                       GLint level) {
+    if (!attachment) return;
+    attachment->kind = GL_ATTACHMENT_KIND_TEXTURE;
+    attachment->object = texture;
+    attachment->textarget = textarget;
+    attachment->level = level;
+}
+
+static void set_renderbuffer_attachment_ref(GLAttachmentRef *attachment,
+                                           GLuint renderbuffer) {
+    if (!attachment) return;
+    attachment->kind = GL_ATTACHMENT_KIND_RENDERBUFFER;
+    attachment->object = renderbuffer;
+    attachment->textarget = 0;
+    attachment->level = 0;
+}
+
+static void init_framebuffer_object(GLFramebuffer *fb, bool is_default) {
+    if (!fb) return;
+    memset(fb, 0, sizeof(*fb));
+    fb->in_use = true;
+    fb->reserved = false;
+    fb->dirty = true;
+    init_draw_buffer_defaults(fb, is_default);
+    init_read_buffer_default(fb, is_default);
+}
+
+static void reserve_framebuffer_name(GLFramebuffer *fb) {
+    if (!fb) return;
+    memset(fb, 0, sizeof(*fb));
+    fb->reserved = true;
+}
+
+static bool framebuffer_name_is_valid(GLuint id) {
+    return id == 0 ||
+           (id < MAX_FRAMEBUFFERS &&
+            (g_framebuffers[id].reserved || g_framebuffers[id].in_use));
+}
+
+static void init_renderbuffer_object(GLRenderbuffer *rb) {
+    if (!rb) return;
+    memset(rb, 0, sizeof(*rb));
+    rb->in_use = true;
+    rb->reserved = false;
+}
+
+static void reserve_renderbuffer_name(GLRenderbuffer *rb) {
+    if (!rb) return;
+    memset(rb, 0, sizeof(*rb));
+    rb->reserved = true;
+}
+
+static bool renderbuffer_name_is_valid(GLuint id) {
+    return id == 0 ||
+           (id < MAX_RENDERBUFFERS &&
+            (g_renderbuffers[id].reserved || g_renderbuffers[id].in_use));
 }
 
 static GLAttachmentRef *get_attachment_ref(GLFramebuffer *fb, GLenum attachment) {
@@ -478,6 +612,99 @@ static bool is_depth_internal_format(GLint internal_format) {
 
 static bool is_stencil_internal_format(GLint internal_format) {
     return internal_format == GL_DEPTH_STENCIL || internal_format == GL_DEPTH24_STENCIL8;
+}
+
+static GLint renderbuffer_component_bits(GLint internal_format, GLenum component) {
+    switch (internal_format) {
+    case 1:
+    case GL_RED:
+    case GL_R8:
+        return component == GL_RENDERBUFFER_RED_SIZE ? 8 : 0;
+    case 2:
+    case GL_RG:
+    case GL_RG8:
+        return (component == GL_RENDERBUFFER_RED_SIZE ||
+                component == GL_RENDERBUFFER_GREEN_SIZE) ? 8 : 0;
+    case 3:
+    case GL_RGB:
+    case GL_RGB8:
+        return (component == GL_RENDERBUFFER_RED_SIZE ||
+                component == GL_RENDERBUFFER_GREEN_SIZE ||
+                component == GL_RENDERBUFFER_BLUE_SIZE) ? 8 : 0;
+    case 4:
+    case GL_RGBA:
+    case GL_RGBA8:
+        return (component == GL_RENDERBUFFER_RED_SIZE ||
+                component == GL_RENDERBUFFER_GREEN_SIZE ||
+                component == GL_RENDERBUFFER_BLUE_SIZE ||
+                component == GL_RENDERBUFFER_ALPHA_SIZE) ? 8 : 0;
+    case GL_RGBA16F:
+        return (component == GL_RENDERBUFFER_RED_SIZE ||
+                component == GL_RENDERBUFFER_GREEN_SIZE ||
+                component == GL_RENDERBUFFER_BLUE_SIZE ||
+                component == GL_RENDERBUFFER_ALPHA_SIZE) ? 16 : 0;
+    case GL_RGBA32F:
+        return (component == GL_RENDERBUFFER_RED_SIZE ||
+                component == GL_RENDERBUFFER_GREEN_SIZE ||
+                component == GL_RENDERBUFFER_BLUE_SIZE ||
+                component == GL_RENDERBUFFER_ALPHA_SIZE) ? 32 : 0;
+    case GL_DEPTH_COMPONENT:
+    case GL_DEPTH_COMPONENT32F:
+        return component == GL_RENDERBUFFER_DEPTH_SIZE ? 32 : 0;
+    case GL_DEPTH_STENCIL:
+    case GL_DEPTH24_STENCIL8:
+        if (component == GL_RENDERBUFFER_DEPTH_SIZE) return 24;
+        if (component == GL_RENDERBUFFER_STENCIL_SIZE) return 8;
+        return 0;
+    default:
+        return 0;
+    }
+}
+
+static GLint attachment_component_bits(GLint internal_format, GLenum pname) {
+    switch (pname) {
+    case GL_FRAMEBUFFER_ATTACHMENT_RED_SIZE:
+        return renderbuffer_component_bits(internal_format, GL_RENDERBUFFER_RED_SIZE);
+    case GL_FRAMEBUFFER_ATTACHMENT_GREEN_SIZE:
+        return renderbuffer_component_bits(internal_format, GL_RENDERBUFFER_GREEN_SIZE);
+    case GL_FRAMEBUFFER_ATTACHMENT_BLUE_SIZE:
+        return renderbuffer_component_bits(internal_format, GL_RENDERBUFFER_BLUE_SIZE);
+    case GL_FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE:
+        return renderbuffer_component_bits(internal_format, GL_RENDERBUFFER_ALPHA_SIZE);
+    case GL_FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE:
+        return renderbuffer_component_bits(internal_format, GL_RENDERBUFFER_DEPTH_SIZE);
+    case GL_FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE:
+        return renderbuffer_component_bits(internal_format, GL_RENDERBUFFER_STENCIL_SIZE);
+    default:
+        return 0;
+    }
+}
+
+static GLenum attachment_component_type(GLint internal_format) {
+    switch (internal_format) {
+    case GL_RGBA16F:
+    case GL_RGBA32F:
+    case GL_DEPTH_COMPONENT:
+    case GL_DEPTH_COMPONENT32F:
+        return GL_FLOAT;
+    case 1:
+    case 2:
+    case 3:
+    case 4:
+    case GL_RED:
+    case GL_RG:
+    case GL_RGB:
+    case GL_RGBA:
+    case GL_R8:
+    case GL_RG8:
+    case GL_RGB8:
+    case GL_RGBA8:
+    case GL_DEPTH_STENCIL:
+    case GL_DEPTH24_STENCIL8:
+        return GL_UNSIGNED_NORMALIZED;
+    default:
+        return GL_NONE;
+    }
 }
 
 static GX2LogicOp map_framebuffer_logic_op(GLenum op) {
@@ -582,27 +809,40 @@ static void init_depth_buffer_from_surface(GX2DepthBuffer *db, const GX2Surface 
     GX2InitDepthBufferRegs(db);
 }
 
-static bool get_attachment_surface_info(const GLAttachmentRef *attachment,
-                                        GLsizei *width,
-                                        GLsizei *height,
-                                        bool *is_depth) {
-    if (!attachment_ref_present(attachment) || !width || !height || !is_depth) return false;
+typedef struct {
+    GLsizei width;
+    GLsizei height;
+    GLsizei samples;
+    GLint internal_format;
+    bool depth_renderable;
+    bool stencil_renderable;
+} GLAttachmentImageInfo;
+
+static bool get_attachment_image_info(const GLAttachmentRef *attachment,
+                                      GLAttachmentImageInfo *info) {
+    if (!attachment_ref_present(attachment) || !info) return false;
 
     if (attachment->kind == GL_ATTACHMENT_KIND_TEXTURE) {
         GX2Texture *texture = gl_get_gx2_texture(attachment->object);
         if (!texture || !texture->surface.image) return false;
-        *width = (GLsizei)texture->surface.width;
-        *height = (GLsizei)texture->surface.height;
-        *is_depth = is_depth_internal_format(gl_get_texture_internal_format(attachment->object));
+        info->width = (GLsizei)texture->surface.width;
+        info->height = (GLsizei)texture->surface.height;
+        info->samples = 0;
+        info->internal_format = gl_get_texture_internal_format(attachment->object);
+        info->depth_renderable = is_depth_internal_format(info->internal_format);
+        info->stencil_renderable = is_stencil_internal_format(info->internal_format);
         return true;
     }
 
     if (attachment->kind == GL_ATTACHMENT_KIND_RENDERBUFFER) {
         GLRenderbuffer *renderbuffer = get_renderbuffer(attachment->object);
-        if (!renderbuffer || !renderbuffer->surface.image) return false;
-        *width = renderbuffer->width;
-        *height = renderbuffer->height;
-        *is_depth = renderbuffer->is_depth;
+        if (!renderbuffer) return false;
+        info->width = renderbuffer->width;
+        info->height = renderbuffer->height;
+        info->samples = renderbuffer->samples;
+        info->internal_format = renderbuffer->internal_format;
+        info->depth_renderable = is_depth_internal_format(info->internal_format);
+        info->stencil_renderable = is_stencil_internal_format(info->internal_format);
         return true;
     }
 
@@ -697,11 +937,16 @@ static GX2ColorBuffer *get_read_color_buffer(void) {
                 if (fb->color_attachments[i].kind == GL_ATTACHMENT_KIND_TEXTURE) {
                     GX2Texture *t = gl_get_gx2_texture(fb->color_attachments[i].object);
                     free_framebuffer_texture_target(fb, i);
-                    if (t) init_color_buffer_from_surface(&fb->cb[i], &t->surface);
+                    if (t && init_color_buffer_from_surface(&fb->cb[i], &t->surface)) {
+                        fb->color_buffer_owns_aux[i] = true;
+                    }
                 } else {
                     free_framebuffer_texture_target(fb, i);
                     GLRenderbuffer *rb = get_renderbuffer(fb->color_attachments[i].object);
-                    if (rb && !rb->is_depth) fb->cb[i] = rb->color_buffer;
+                    if (rb && !rb->is_depth) {
+                        fb->cb[i] = rb->color_buffer;
+                        fb->color_buffer_owns_aux[i] = false;
+                    }
                 }
             }
             memset(&fb->db, 0, sizeof(fb->db));
@@ -790,10 +1035,8 @@ static GX2DepthBuffer *get_default_depth_buffer(void) {
 void gl_framebuffer_init(void) {
     memset(g_framebuffers, 0, sizeof(g_framebuffers));
     memset(g_renderbuffers, 0, sizeof(g_renderbuffers));
-    g_framebuffers[0].in_use = true;
     g_default_framebuffer_uses_drc = false;
-    init_draw_buffer_defaults(&g_framebuffers[0], true);
-    init_read_buffer_default(&g_framebuffers[0], true);
+    init_framebuffer_object(&g_framebuffers[0], true);
 }
 
 #ifdef __cplusplus
@@ -807,55 +1050,74 @@ void gl_framebuffer_set_default_target_drc(GLboolean use_drc) {
 }
 
 void _gl_GenFramebuffers(GLsizei n, GLuint *fbs) {
-    if (!g_gl_context || n < 0) { _gl_set_error(GL_INVALID_VALUE); return; }
+    if (!g_gl_context) return;
+    if (n < 0) { _gl_set_error(GL_INVALID_VALUE); return; }
+    if (n > 0 && !fbs) { _gl_set_error(GL_INVALID_VALUE); return; }
     int count = 0;
     for (int i = 1; i < MAX_FRAMEBUFFERS && count < n; i++) {
-        if (!g_framebuffers[i].in_use) {
-            memset(&g_framebuffers[i], 0, sizeof(GLFramebuffer));
-            g_framebuffers[i].in_use = true;
-            g_framebuffers[i].dirty = true;
-            init_draw_buffer_defaults(&g_framebuffers[i], false);
-            init_read_buffer_default(&g_framebuffers[i], false);
+        if (!g_framebuffers[i].reserved && !g_framebuffers[i].in_use) {
+            reserve_framebuffer_name(&g_framebuffers[i]);
             fbs[count++] = i;
         }
+    }
+    if (count < n) {
+        for (int i = count; i < n; ++i) fbs[i] = 0;
+        _gl_set_error(GL_OUT_OF_MEMORY);
     }
 }
 
 void _gl_GenRenderbuffers(GLsizei n, GLuint *rbs) {
-    if (!g_gl_context || n < 0) { _gl_set_error(GL_INVALID_VALUE); return; }
+    if (!g_gl_context) return;
+    if (n < 0) { _gl_set_error(GL_INVALID_VALUE); return; }
+    if (n > 0 && !rbs) { _gl_set_error(GL_INVALID_VALUE); return; }
     int count = 0;
     for (int i = 1; i < MAX_RENDERBUFFERS && count < n; i++) {
-        if (!g_renderbuffers[i].in_use) {
-            memset(&g_renderbuffers[i], 0, sizeof(GLRenderbuffer));
-            g_renderbuffers[i].in_use = true;
+        if (!g_renderbuffers[i].reserved && !g_renderbuffers[i].in_use) {
+            reserve_renderbuffer_name(&g_renderbuffers[i]);
             rbs[count++] = i;
         }
+    }
+    if (count < n) {
+        for (int i = count; i < n; ++i) rbs[i] = 0;
+        _gl_set_error(GL_OUT_OF_MEMORY);
     }
 }
 
 GLboolean _gl_IsRenderbuffer(GLuint rb) { return get_renderbuffer(rb) ? GL_TRUE : GL_FALSE; }
 void _gl_DeleteRenderbuffers(GLsizei n, const GLuint *rbs) {
-    if (!g_gl_context || n < 0) { _gl_set_error(GL_INVALID_VALUE); return; }
+    if (!g_gl_context) return;
+    if (n < 0) { _gl_set_error(GL_INVALID_VALUE); return; }
+    if (n > 0 && !rbs) { _gl_set_error(GL_INVALID_VALUE); return; }
     for (int i = 0; i < n; i++) {
         GLuint id = rbs[i];
-        if (id > 0 && id < MAX_RENDERBUFFERS && g_renderbuffers[id].in_use) {
+        if (id > 0 && id < MAX_RENDERBUFFERS &&
+            (g_renderbuffers[id].reserved || g_renderbuffers[id].in_use)) {
             if (g_gl_context->bound_renderbuffer == id) {
                 g_gl_context->bound_renderbuffer = 0;
             }
-            detach_renderbuffer_from_framebuffers(id);
-            free_color_buffer_aux(&g_renderbuffers[id].color_buffer);
-            free_surface_storage(&g_renderbuffers[id].surface);
+            if (g_renderbuffers[id].in_use) {
+                detach_renderbuffer_from_current_framebuffers(id);
+                free_color_buffer_aux(&g_renderbuffers[id].color_buffer);
+                free_surface_storage(&g_renderbuffers[id].surface);
+            }
             memset(&g_renderbuffers[id], 0, sizeof(GLRenderbuffer));
         }
     }
 }
 
-GLboolean _gl_IsFramebuffer(GLuint fb) { return (fb < MAX_FRAMEBUFFERS && g_framebuffers[fb].in_use) ? GL_TRUE : GL_FALSE; }
+GLboolean _gl_IsFramebuffer(GLuint fb) {
+    return (fb > 0 && fb < MAX_FRAMEBUFFERS && g_framebuffers[fb].in_use)
+               ? GL_TRUE
+               : GL_FALSE;
+}
 void _gl_DeleteFramebuffers(GLsizei n, const GLuint *fbs) {
-    if (!g_gl_context || n < 0) { _gl_set_error(GL_INVALID_VALUE); return; }
+    if (!g_gl_context) return;
+    if (n < 0) { _gl_set_error(GL_INVALID_VALUE); return; }
+    if (n > 0 && !fbs) { _gl_set_error(GL_INVALID_VALUE); return; }
     for (int i = 0; i < n; i++) {
         GLuint id = fbs[i];
-        if (id > 0 && id < MAX_FRAMEBUFFERS && g_framebuffers[id].in_use) {
+        if (id > 0 && id < MAX_FRAMEBUFFERS &&
+            (g_framebuffers[id].reserved || g_framebuffers[id].in_use)) {
             if (g_gl_context->bound_framebuffer == id) {
                 g_gl_context->bound_framebuffer = 0;
                 g_gl_context->dirty_flags |= GL_DIRTY_FRAMEBUFFER;
@@ -863,8 +1125,13 @@ void _gl_DeleteFramebuffers(GLsizei n, const GLuint *fbs) {
             if (g_gl_context->bound_read_framebuffer == id) {
                 g_gl_context->bound_read_framebuffer = 0;
             }
-            for (uint32_t j = 0; j < 8; ++j) free_framebuffer_texture_target(&g_framebuffers[id], j);
-            g_framebuffers[id].in_use = false;
+            if (g_framebuffers[id].in_use) {
+                resolve_framebuffer_texture_targets(&g_framebuffers[id]);
+                for (uint32_t j = 0; j < 8; ++j) {
+                    free_framebuffer_texture_target(&g_framebuffers[id], j);
+                }
+            }
+            memset(&g_framebuffers[id], 0, sizeof(GLFramebuffer));
         }
     }
 }
@@ -873,7 +1140,10 @@ void _gl_BindFramebuffer(GLenum target, GLuint fb) {
     GLuint previous_draw_fb;
     if (!g_gl_context) return;
     if (!is_framebuffer_target(target)) { _gl_set_error(GL_INVALID_ENUM); return; }
-    if (fb >= MAX_FRAMEBUFFERS || (fb > 0 && !g_framebuffers[fb].in_use)) { _gl_set_error(GL_INVALID_OPERATION); return; }
+    if (!framebuffer_name_is_valid(fb)) { _gl_set_error(GL_INVALID_OPERATION); return; }
+    if (fb > 0 && !g_framebuffers[fb].in_use) {
+        init_framebuffer_object(&g_framebuffers[fb], false);
+    }
     previous_draw_fb = g_gl_context->bound_framebuffer;
     if ((target == GL_FRAMEBUFFER || target == GL_DRAW_FRAMEBUFFER) && previous_draw_fb != fb && previous_draw_fb < MAX_FRAMEBUFFERS)
         resolve_framebuffer_texture_targets(&g_framebuffers[previous_draw_fb]);
@@ -884,14 +1154,33 @@ void _gl_BindFramebuffer(GLenum target, GLuint fb) {
 void _gl_BindRenderbuffer(GLenum target, GLuint rb) {
     if (!g_gl_context) return;
     if (target != GL_RENDERBUFFER) { _gl_set_error(GL_INVALID_ENUM); return; }
-    if (rb >= MAX_RENDERBUFFERS || (rb > 0 && !g_renderbuffers[rb].in_use)) { _gl_set_error(GL_INVALID_OPERATION); return; }
+    if (!renderbuffer_name_is_valid(rb)) { _gl_set_error(GL_INVALID_OPERATION); return; }
+    if (rb > 0 && !g_renderbuffers[rb].in_use) {
+        init_renderbuffer_object(&g_renderbuffers[rb]);
+    }
     g_gl_context->bound_renderbuffer = rb;
 }
 
 void _gl_FramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level) {
+    GLenum texture_target;
+
     if (!g_gl_context) return;
     if (!is_framebuffer_target(target) ||
         (textarget != GL_TEXTURE_2D && !is_cube_map_face_target(textarget))) { _gl_set_error(GL_INVALID_ENUM); return; }
+    if (level < 0) { _gl_set_error(GL_INVALID_VALUE); return; }
+    if (texture != 0) {
+        if (_gl_IsTexture(texture) != GL_TRUE) { _gl_set_error(GL_INVALID_OPERATION); return; }
+        texture_target = gl_get_texture_target(texture);
+        if ((textarget == GL_TEXTURE_2D && texture_target != GL_TEXTURE_2D) ||
+            (is_cube_map_face_target(textarget) && texture_target != GL_TEXTURE_CUBE_MAP)) {
+            _gl_set_error(GL_INVALID_OPERATION);
+            return;
+        }
+        if (level != 0) {
+            _gl_set_error(GL_INVALID_VALUE);
+            return;
+        }
+    }
     GLuint fbo = get_bound_framebuffer_for_target(target);
     if (fbo == 0) { _gl_set_error(GL_INVALID_OPERATION); return; }
     if (attachment == GL_DEPTH_STENCIL_ATTACHMENT) {
@@ -899,10 +1188,10 @@ void _gl_FramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget
             clear_attachment_ref(&g_framebuffers[fbo].depth_attachment);
             clear_attachment_ref(&g_framebuffers[fbo].stencil_attachment);
         } else {
-            g_framebuffers[fbo].depth_attachment.kind = GL_ATTACHMENT_KIND_TEXTURE;
-            g_framebuffers[fbo].depth_attachment.object = texture;
-            g_framebuffers[fbo].stencil_attachment.kind = GL_ATTACHMENT_KIND_TEXTURE;
-            g_framebuffers[fbo].stencil_attachment.object = texture;
+            set_texture_attachment_ref(&g_framebuffers[fbo].depth_attachment,
+                                       texture, textarget, level);
+            set_texture_attachment_ref(&g_framebuffers[fbo].stencil_attachment,
+                                       texture, textarget, level);
         }
         g_framebuffers[fbo].dirty = true;
         g_gl_context->dirty_flags |= GL_DIRTY_FRAMEBUFFER;
@@ -911,7 +1200,7 @@ void _gl_FramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget
     GLAttachmentRef *ref = get_attachment_ref(&g_framebuffers[fbo], attachment);
     if (!ref) { _gl_set_error(GL_INVALID_ENUM); return; }
     if (texture == 0) clear_attachment_ref(ref);
-    else { ref->kind = GL_ATTACHMENT_KIND_TEXTURE; ref->object = texture; }
+    else set_texture_attachment_ref(ref, texture, textarget, level);
     if (attachment >= GL_COLOR_ATTACHMENT0 && attachment <= GL_COLOR_ATTACHMENT7)
         free_framebuffer_texture_target(&g_framebuffers[fbo], attachment - GL_COLOR_ATTACHMENT0);
     g_framebuffers[fbo].dirty = true;
@@ -921,6 +1210,7 @@ void _gl_FramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget
 void _gl_FramebufferRenderbuffer(GLenum target, GLenum attachment, GLenum rbtarget, GLuint rb) {
     if (!g_gl_context) return;
     if (!is_framebuffer_target(target) || rbtarget != GL_RENDERBUFFER) { _gl_set_error(GL_INVALID_ENUM); return; }
+    if (rb != 0 && _gl_IsRenderbuffer(rb) != GL_TRUE) { _gl_set_error(GL_INVALID_OPERATION); return; }
     GLuint fbo = get_bound_framebuffer_for_target(target);
     if (fbo == 0) { _gl_set_error(GL_INVALID_OPERATION); return; }
     if (attachment == GL_DEPTH_STENCIL_ATTACHMENT) {
@@ -928,10 +1218,8 @@ void _gl_FramebufferRenderbuffer(GLenum target, GLenum attachment, GLenum rbtarg
             clear_attachment_ref(&g_framebuffers[fbo].depth_attachment);
             clear_attachment_ref(&g_framebuffers[fbo].stencil_attachment);
         } else {
-            g_framebuffers[fbo].depth_attachment.kind = GL_ATTACHMENT_KIND_RENDERBUFFER;
-            g_framebuffers[fbo].depth_attachment.object = rb;
-            g_framebuffers[fbo].stencil_attachment.kind = GL_ATTACHMENT_KIND_RENDERBUFFER;
-            g_framebuffers[fbo].stencil_attachment.object = rb;
+            set_renderbuffer_attachment_ref(&g_framebuffers[fbo].depth_attachment, rb);
+            set_renderbuffer_attachment_ref(&g_framebuffers[fbo].stencil_attachment, rb);
         }
         g_framebuffers[fbo].dirty = true;
         g_gl_context->dirty_flags |= GL_DIRTY_FRAMEBUFFER;
@@ -940,45 +1228,93 @@ void _gl_FramebufferRenderbuffer(GLenum target, GLenum attachment, GLenum rbtarg
     GLAttachmentRef *ref = get_attachment_ref(&g_framebuffers[fbo], attachment);
     if (!ref) { _gl_set_error(GL_INVALID_ENUM); return; }
     if (rb == 0) clear_attachment_ref(ref);
-    else { ref->kind = GL_ATTACHMENT_KIND_RENDERBUFFER; ref->object = rb; }
+    else set_renderbuffer_attachment_ref(ref, rb);
     if (attachment >= GL_COLOR_ATTACHMENT0 && attachment <= GL_COLOR_ATTACHMENT7)
         free_framebuffer_texture_target(&g_framebuffers[fbo], attachment - GL_COLOR_ATTACHMENT0);
     g_framebuffers[fbo].dirty = true;
     g_gl_context->dirty_flags |= GL_DIRTY_FRAMEBUFFER;
 }
 
-void _gl_RenderbufferStorage(GLenum target, GLenum internalformat, GLsizei width, GLsizei height) {
+static void renderbuffer_storage(GLenum target,
+                                 GLsizei samples,
+                                 GLenum internalformat,
+                                 GLsizei width,
+                                 GLsizei height) {
+    GX2Surface new_surface;
+    GX2ColorBuffer new_color_buffer;
+    GX2DepthBuffer new_depth_buffer;
+
     if (!g_gl_context || target != GL_RENDERBUFFER) { _gl_set_error(GL_INVALID_ENUM); return; }
+    if (samples < 0 || samples > GX2GL_MAX_RENDERBUFFER_SAMPLES ||
+        width < 0 || height < 0 ||
+        width > GX2GL_MAX_RENDERBUFFER_SIZE ||
+        height > GX2GL_MAX_RENDERBUFFER_SIZE) {
+        _gl_set_error(GL_INVALID_VALUE);
+        return;
+    }
     GLuint id = g_gl_context->bound_renderbuffer;
     if (id == 0) { _gl_set_error(GL_INVALID_OPERATION); return; }
     GLRenderbuffer *rb = &g_renderbuffers[id];
     GX2SurfaceFormat fmt; GX2SurfaceUse use; bool is_depth;
     GX2RResourceFlags surface_flags;
     if (!get_renderbuffer_format_info(internalformat, &fmt, &use, &is_depth)) { _gl_set_error(GL_INVALID_ENUM); return; }
+
+    memset(&new_surface, 0, sizeof(new_surface));
+    memset(&new_color_buffer, 0, sizeof(new_color_buffer));
+    memset(&new_depth_buffer, 0, sizeof(new_depth_buffer));
+
+    if (width == 0 || height == 0) {
+        free_color_buffer_aux(&rb->color_buffer);
+        free_surface_storage(&rb->surface);
+        memset(&rb->color_buffer, 0, sizeof(rb->color_buffer));
+        memset(&rb->depth_buffer, 0, sizeof(rb->depth_buffer));
+        rb->width = width;
+        rb->height = height;
+        rb->internal_format = internalformat;
+        rb->is_depth = is_depth;
+        rb->samples = samples == 0 ? 0 : 1;
+        mark_framebuffers_for_renderbuffer(id);
+        g_gl_context->dirty_flags |= GL_DIRTY_FRAMEBUFFER;
+        return;
+    }
+
+    new_surface.dim = GX2_SURFACE_DIM_TEXTURE_2D; new_surface.width = width; new_surface.height = height;
+    new_surface.depth = 1; new_surface.mipLevels = 1; new_surface.format = fmt; new_surface.aa = GX2_AA_MODE1X; new_surface.use = use;
+    new_surface.tileMode = is_depth ? GX2_TILE_MODE_DEFAULT : GX2_TILE_MODE_LINEAR_ALIGNED;
+    GX2CalcSurfaceSizeAndAlignment(&new_surface);
+    surface_flags = build_framebuffer_surface_flags(internalformat, is_depth, false);
+    if (!GX2RCreateSurface(&new_surface, surface_flags)) {
+        memset(&new_surface, 0, sizeof(new_surface));
+        _gl_set_error(GL_OUT_OF_MEMORY);
+        return;
+    }
+    if (new_surface.image && new_surface.imageSize)
+        memset(new_surface.image, 0, new_surface.imageSize);
+    if (new_surface.mipmaps && new_surface.mipmapSize)
+        memset(new_surface.mipmaps, 0, new_surface.mipmapSize);
+    if (is_depth) init_depth_buffer_from_surface(&new_depth_buffer, &new_surface);
+    else if (!init_color_buffer_from_surface(&new_color_buffer, &new_surface)) {
+        free_surface_storage(&new_surface);
+        _gl_set_error(GL_OUT_OF_MEMORY);
+        return;
+    }
+
     free_color_buffer_aux(&rb->color_buffer);
     free_surface_storage(&rb->surface);
-    rb->surface.dim = GX2_SURFACE_DIM_TEXTURE_2D; rb->surface.width = width; rb->surface.height = height;
-    rb->surface.depth = 1; rb->surface.mipLevels = 1; rb->surface.format = fmt; rb->surface.aa = GX2_AA_MODE1X; rb->surface.use = use;
-    rb->surface.tileMode = is_depth ? GX2_TILE_MODE_DEFAULT : GX2_TILE_MODE_LINEAR_ALIGNED;
-    GX2CalcSurfaceSizeAndAlignment(&rb->surface);
-    surface_flags = build_framebuffer_surface_flags(internalformat, is_depth, false);
-    if (!GX2RCreateSurface(&rb->surface, surface_flags)) {
-        memset(&rb->surface, 0, sizeof(rb->surface));
-        _gl_set_error(GL_OUT_OF_MEMORY);
-        return;
-    }
-    if (rb->surface.image && rb->surface.imageSize)
-        memset(rb->surface.image, 0, rb->surface.imageSize);
-    if (rb->surface.mipmaps && rb->surface.mipmapSize)
-        memset(rb->surface.mipmaps, 0, rb->surface.mipmapSize);
-    rb->width = width; rb->height = height; rb->internal_format = internalformat; rb->is_depth = is_depth;
-    if (is_depth) init_depth_buffer_from_surface(&rb->depth_buffer, &rb->surface);
-    else if (!init_color_buffer_from_surface(&rb->color_buffer, &rb->surface)) {
-        free_surface_storage(&rb->surface);
-        _gl_set_error(GL_OUT_OF_MEMORY);
-        return;
-    }
+    rb->surface = new_surface;
+    rb->color_buffer = new_color_buffer;
+    rb->depth_buffer = new_depth_buffer;
+    rb->width = width;
+    rb->height = height;
+    rb->internal_format = internalformat;
+    rb->is_depth = is_depth;
+    rb->samples = samples == 0 ? 0 : 1;
+    mark_framebuffers_for_renderbuffer(id);
     g_gl_context->dirty_flags |= GL_DIRTY_FRAMEBUFFER;
+}
+
+void _gl_RenderbufferStorage(GLenum target, GLenum internalformat, GLsizei width, GLsizei height) {
+    renderbuffer_storage(target, 0, internalformat, width, height);
 }
 
 void _gl_ReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, GLvoid *pixels) {
@@ -1404,7 +1740,7 @@ void _gl_BlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLi
 }
 
 void _gl_RenderbufferStorageMultisample(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height) {
-    (void)samples; _gl_RenderbufferStorage(target, internalformat, width, height);
+    renderbuffer_storage(target, samples, internalformat, width, height);
 }
 
 void _gl_GenQueries(GLsizei n, GLuint *ids) {
@@ -1487,9 +1823,21 @@ void _gl_DrawBuffer(GLenum buf) {
     GLuint fbo = g_gl_context->bound_framebuffer;
     GLFramebuffer *fb = &g_framebuffers[fbo];
     if (fbo == 0) {
-        if (buf != GL_NONE && buf != GL_BACK) { _gl_set_error(GL_INVALID_ENUM); return; }
+        if (buf != GL_NONE && buf != GL_BACK) {
+            _gl_set_error(is_default_framebuffer_color_name(buf) ||
+                          is_color_attachment_name(buf, NULL)
+                              ? GL_INVALID_OPERATION
+                              : GL_INVALID_ENUM);
+            return;
+        }
     } else if (buf != GL_NONE && !get_color_attachment_index(buf, NULL)) {
-        _gl_set_error(GL_INVALID_ENUM);
+        if (is_default_framebuffer_color_name(buf)) {
+            _gl_set_error(GL_INVALID_OPERATION);
+        } else if (is_color_attachment_name(buf, NULL)) {
+            _gl_set_error(GL_INVALID_VALUE);
+        } else {
+            _gl_set_error(GL_INVALID_ENUM);
+        }
         return;
     }
     fb->draw_buffers[0] = buf;
@@ -1508,11 +1856,30 @@ void _gl_DrawBuffers(GLsizei n, const GLenum *bufs) {
         return;
     }
     for (GLsizei i = 0; i < n; ++i) {
-        if (fbo == 0) {
-            if (bufs[i] != GL_NONE && bufs[i] != GL_BACK) { _gl_set_error(GL_INVALID_ENUM); return; }
-        } else if (bufs[i] != GL_NONE && !get_color_attachment_index(bufs[i], NULL)) {
-            _gl_set_error(bufs[i] == GL_BACK ? GL_INVALID_OPERATION : GL_INVALID_ENUM);
+        if (is_default_framebuffer_color_name(bufs[i])) {
+            _gl_set_error(GL_INVALID_ENUM);
             return;
+        }
+        if (fbo == 0) {
+            if (bufs[i] != GL_NONE) {
+                _gl_set_error(is_color_attachment_name(bufs[i], NULL)
+                                  ? GL_INVALID_OPERATION
+                                  : GL_INVALID_ENUM);
+                return;
+            }
+        } else if (bufs[i] != GL_NONE && !get_color_attachment_index(bufs[i], NULL)) {
+            _gl_set_error(is_color_attachment_name(bufs[i], NULL)
+                              ? GL_INVALID_OPERATION
+                              : GL_INVALID_ENUM);
+            return;
+        }
+        if (bufs[i] != GL_NONE) {
+            for (GLsizei j = 0; j < i; ++j) {
+                if (bufs[j] == bufs[i]) {
+                    _gl_set_error(GL_INVALID_OPERATION);
+                    return;
+                }
+            }
         }
     }
     for (uint32_t i = 0; i < 8; ++i)
@@ -1524,9 +1891,18 @@ void _gl_ReadBuffer(GLenum src) {
     if (!g_gl_context) return;
     GLuint fbo = g_gl_context->bound_read_framebuffer;
     if (fbo == 0) {
-        if (src != GL_NONE && src != GL_BACK) { _gl_set_error(GL_INVALID_ENUM); return; }
+        if (src != GL_NONE && src != GL_BACK) {
+            _gl_set_error(is_default_framebuffer_color_name(src) ||
+                          is_color_attachment_name(src, NULL)
+                              ? GL_INVALID_OPERATION
+                              : GL_INVALID_ENUM);
+            return;
+        }
     } else if (src != GL_NONE && !get_color_attachment_index(src, NULL)) {
-        _gl_set_error(src == GL_BACK ? GL_INVALID_OPERATION : GL_INVALID_ENUM);
+        _gl_set_error(is_default_framebuffer_color_name(src) ||
+                      is_color_attachment_name(src, NULL)
+                          ? GL_INVALID_OPERATION
+                          : GL_INVALID_ENUM);
         return;
     }
     g_framebuffers[fbo].read_buffer = src;
@@ -1538,56 +1914,52 @@ GLenum _gl_CheckFramebufferStatus(GLenum target) {
     if (fbo == 0) return GL_FRAMEBUFFER_COMPLETE;
     GLFramebuffer *fb = &g_framebuffers[fbo];
     bool has_att = false;
-    GLsizei expected_width = 0;
-    GLsizei expected_height = 0;
-    bool expected_size_set = false;
+    GLsizei expected_samples = 0;
+    bool expected_samples_set = false;
     for (uint32_t i = 0; i < 8; ++i) {
-        GLsizei width;
-        GLsizei height;
-        bool is_depth;
+        GLAttachmentImageInfo info;
         if (!attachment_ref_present(&fb->color_attachments[i])) continue;
         has_att = true;
-        if (!get_attachment_surface_info(&fb->color_attachments[i], &width, &height, &is_depth) || is_depth) {
+        if (!get_attachment_image_info(&fb->color_attachments[i], &info) ||
+            info.width <= 0 || info.height <= 0 ||
+            info.depth_renderable || info.stencil_renderable) {
             return GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
         }
-        if (!expected_size_set) {
-            expected_width = width;
-            expected_height = height;
-            expected_size_set = true;
-        } else if (width != expected_width || height != expected_height) {
-            return GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+        if (!expected_samples_set) {
+            expected_samples = info.samples;
+            expected_samples_set = true;
+        } else if (info.samples != expected_samples) {
+            return GL_FRAMEBUFFER_INCOMPLETE_MULTISAMPLE;
         }
     }
     if (attachment_ref_present(&fb->depth_attachment)) {
-        GLsizei width;
-        GLsizei height;
-        bool is_depth;
+        GLAttachmentImageInfo info;
         has_att = true;
-        if (!get_attachment_surface_info(&fb->depth_attachment, &width, &height, &is_depth) || !is_depth) {
+        if (!get_attachment_image_info(&fb->depth_attachment, &info) ||
+            info.width <= 0 || info.height <= 0 ||
+            !info.depth_renderable) {
             return GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
         }
-        if (!expected_size_set) {
-            expected_width = width;
-            expected_height = height;
-            expected_size_set = true;
-        } else if (width != expected_width || height != expected_height) {
-            return GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+        if (!expected_samples_set) {
+            expected_samples = info.samples;
+            expected_samples_set = true;
+        } else if (info.samples != expected_samples) {
+            return GL_FRAMEBUFFER_INCOMPLETE_MULTISAMPLE;
         }
     }
     if (attachment_ref_present(&fb->stencil_attachment)) {
-        GLsizei width;
-        GLsizei height;
-        bool is_depth;
+        GLAttachmentImageInfo info;
         has_att = true;
-        if (!get_attachment_surface_info(&fb->stencil_attachment, &width, &height, &is_depth) || !is_depth) {
+        if (!get_attachment_image_info(&fb->stencil_attachment, &info) ||
+            info.width <= 0 || info.height <= 0 ||
+            !info.stencil_renderable) {
             return GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
         }
-        if (!expected_size_set) {
-            expected_width = width;
-            expected_height = height;
-            expected_size_set = true;
-        } else if (width != expected_width || height != expected_height) {
-            return GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+        if (!expected_samples_set) {
+            expected_samples = info.samples;
+            expected_samples_set = true;
+        } else if (info.samples != expected_samples) {
+            return GL_FRAMEBUFFER_INCOMPLETE_MULTISAMPLE;
         }
     }
     if (!has_att) return GL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT;
@@ -1621,16 +1993,41 @@ void _gl_GetRenderbufferParameteriv(GLenum target, GLenum pname, GLint *params) 
     case GL_RENDERBUFFER_WIDTH:           *params = rb->width; break;
     case GL_RENDERBUFFER_HEIGHT:          *params = rb->height; break;
     case GL_RENDERBUFFER_INTERNAL_FORMAT: *params = rb->internal_format; break;
+    case GL_RENDERBUFFER_SAMPLES:         *params = rb->samples; break;
+    case GL_RENDERBUFFER_RED_SIZE:
+    case GL_RENDERBUFFER_GREEN_SIZE:
+    case GL_RENDERBUFFER_BLUE_SIZE:
+    case GL_RENDERBUFFER_ALPHA_SIZE:
+    case GL_RENDERBUFFER_DEPTH_SIZE:
+    case GL_RENDERBUFFER_STENCIL_SIZE:
+        *params = renderbuffer_component_bits(rb->internal_format, pname);
+        break;
     default: _gl_set_error(GL_INVALID_ENUM); break;
     }
 }
 
 void _gl_GetFramebufferAttachmentParameteriv(GLenum target, GLenum attachment, GLenum pname, GLint *params) {
+    GLAttachmentRef *ref;
+    GLAttachmentImageInfo info;
+
     if (!params) return;
     if (!is_framebuffer_target(target)) { _gl_set_error(GL_INVALID_ENUM); return; }
     GLuint fbo = get_bound_framebuffer_for_target(target);
     if (fbo == 0) { *params = GL_NONE; return; }
-    GLAttachmentRef *ref = get_attachment_ref(&g_framebuffers[fbo], attachment);
+    if (attachment == GL_DEPTH_STENCIL_ATTACHMENT) {
+        GLFramebuffer *fb = &g_framebuffers[fbo];
+        bool depth_present = attachment_ref_present(&fb->depth_attachment);
+        bool stencil_present = attachment_ref_present(&fb->stencil_attachment);
+        if (depth_present && stencil_present &&
+            (fb->depth_attachment.kind != fb->stencil_attachment.kind ||
+             fb->depth_attachment.object != fb->stencil_attachment.object)) {
+            _gl_set_error(GL_INVALID_OPERATION);
+            return;
+        }
+        ref = depth_present ? &fb->depth_attachment : &fb->stencil_attachment;
+    } else {
+        ref = get_attachment_ref(&g_framebuffers[fbo], attachment);
+    }
     if (!ref) { _gl_set_error(GL_INVALID_ENUM); return; }
     switch (pname) {
     case GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE:
@@ -1640,6 +2037,45 @@ void _gl_GetFramebufferAttachmentParameteriv(GLenum target, GLenum attachment, G
         break;
     case GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME:
         *params = attachment_ref_present(ref) ? (GLint)ref->object : 0;
+        break;
+    case GL_FRAMEBUFFER_ATTACHMENT_RED_SIZE:
+    case GL_FRAMEBUFFER_ATTACHMENT_GREEN_SIZE:
+    case GL_FRAMEBUFFER_ATTACHMENT_BLUE_SIZE:
+    case GL_FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE:
+    case GL_FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE:
+    case GL_FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE:
+        if (!attachment_ref_present(ref)) { _gl_set_error(GL_INVALID_OPERATION); return; }
+        if (!get_attachment_image_info(ref, &info)) { _gl_set_error(GL_INVALID_OPERATION); return; }
+        *params = attachment_component_bits(info.internal_format, pname);
+        break;
+    case GL_FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE:
+        if (!attachment_ref_present(ref)) { _gl_set_error(GL_INVALID_OPERATION); return; }
+        if (!get_attachment_image_info(ref, &info)) { _gl_set_error(GL_INVALID_OPERATION); return; }
+        *params = attachment_component_type(info.internal_format);
+        break;
+    case GL_FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING:
+        if (!attachment_ref_present(ref)) { _gl_set_error(GL_INVALID_OPERATION); return; }
+        *params = GL_LINEAR;
+        break;
+    case GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL:
+        if (!attachment_ref_present(ref)) { _gl_set_error(GL_INVALID_OPERATION); return; }
+        if (ref->kind != GL_ATTACHMENT_KIND_TEXTURE) { _gl_set_error(GL_INVALID_ENUM); return; }
+        *params = ref->level;
+        break;
+    case GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_CUBE_MAP_FACE:
+        if (!attachment_ref_present(ref)) { _gl_set_error(GL_INVALID_OPERATION); return; }
+        if (ref->kind != GL_ATTACHMENT_KIND_TEXTURE) { _gl_set_error(GL_INVALID_ENUM); return; }
+        *params = is_cube_map_face_target(ref->textarget) ? (GLint)ref->textarget : 0;
+        break;
+    case GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER:
+        if (!attachment_ref_present(ref)) { _gl_set_error(GL_INVALID_OPERATION); return; }
+        if (ref->kind != GL_ATTACHMENT_KIND_TEXTURE) { _gl_set_error(GL_INVALID_ENUM); return; }
+        *params = 0;
+        break;
+    case GL_FRAMEBUFFER_ATTACHMENT_LAYERED:
+        if (!attachment_ref_present(ref)) { _gl_set_error(GL_INVALID_OPERATION); return; }
+        if (ref->kind != GL_ATTACHMENT_KIND_TEXTURE) { _gl_set_error(GL_INVALID_ENUM); return; }
+        *params = GL_FALSE;
         break;
     default: _gl_set_error(GL_INVALID_ENUM); break;
     }
@@ -1666,11 +2102,16 @@ void gl_bind_framebuffers(void) {
             if (fb->color_attachments[i].kind == GL_ATTACHMENT_KIND_TEXTURE) {
                 GX2Texture *t = gl_get_gx2_texture(fb->color_attachments[i].object);
                 free_framebuffer_texture_target(fb, i);
-                if (t) init_color_buffer_from_surface(&fb->cb[i], &t->surface);
+                if (t && init_color_buffer_from_surface(&fb->cb[i], &t->surface)) {
+                    fb->color_buffer_owns_aux[i] = true;
+                }
             } else {
                 free_framebuffer_texture_target(fb, i);
                 GLRenderbuffer *rb = get_renderbuffer(fb->color_attachments[i].object);
-                if (rb && !rb->is_depth) fb->cb[i] = rb->color_buffer;
+                if (rb && !rb->is_depth) {
+                    fb->cb[i] = rb->color_buffer;
+                    fb->color_buffer_owns_aux[i] = false;
+                }
             }
         }
         memset(&fb->db, 0, sizeof(fb->db));

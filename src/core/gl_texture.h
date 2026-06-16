@@ -62,6 +62,7 @@ void gl_bind_textures(void);
 
 GX2Texture *gl_get_gx2_texture(GLuint id);
 GLint gl_get_texture_internal_format(GLuint id);
+GLenum gl_get_texture_target(GLuint id);
 GX2Sampler *gl_get_gx2_sampler(GLuint id, bool use_sampler_obj);
 
 #ifdef __cplusplus

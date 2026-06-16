@@ -2650,15 +2650,24 @@ int main(int argc, char **argv) {
     GLuint fbo;
     glGenFramebuffers(1, &fbo);
     check_gl_error("glGenFramebuffers");
-    if (glIsFramebuffer(fbo) == GL_TRUE) {
-        OSReport("[PASS] glIsFramebuffer returned true.\n");
+    if (glIsFramebuffer(fbo) == GL_FALSE) {
+        OSReport("[PASS] glIsFramebuffer generated name is false before bind.\n");
     } else {
-        OSReport("[FAIL] glIsFramebuffer returned false.\n");
+        OSReport("[FAIL] glIsFramebuffer generated name was true before bind.\n");
     }
-    check_gl_error("glIsFramebuffer");
+    check_gl_error("glIsFramebuffer(pre-bind)");
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 4095);
+    expect_error("glBindFramebuffer(unknown name)", GL_INVALID_OPERATION);
 
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     check_gl_error("glBindFramebuffer");
+    if (glIsFramebuffer(fbo) == GL_TRUE) {
+        OSReport("[PASS] glIsFramebuffer returned true after bind.\n");
+    } else {
+        OSReport("[FAIL] glIsFramebuffer returned false after bind.\n");
+    }
+    check_gl_error("glIsFramebuffer(post-bind)");
 
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex[0], 0);
     check_gl_error("glFramebufferTexture2D");
@@ -2704,6 +2713,15 @@ int main(int argc, char **argv) {
     // Try bad attachment
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_INVALID_ENUM, GL_TEXTURE_2D, tex[0], 0);
     expect_error("glFramebufferTexture2D(GL_INVALID_ENUM attachment)", GL_INVALID_ENUM);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex[0], -1);
+    expect_error("glFramebufferTexture2D(negative level)", GL_INVALID_VALUE);
+    GLuint reserved_texture = 0;
+    glGenTextures(1, &reserved_texture);
+    check_gl_error("glGenTextures(framebuffer reserved)");
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, reserved_texture, 0);
+    expect_error("glFramebufferTexture2D(unbound generated texture)", GL_INVALID_OPERATION);
+    glDeleteTextures(1, &reserved_texture);
+    check_gl_error("glDeleteTextures(framebuffer reserved)");
 
     // Try bad target
     glBindFramebuffer(GL_INVALID_ENUM, fbo);
@@ -2773,7 +2791,7 @@ int main(int argc, char **argv) {
     check_gl_error("glDrawBuffer(default_back)");
     GLenum back_buf = GL_BACK;
     glDrawBuffers(1, &back_buf);
-    check_gl_error("glDrawBuffers(default_back)");
+    expect_error("glDrawBuffers(default_back)", GL_INVALID_ENUM);
     GLenum invalid_default_bufs[2] = { GL_BACK, GL_NONE };
     glDrawBuffers(2, invalid_default_bufs);
     expect_error("glDrawBuffers(default_invalid_count)", GL_INVALID_OPERATION);
@@ -2781,20 +2799,32 @@ int main(int argc, char **argv) {
     GLuint renderbuffers[2] = {0, 0};
     glGenRenderbuffers(2, renderbuffers);
     check_gl_error("glGenRenderbuffers");
-    if (glIsRenderbuffer(renderbuffers[0]) == GL_TRUE) {
-        OSReport("[PASS] glIsRenderbuffer returned true.\n");
+    if (glIsRenderbuffer(renderbuffers[0]) == GL_FALSE) {
+        OSReport("[PASS] glIsRenderbuffer generated name is false before bind.\n");
     } else {
-        OSReport("[FAIL] glIsRenderbuffer returned false.\n");
+        OSReport("[FAIL] glIsRenderbuffer generated name was true before bind.\n");
     }
-    check_gl_error("glIsRenderbuffer");
+    check_gl_error("glIsRenderbuffer(pre-bind)");
+    glBindRenderbuffer(GL_RENDERBUFFER, 4095);
+    expect_error("glBindRenderbuffer(unknown name)", GL_INVALID_OPERATION);
     glBindRenderbuffer(GL_RENDERBUFFER, renderbuffers[0]);
     check_gl_error("glBindRenderbuffer(color)");
+    if (glIsRenderbuffer(renderbuffers[0]) == GL_TRUE) {
+        OSReport("[PASS] glIsRenderbuffer returned true after bind.\n");
+    } else {
+        OSReport("[FAIL] glIsRenderbuffer returned false after bind.\n");
+    }
+    check_gl_error("glIsRenderbuffer(post-bind)");
     glBindRenderbuffer(GL_INVALID_ENUM, renderbuffers[0]);
     expect_error("glBindRenderbuffer(GL_INVALID_ENUM)", GL_INVALID_ENUM);
     glBindRenderbuffer(GL_RENDERBUFFER, renderbuffers[0]);
     check_gl_error("glBindRenderbuffer(color restore)");
     glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, 4, 4);
     check_gl_error("glRenderbufferStorage(color)");
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, -1, 4);
+    expect_error("glRenderbufferStorage(negative width)", GL_INVALID_VALUE);
+    glRenderbufferStorageMultisample(GL_RENDERBUFFER, 2, GL_RGBA8, 4, 4);
+    expect_error("glRenderbufferStorageMultisample(unsupported samples)", GL_INVALID_VALUE);
     GLint renderbuffer_width = 0;
     glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_WIDTH,
                                  &renderbuffer_width);
@@ -2810,6 +2840,16 @@ int main(int argc, char **argv) {
     glGetRenderbufferParameteriv(GL_INVALID_ENUM, GL_RENDERBUFFER_WIDTH,
                                  &renderbuffer_width);
     expect_error("glGetRenderbufferParameteriv(GL_INVALID_ENUM)", GL_INVALID_ENUM);
+    GLint renderbuffer_red_bits = 0;
+    glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_RED_SIZE,
+                                 &renderbuffer_red_bits);
+    check_gl_error("glGetRenderbufferParameteriv(GL_RENDERBUFFER_RED_SIZE)");
+    if (renderbuffer_red_bits == 8) {
+        OSReport("[PASS] glGetRenderbufferParameteriv(GL_RENDERBUFFER_RED_SIZE) returned 8.\n");
+    } else {
+        OSReport("[FAIL] glGetRenderbufferParameteriv(GL_RENDERBUFFER_RED_SIZE) returned %d\n",
+                 renderbuffer_red_bits);
+    }
     glBindRenderbuffer(GL_RENDERBUFFER, renderbuffers[1]);
     check_gl_error("glBindRenderbuffer(depth_stencil)");
     glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, 4, 4);
@@ -2828,6 +2868,14 @@ int main(int argc, char **argv) {
                  renderbuffer_status);
     }
     check_gl_error("glCheckFramebufferStatus(empty_renderbuffer_fbo)");
+    GLuint reserved_renderbuffer = 0;
+    glGenRenderbuffers(1, &reserved_renderbuffer);
+    check_gl_error("glGenRenderbuffers(reserved attachment)");
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                              GL_RENDERBUFFER, reserved_renderbuffer);
+    expect_error("glFramebufferRenderbuffer(unbound generated renderbuffer)", GL_INVALID_OPERATION);
+    glDeleteRenderbuffers(1, &reserved_renderbuffer);
+    check_gl_error("glDeleteRenderbuffers(reserved attachment)");
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                               GL_RENDERBUFFER, renderbuffers[0]);
     check_gl_error("glFramebufferRenderbuffer(color)");

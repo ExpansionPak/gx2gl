@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 
 
@@ -58,8 +59,9 @@ def render(symbols: list[str]) -> str:
 def main() -> None:
     root = repo_root()
     header = root / "include" / "gl" / "gl.h"
-    out_path = root / "src" / "core" / "gx2gl_proc_table.inc"
+    out_path = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else root / "src" / "core" / "gx2gl_proc_table.inc"
     symbols = parse_symbols(header)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(render(symbols), encoding="utf-8")
     print(f"Wrote {len(symbols)} core proc mappings to {out_path}")
 

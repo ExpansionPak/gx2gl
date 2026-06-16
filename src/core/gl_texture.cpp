@@ -3949,6 +3949,13 @@ GLint gl_get_texture_internal_format(GLuint id) {
   return 0;
 }
 
+GLenum gl_get_texture_target(GLuint id) {
+  if (id > 0 && id < MAX_TEXTURES && g_textures[id].in_use) {
+    return g_textures[id].target;
+  }
+  return 0;
+}
+
 
 GX2Sampler *gl_get_gx2_sampler(GLuint id, bool use_sampler_obj) {
   if (use_sampler_obj) {

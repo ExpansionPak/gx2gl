@@ -101,6 +101,7 @@ void _gl_GetIntegerv(GLenum pname, GLint *data) {
     case GL_MAX_COLOR_ATTACHMENTS: *data = 8; break;
     case GL_MAX_DRAW_BUFFERS: *data = 8; break;
     case GL_MAX_RENDERBUFFER_SIZE: *data = 8192; break;
+    case GL_MAX_SAMPLES: *data = 1; break;
     case GL_MAX_VERTEX_UNIFORM_BLOCKS: *data = 12; break;
     case GL_MAX_FRAGMENT_UNIFORM_BLOCKS: *data = 12; break;
     case GL_MAX_UNIFORM_BUFFER_BINDINGS: *data = GL33_MAX_UNIFORM_BUFFER_BINDINGS; break;
@@ -150,6 +151,9 @@ void _gl_GetIntegerv(GLenum pname, GLint *data) {
         break;
     case GL_READ_FRAMEBUFFER_BINDING:
         *data = (GLint)g_gl_context->bound_read_framebuffer;
+        break;
+    case GL_RENDERBUFFER_BINDING:
+        *data = (GLint)g_gl_context->bound_renderbuffer;
         break;
     case GL_VIEWPORT:
         data[0] = g_gl_context->viewport.x; data[1] = g_gl_context->viewport.y;
