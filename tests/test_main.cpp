@@ -2892,6 +2892,56 @@ int main(int argc, char **argv) {
     expect_error("glDrawArrays(unbound_program)", GL_INVALID_OPERATION);
     glDrawArraysInstanced(GL_TRIANGLES, 0, 3, 2);
     expect_error("glDrawArraysInstanced(unbound_program)", GL_INVALID_OPERATION);
+    glDrawArrays(GL_INVALID_ENUM, 0, 3);
+    expect_error("glDrawArrays(invalid_mode)", GL_INVALID_ENUM);
+    glDrawArrays(GL_TRIANGLES, -1, 3);
+    expect_error("glDrawArrays(negative_first)", GL_INVALID_VALUE);
+    glDrawArrays(GL_LINE_LOOP, 0, 3);
+    expect_error("glDrawArrays(GL_LINE_LOOP unbound_program)",
+                 GL_INVALID_OPERATION);
+    glDrawArrays(GL_TRIANGLES_ADJACENCY, 0, 6);
+    expect_error("glDrawArrays(GL_TRIANGLES_ADJACENCY unbound_program)",
+                 GL_INVALID_OPERATION);
+    glDrawElements(GL_TRIANGLES, -1, GL_UNSIGNED_SHORT, (const GLvoid*)0);
+    expect_error("glDrawElements(negative_count)", GL_INVALID_VALUE);
+    glDrawElements(GL_TRIANGLES, 1, GL_FLOAT, (const GLvoid*)0);
+    expect_error("glDrawElements(invalid_index_type)", GL_INVALID_ENUM);
+    glDrawElements(GL_TRIANGLES, 1, GL_UNSIGNED_BYTE, (const GLvoid*)0);
+    expect_error("glDrawElements(GL_UNSIGNED_BYTE unbound_program)",
+                 GL_INVALID_OPERATION);
+    glDrawRangeElements(GL_TRIANGLES, 5, 4, 1, GL_UNSIGNED_SHORT,
+                        (const GLvoid*)0);
+    expect_error("glDrawRangeElements(end_before_start)", GL_INVALID_VALUE);
+    GLint restart_index = -1;
+    glPrimitiveRestartIndex(7);
+    check_gl_error("glPrimitiveRestartIndex");
+    glGetIntegerv(GL_PRIMITIVE_RESTART_INDEX, &restart_index);
+    check_gl_error("glGetIntegerv(GL_PRIMITIVE_RESTART_INDEX)");
+    if (restart_index == 7) {
+        OSReport("[PASS] GL_PRIMITIVE_RESTART_INDEX tracked draw state.\n");
+    } else {
+        OSReport("[FAIL] GL_PRIMITIVE_RESTART_INDEX returned %d.\n",
+                 restart_index);
+    }
+    glEnable(GL_PRIMITIVE_RESTART);
+    check_gl_error("glEnable(GL_PRIMITIVE_RESTART)");
+    if (glIsEnabled(GL_PRIMITIVE_RESTART) == GL_TRUE) {
+        OSReport("[PASS] GL_PRIMITIVE_RESTART enable state is tracked.\n");
+    } else {
+        OSReport("[FAIL] GL_PRIMITIVE_RESTART enable state was false.\n");
+    }
+    check_gl_error("glIsEnabled(GL_PRIMITIVE_RESTART)");
+    glDisable(GL_PRIMITIVE_RESTART);
+    check_gl_error("glDisable(GL_PRIMITIVE_RESTART)");
+    GLint multi_first[2] = {0, 1};
+    GLsizei multi_counts_bad[2] = {1, -1};
+    glMultiDrawArrays(GL_TRIANGLES, multi_first, multi_counts_bad, 2);
+    expect_error("glMultiDrawArrays(negative_count)", GL_INVALID_VALUE);
+    const GLvoid *multi_indices[1] = {(const GLvoid*)0};
+    GLsizei multi_counts[1] = {1};
+    glMultiDrawElements(GL_TRIANGLES, multi_counts, GL_UNSIGNED_SHORT,
+                        multi_indices, -1);
+    expect_error("glMultiDrawElements(negative_drawcount)", GL_INVALID_VALUE);
 
     glFlush();
     check_gl_error("glFlush");

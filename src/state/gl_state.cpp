@@ -263,6 +263,7 @@ void _gl_Enable(GLenum cap) {
   case GL_CULL_FACE: g_gl_context->cull_face_enabled = GL_TRUE; break;
   case GL_SCISSOR_TEST: g_gl_context->scissor_test_enabled = GL_TRUE; break;
   case GL_SAMPLE_COVERAGE: g_gl_context->sample_coverage_enabled = GL_TRUE; break;
+  case GL_PRIMITIVE_RESTART: g_gl_context->primitive_restart_enabled = GL_TRUE; break;
   case GL_POLYGON_OFFSET_FILL: g_gl_context->polygon_offset_fill_enabled = GL_TRUE; break;
   case GL_POLYGON_OFFSET_LINE: g_gl_context->polygon_offset_line_enabled = GL_TRUE; break;
   case GL_POLYGON_OFFSET_POINT: g_gl_context->polygon_offset_point_enabled = GL_TRUE; break;
@@ -280,6 +281,7 @@ void _gl_Disable(GLenum cap) {
   case GL_CULL_FACE: g_gl_context->cull_face_enabled = GL_FALSE; break;
   case GL_SCISSOR_TEST: g_gl_context->scissor_test_enabled = GL_FALSE; break;
   case GL_SAMPLE_COVERAGE: g_gl_context->sample_coverage_enabled = GL_FALSE; break;
+  case GL_PRIMITIVE_RESTART: g_gl_context->primitive_restart_enabled = GL_FALSE; break;
   case GL_POLYGON_OFFSET_FILL: g_gl_context->polygon_offset_fill_enabled = GL_FALSE; break;
   case GL_POLYGON_OFFSET_LINE: g_gl_context->polygon_offset_line_enabled = GL_FALSE; break;
   case GL_POLYGON_OFFSET_POINT: g_gl_context->polygon_offset_point_enabled = GL_FALSE; break;
@@ -297,6 +299,7 @@ GLboolean _gl_IsEnabled(GLenum cap) {
   case GL_CULL_FACE: return g_gl_context->cull_face_enabled;
   case GL_SCISSOR_TEST: return g_gl_context->scissor_test_enabled;
   case GL_SAMPLE_COVERAGE: return g_gl_context->sample_coverage_enabled;
+  case GL_PRIMITIVE_RESTART: return g_gl_context->primitive_restart_enabled;
   case GL_POLYGON_OFFSET_FILL: return g_gl_context->polygon_offset_fill_enabled;
   case GL_POLYGON_OFFSET_LINE: return g_gl_context->polygon_offset_line_enabled;
   case GL_POLYGON_OFFSET_POINT: return g_gl_context->polygon_offset_point_enabled;
