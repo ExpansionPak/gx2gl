@@ -1359,19 +1359,17 @@ static void bind_stage_samplers(const GLint *sampler_units, const GLint *sampler
 
 static bool bind_uniform_block_buffer(GLuint buffer_id, uint32_t offset, uint32_t available_size,
                                       uint32_t required_size, bool pixel_stage, uint32_t slot) {
-  GX2RBuffer *gx2r;
   uint8_t *data;
   GLsizeiptr size;
-
-  gx2r = gl_buffer_get_gx2r_buffer(buffer_id);
-  if (!gx2r || !gx2r->buffer) return false;
 
   size = gl_buffer_get_size(buffer_id);
   if (offset > (uint32_t)size || available_size > (uint32_t)size - offset || required_size > available_size) {
     return false;
   }
 
-  data = (uint8_t *)gx2r->buffer + offset;
+  data = (uint8_t *)gl_buffer_get_uniform_block_data(buffer_id, offset, required_size);
+  if (!data) return false;
+
   GX2Invalidate(GX2_INVALIDATE_MODE_UNIFORM_BLOCK, data, required_size);
   if (pixel_stage) GX2SetPixelUniformBlock(slot, required_size, data);
   else GX2SetVertexUniformBlock(slot, required_size, data);

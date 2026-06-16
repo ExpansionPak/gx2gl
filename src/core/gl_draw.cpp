@@ -33,6 +33,35 @@ static GX2IndexType map_index_type(GLenum type) {
     }
 }
 
+static bool validate_draw_buffer_mappings(GLuint element_buffer) {
+    if (!g_gl_context) return false;
+
+    for (GLuint i = 0; i < GL33_MAX_VERTEX_ATTRIBS; ++i) {
+        gl_vao_attrib_state_t state;
+        if (!gl_vao_get_attrib_state(i, &state)) continue;
+        if (state.enabled && state.buffer != 0 &&
+            gl_buffer_is_mapped(state.buffer) == GL_TRUE) {
+            _gl_set_error(GL_INVALID_OPERATION);
+            return false;
+        }
+    }
+
+    if (element_buffer != 0 && gl_buffer_is_mapped(element_buffer) == GL_TRUE) {
+        _gl_set_error(GL_INVALID_OPERATION);
+        return false;
+    }
+
+    for (uint32_t i = 0; i < GL33_MAX_UNIFORM_BUFFER_BINDINGS; ++i) {
+        GLuint buffer = g_gl_context->uniform_buffer_bindings[i].buffer;
+        if (buffer != 0 && gl_buffer_is_mapped(buffer) == GL_TRUE) {
+            _gl_set_error(GL_INVALID_OPERATION);
+            return false;
+        }
+    }
+
+    return true;
+}
+
 void _gl_DrawArrays(GLenum mode, GLint first, GLsizei count) { _gl_DrawArraysInstanced(mode, first, count, 1); }
 
 void _gl_DrawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLsizei instancecount) {
@@ -41,6 +70,7 @@ void _gl_DrawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLsizei in
     if (first < 0 || count < 0 || instancecount < 0) { _gl_set_error(GL_INVALID_VALUE); return; }
     if (!validate_draw_mode(mode, &prim)) { _gl_set_error(GL_INVALID_ENUM); return; }
     if (count == 0 || instancecount == 0) return;
+    if (!validate_draw_buffer_mappings(0)) return;
     gl_flush_state();
     GX2DrawEx(prim, count, first, (uint32_t)instancecount);
     gl_framebuffer_mark_bound_color_dirty();
@@ -58,6 +88,7 @@ void _gl_DrawElementsInstanced(GLenum mode, GLsizei count, GLenum type, const GL
     if (idx_type == (GX2IndexType)0xFFFF) { _gl_set_error(GL_INVALID_ENUM); return; }
     GLuint element_buffer = gl_vao_get_element_array_buffer();
     if (element_buffer == 0) { _gl_set_error(GL_INVALID_OPERATION); return; }
+    if (!validate_draw_buffer_mappings(element_buffer)) return;
     void *buffer_data = gl_buffer_get_data(element_buffer);
     if (!buffer_data) { _gl_set_error(GL_INVALID_OPERATION); return; }
     gl_flush_state();
@@ -76,6 +107,7 @@ void _gl_DrawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, const G
     if (idx_type == (GX2IndexType)0xFFFF) { _gl_set_error(GL_INVALID_ENUM); return; }
     GLuint element_buffer = gl_vao_get_element_array_buffer();
     if (element_buffer == 0) { _gl_set_error(GL_INVALID_OPERATION); return; }
+    if (!validate_draw_buffer_mappings(element_buffer)) return;
     void *buffer_data = gl_buffer_get_data(element_buffer);
     if (!buffer_data) { _gl_set_error(GL_INVALID_OPERATION); return; }
     gl_flush_state();
@@ -97,6 +129,7 @@ void _gl_DrawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLenum type
     if (idx_type == (GX2IndexType)0xFFFF) { _gl_set_error(GL_INVALID_ENUM); return; }
     GLuint element_buffer = gl_vao_get_element_array_buffer();
     if (element_buffer == 0) { _gl_set_error(GL_INVALID_OPERATION); return; }
+    if (!validate_draw_buffer_mappings(element_buffer)) return;
     void *buffer_data = gl_buffer_get_data(element_buffer);
     if (!buffer_data) { _gl_set_error(GL_INVALID_OPERATION); return; }
     gl_flush_state();

@@ -1,4 +1,5 @@
 #include "gl_context.h"
+#include "gl_vao.h"
 #include <string.h>
 
 #ifndef GL_FRAMEBUFFER_BINDING
@@ -103,6 +104,18 @@ void _gl_GetIntegerv(GLenum pname, GLint *data) {
     case GL_IMPLEMENTATION_COLOR_READ_FORMAT: *data = GL_RGBA; break;
     case GL_IMPLEMENTATION_COLOR_READ_TYPE: *data = GL_UNSIGNED_BYTE; break;
     case GL_GENERATE_MIPMAP_HINT: *data = (GLint)g_gl_context->generate_mipmap_hint; break;
+    case GL_ARRAY_BUFFER_BINDING: *data = (GLint)g_gl_context->bound_array_buffer; break;
+    case GL_ELEMENT_ARRAY_BUFFER_BINDING:
+        *data = (GLint)gl_vao_get_element_array_buffer();
+        break;
+    case GL_COPY_READ_BUFFER_BINDING: *data = (GLint)g_gl_context->bound_copy_read_buffer; break;
+    case GL_COPY_WRITE_BUFFER_BINDING: *data = (GLint)g_gl_context->bound_copy_write_buffer; break;
+    case GL_PIXEL_PACK_BUFFER_BINDING: *data = (GLint)g_gl_context->bound_pixel_pack_buffer; break;
+    case GL_PIXEL_UNPACK_BUFFER_BINDING: *data = (GLint)g_gl_context->bound_pixel_unpack_buffer; break;
+    case GL_TEXTURE_BUFFER: *data = (GLint)g_gl_context->bound_texture_buffer; break;
+    case GL_TRANSFORM_FEEDBACK_BUFFER_BINDING:
+        *data = (GLint)g_gl_context->bound_transform_feedback_buffer;
+        break;
     case GL_PACK_ALIGNMENT: *data = g_gl_context->pack_alignment; break;
     case GL_PACK_ROW_LENGTH: *data = g_gl_context->pack_row_length; break;
     case GL_PACK_SKIP_ROWS: *data = g_gl_context->pack_skip_rows; break;

@@ -1113,12 +1113,12 @@ int main(int argc, char **argv) {
     GLuint buffers[2];
     glGenBuffers(2, buffers);
     check_gl_error("glGenBuffers");
-    if (glIsBuffer(buffers[0]) == GL_TRUE) {
-        OSReport("[PASS] glIsBuffer returned true.\n");
+    if (glIsBuffer(buffers[0]) == GL_FALSE) {
+        OSReport("[PASS] glIsBuffer returned false for an unbound generated name.\n");
     } else {
-        OSReport("[FAIL] glIsBuffer returned false.\n");
+        OSReport("[FAIL] glIsBuffer returned true before first bind.\n");
     }
-    check_gl_error("glIsBuffer");
+    check_gl_error("glIsBuffer(unbound generated name)");
     
     // Try invalid count
     GLuint bad_buffers[1] = {0};
@@ -1127,6 +1127,12 @@ int main(int argc, char **argv) {
 
     glBindBuffer(GL_ARRAY_BUFFER, buffers[0]);
     check_gl_error("glBindBuffer(GL_ARRAY_BUFFER)");
+    if (glIsBuffer(buffers[0]) == GL_TRUE) {
+        OSReport("[PASS] glIsBuffer returned true after first bind.\n");
+    } else {
+        OSReport("[FAIL] glIsBuffer returned false after first bind.\n");
+    }
+    check_gl_error("glIsBuffer(bound name)");
     
     // Try bad target
     glBindBuffer(GL_INVALID_ENUM, buffers[0]);
@@ -1145,6 +1151,30 @@ int main(int argc, char **argv) {
         OSReport("[FAIL] glGetBufferParameteriv(GL_BUFFER_SIZE) returned %d\n",
                  array_buffer_size);
     }
+    GLuint copy_buffer = 0;
+    GLfloat copied_vertices[sizeof(vertices) / sizeof(vertices[0])] = {0};
+    glGenBuffers(1, &copy_buffer);
+    check_gl_error("glGenBuffers(copy_buffer)");
+    glBindBuffer(GL_COPY_READ_BUFFER, buffers[0]);
+    check_gl_error("glBindBuffer(GL_COPY_READ_BUFFER)");
+    glBindBuffer(GL_COPY_WRITE_BUFFER, copy_buffer);
+    check_gl_error("glBindBuffer(GL_COPY_WRITE_BUFFER)");
+    glBufferData(GL_COPY_WRITE_BUFFER, sizeof(vertices), NULL, GL_DYNAMIC_COPY);
+    check_gl_error("glBufferData(GL_COPY_WRITE_BUFFER)");
+    glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0, sizeof(vertices));
+    check_gl_error("glCopyBufferSubData(copy buffer)");
+    glGetBufferSubData(GL_COPY_WRITE_BUFFER, 0, sizeof(copied_vertices), copied_vertices);
+    check_gl_error("glGetBufferSubData(GL_COPY_WRITE_BUFFER)");
+    if (memcmp(copied_vertices, vertices, sizeof(vertices)) == 0) {
+        OSReport("[PASS] glCopyBufferSubData copied array data.\n");
+    } else {
+        OSReport("[FAIL] glCopyBufferSubData copied unexpected data.\n");
+    }
+    glBindBuffer(GL_COPY_WRITE_BUFFER, buffers[0]);
+    check_gl_error("glBindBuffer(GL_COPY_WRITE_BUFFER overlap)");
+    glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, sizeof(GLfloat),
+                        sizeof(vertices) - sizeof(GLfloat));
+    expect_error("glCopyBufferSubData(overlap)", GL_INVALID_VALUE);
 
     // Try bad target
     glBufferData(GL_INVALID_ENUM, 32, vertices, GL_STATIC_DRAW);
@@ -1175,7 +1205,7 @@ int main(int argc, char **argv) {
     glBindBufferBase(GL_UNIFORM_BUFFER, 0, ubo);
     check_gl_error("glBindBufferBase(GL_UNIFORM_BUFFER)");
 
-    void* mapped_ubo = glMapBufferRange(GL_UNIFORM_BUFFER, 0, 256, GL_WRITE_ONLY);
+    void* mapped_ubo = glMapBufferRange(GL_UNIFORM_BUFFER, 0, 256, GL_MAP_WRITE_BIT);
     if (!mapped_ubo) {
         OSReport("[FAIL] glMapBufferRange(GL_UNIFORM_BUFFER) returned NULL\n");
     }

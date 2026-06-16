@@ -34,7 +34,15 @@ void *_gl_MapBufferRange(GLenum target, GLintptr offset, GLsizeiptr length,
 GLboolean _gl_UnmapBuffer(GLenum target);
 void _gl_FlushMappedBufferRange(GLenum target, GLintptr offset, GLsizeiptr length);
 
+void gl_buffer_copy_sub_data(GLenum readTarget, GLenum writeTarget,
+                             GLintptr readOffset, GLintptr writeOffset,
+                             GLsizeiptr size);
+void gl_buffer_get_sub_data(GLenum target, GLintptr offset, GLsizeiptr size,
+                            GLvoid *data);
+GLboolean gl_buffer_is_mapped(GLuint buffer);
 void *gl_buffer_get_data(GLuint buffer);
+void *gl_buffer_get_uniform_block_data(GLuint buffer, GLintptr offset,
+                                       GLsizeiptr size);
 GLsizeiptr gl_buffer_get_size(GLuint buffer);
 GX2RBuffer *gl_buffer_get_gx2r_buffer(GLuint buffer);
 

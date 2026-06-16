@@ -820,6 +820,11 @@ void glGetIntegeri_v(GLenum target, GLuint index, GLint *data) {
         *data = (GLint)g_gl_context->uniform_buffer_bindings[index].buffer;
     else if (target == GL_UNIFORM_BUFFER_BINDING)
         _gl_set_error(GL_INVALID_VALUE);
+    else if (target == GL_TRANSFORM_FEEDBACK_BUFFER_BINDING &&
+             index < GL33_MAX_TRANSFORM_FEEDBACK_BUFFER_BINDINGS)
+        *data = (GLint)g_gl_context->transform_feedback_buffer_bindings[index].buffer;
+    else if (target == GL_TRANSFORM_FEEDBACK_BUFFER_BINDING)
+        _gl_set_error(GL_INVALID_VALUE);
     else
         _gl_set_error(GL_INVALID_ENUM);
 }
@@ -836,15 +841,7 @@ void glGetBufferParameteri64v(GLenum target, GLenum pname, GLint64 *params) {
 
 
 void glCopyBufferSubData(GLenum readTarget, GLenum writeTarget, GLintptr readOffset, GLintptr writeOffset, GLsizeiptr size) {
-    void *src = glMapBufferRange(readTarget, readOffset, size, GL_MAP_READ_BIT);
-    if (!src) return;
-    void *tmp = gl_mem_alloc(GL_MEM_TYPE_MEM2, (size_t)size, 64);
-    if (tmp) { memcpy(tmp, src, (size_t)size); glUnmapBuffer(readTarget); }
-    else { glUnmapBuffer(readTarget); return; }
-    void *dst = glMapBufferRange(writeTarget, writeOffset, size, GL_MAP_WRITE_BIT);
-    if (dst) memcpy(dst, tmp, (size_t)size);
-    glUnmapBuffer(writeTarget);
-    gl_mem_free(GL_MEM_TYPE_MEM2, tmp);
+    gl_buffer_copy_sub_data(readTarget, writeTarget, readOffset, writeOffset, size);
 }
 
 
@@ -1370,24 +1367,7 @@ void glGetBooleani_v(GLenum target, GLuint index, GLboolean *data) {
     }
 }
 void glGetBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, GLvoid *data) {
-    void *src;
-
-    if (size < 0 || offset < 0) {
-        _gl_set_error(GL_INVALID_VALUE);
-        return;
-    }
-    if (size == 0) {
-        return;
-    }
-    if (!data) {
-        _gl_set_error(GL_INVALID_VALUE);
-        return;
-    }
-
-    src = glMapBufferRange(target, offset, size, GL_MAP_READ_BIT);
-    if (!src) return;
-    memcpy(data, src, (size_t)size);
-    glUnmapBuffer(target);
+    gl_buffer_get_sub_data(target, offset, size, data);
 }
 void glGetCompressedTexImage(GLenum target, GLint level, GLvoid *img) {
     (void)img;

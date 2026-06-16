@@ -1,5 +1,5 @@
 #include "gx2gl/proc.h"
-#include "gx2gl/sdl_bridge.h"
+#include "gx2gl/gx2gl_sdl.h"
 
 #include "gl/gl.h"
 
@@ -74,11 +74,23 @@ static void gx2glGetAttachedObjectsARB(GLuint program, GLsizei maxCount, GLsizei
 #include "gx2gl_proc_table.inc"
 
 static const GX2GLProcEntry kGX2GLAliasProcTable[] = {
+    {"GX2GL_BeginFrame", reinterpret_cast<GX2GL_Proc>(GX2GL_BeginFrame)},
     {"GX2GL_CopyToDRC", reinterpret_cast<GX2GL_Proc>(GX2GL_CopyToDRC)},
+    {"GX2GL_CreateContext", reinterpret_cast<GX2GL_Proc>(GX2GL_CreateContext)},
+    {"GX2GL_DeleteContext", reinterpret_cast<GX2GL_Proc>(GX2GL_DeleteContext)},
+    {"GX2GL_EndFrame", reinterpret_cast<GX2GL_Proc>(GX2GL_EndFrame)},
     {"GX2GL_GetAutomaticDRCEnabled", reinterpret_cast<GX2GL_Proc>(GX2GL_GetAutomaticDRCEnabled)},
     {"GX2GL_GetDefaultFramebufferTargetDRC", reinterpret_cast<GX2GL_Proc>(GX2GL_GetDefaultFramebufferTargetDRC)},
+    {"GX2GL_GetSDLProcAddress", reinterpret_cast<GX2GL_Proc>(GX2GL_GetSDLProcAddress)},
+    {"GX2GL_GetSwapInterval", reinterpret_cast<GX2GL_Proc>(GX2GL_GetSwapInterval)},
+    {"GX2GL_LoadLibrary", reinterpret_cast<GX2GL_Proc>(GX2GL_LoadLibrary)},
+    {"GX2GL_MakeCurrent", reinterpret_cast<GX2GL_Proc>(GX2GL_MakeCurrent)},
+    {"GX2GL_Present", reinterpret_cast<GX2GL_Proc>(GX2GL_Present)},
     {"GX2GL_SetAutomaticDRCEnabled", reinterpret_cast<GX2GL_Proc>(GX2GL_SetAutomaticDRCEnabled)},
     {"GX2GL_SetDefaultFramebufferTargetDRC", reinterpret_cast<GX2GL_Proc>(GX2GL_SetDefaultFramebufferTargetDRC)},
+    {"GX2GL_SetSwapInterval", reinterpret_cast<GX2GL_Proc>(GX2GL_SetSwapInterval)},
+    {"GX2GL_SwapWindow", reinterpret_cast<GX2GL_Proc>(GX2GL_SwapWindow)},
+    {"GX2GL_UnloadLibrary", reinterpret_cast<GX2GL_Proc>(GX2GL_UnloadLibrary)},
     {"glActiveTextureARB", reinterpret_cast<GX2GL_Proc>(glActiveTexture)},
     {"glAttachObjectARB", reinterpret_cast<GX2GL_Proc>(glAttachShader)},
     {"glBindBufferARB", reinterpret_cast<GX2GL_Proc>(glBindBuffer)},

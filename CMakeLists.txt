@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.10)
 project(gl33_gx2 C CXX)
 
-# Enforce Wii U Toolchain
+# Enforce Wii U Toolchain with an iron fist. No getting past this one
 if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
     message(FATAL_ERROR "Please specify -DCMAKE_TOOLCHAIN_FILE=$DEVKITPRO/cmake/WiiU.cmake")
 endif()
@@ -23,6 +23,8 @@ set(SOURCES
     src/core/gl_shader.cpp
     src/core/gx2gl_cafeglsl.cpp
     src/core/gx2gl_shader_compat.cpp
+    src/core/gx2gl_proc.cpp
+    src/core/gx2gl_sdl.cpp
     src/core/gl_vao.cpp
     src/core/gl_framebuffer.cpp
     src/core/gl_draw.cpp
