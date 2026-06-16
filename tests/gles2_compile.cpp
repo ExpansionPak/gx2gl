@@ -1,6 +1,6 @@
 #include <GLES2/gl2.h>
 
-void gles2_compile_smoke(void) {
+void gles2_compile_check(void) {
   GLfloat fvec1[1] = {0.0f};
   GLfloat fvec2[2] = {0.0f, 1.0f};
   GLfloat fvec3[3] = {0.0f, 1.0f, 2.0f};

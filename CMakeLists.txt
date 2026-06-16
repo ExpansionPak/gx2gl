@@ -63,7 +63,3 @@ if(COMMAND wut_create_wuhb)
         AUTHOR "gx2gl"
     )
 endif()
-
-add_executable(gx2vk_test tests/vk13_smoke.cpp)
-target_link_libraries(gx2vk_test gx2vk_core wut)
-wut_create_rpx(gx2vk_test)

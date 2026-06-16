@@ -34,7 +34,7 @@ The current `gx2vk` slice is intentionally narrow:
 
 - `vkGetDeviceBufferMemoryRequirements`
 
-`gx2vk_test.rpx` is a loader smoke test, not a renderer yet. It should hold:
+`gx2vk_test.rpx` is a loader check, not a renderer yet. It should hold:
 
 - green on success
 
