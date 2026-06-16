@@ -1,8 +1,6 @@
 #include <coreinit/debug.h>
 #include <whb/proc.h>
 #include <whb/gfx.h>
-#include <coreinit/memheap.h>
-#include <coreinit/memexpheap.h>
 #include <stdlib.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -832,6 +830,21 @@ int main(int argc, char **argv) {
 
     OSReport("-> Initializing Memory and Context...\n");
     gl_mem_init();
+    void *mem_probe = gl_mem_alloc(GL_MEM_TYPE_MEM2, 96, 64);
+    if (mem_probe && (((uintptr_t)mem_probe & 63u) == 0)) {
+        OSReport("[PASS] gl_mem_alloc returned a 64-byte aligned block.\n");
+    } else {
+        OSReport("[FAIL] gl_mem_alloc returned %p for a 64-byte aligned block.\n",
+                 mem_probe);
+    }
+    gl_mem_free(GL_MEM_TYPE_MEM2, mem_probe);
+    void *zero_probe = gl_mem_alloc(GL_MEM_TYPE_MEM2, 0, 64);
+    if (zero_probe == NULL) {
+        OSReport("[PASS] gl_mem_alloc(size=0) returned NULL.\n");
+    } else {
+        OSReport("[FAIL] gl_mem_alloc(size=0) returned a pointer.\n");
+        gl_mem_free(GL_MEM_TYPE_MEM2, zero_probe);
+    }
     g_gl_context = gl_context_create();
 
     if (!g_gl_context) {

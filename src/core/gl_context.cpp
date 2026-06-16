@@ -7,7 +7,6 @@
 #include "gl_vao.h"
 #include "gl_framebuffer.h"
 #include "gl_draw.h"
-#include <coreinit/memexpheap.h>
 #include <coreinit/mutex.h>
 #include <gx2/event.h>
 #include <gx2/draw.h>

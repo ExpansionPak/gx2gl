@@ -1,8 +1,8 @@
 #include "vk/gx2vk_internal.h"
 
-#include <coreinit/memdefaultheap.h>
 #include <gx2r/buffer.h>
 #include <gx2r/mem.h>
+#include <malloc.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -12,19 +12,32 @@
 
 static bool g_gx2vk_allocator_ready = false;
 
+static uint32_t gx2vk_normalize_alignment(uint32_t alignment) {
+    uint32_t normalized = alignment < sizeof(void *) ? (uint32_t)sizeof(void *) : alignment;
+
+    if ((normalized & (normalized - 1u)) == 0) {
+        return normalized;
+    }
+
+    normalized--;
+    normalized |= normalized >> 1;
+    normalized |= normalized >> 2;
+    normalized |= normalized >> 4;
+    normalized |= normalized >> 8;
+    normalized |= normalized >> 16;
+    normalized++;
+    return normalized;
+}
+
 static void *gx2vk_gx2r_alloc(GX2RResourceFlags flags, uint32_t size, uint32_t alignment) {
     (void)flags;
-    if (alignment == 0) {
-        alignment = 16;
-    }
-    return MEMAllocFromDefaultHeapEx(size, (int32_t)alignment);
+    if (size == 0) return NULL;
+    return memalign((size_t)gx2vk_normalize_alignment(alignment), size);
 }
 
 static void gx2vk_gx2r_free(GX2RResourceFlags flags, void *ptr) {
     (void)flags;
-    if (ptr) {
-        MEMFreeToDefaultHeap(ptr);
-    }
+    free(ptr);
 }
 
 static void gx2vk_ensure_allocator_ready(void) {

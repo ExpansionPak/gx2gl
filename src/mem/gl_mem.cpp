@@ -1,19 +1,24 @@
 #include "gl_mem.h"
 #include "Platform/WiiU_Log.hpp"
-#include <coreinit/memdefaultheap.h>
-#include <coreinit/memexpheap.h>
-#include <coreinit/memheap.h>
-#include <stdarg.h>
-#include <stdio.h>
 
-static MEMHeapHandle mem1_heap        = NULL;
-static MEMHeapHandle mem2_heap        = NULL;
-static bool mem1_use_default_heap     = false;
-static bool mem2_use_default_heap     = false;
+#include <gx2r/mem.h>
+#include <gx2r/resource.h>
+#include <malloc.h>
+#include <stdarg.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 #ifndef GX2GL_ENABLE_VERBOSE_FILE_LOGS
 #define GX2GL_ENABLE_VERBOSE_FILE_LOGS 0
 #endif
+
+typedef struct {
+    uint32_t init_count;
+    uint32_t live_allocations;
+} GLMemState;
+
+static GLMemState g_mem_state;
 
 static void log_mem_step(const char *format, ...) {
 #if GX2GL_ENABLE_VERBOSE_FILE_LOGS
@@ -37,60 +42,101 @@ static void log_mem_step(const char *format, ...) {
 #endif
 }
 
-static bool can_use_exp_heap(MEMHeapHandle heap) {
-    return heap && heap->tag == MEM_EXPANDED_HEAP_TAG;
+static uint32_t normalize_alignment(uint32_t align) {
+    uint32_t normalized = align < sizeof(void *) ? (uint32_t)sizeof(void *) : align;
+
+    if ((normalized & (normalized - 1u)) == 0) {
+        return normalized;
+    }
+
+    normalized--;
+    normalized |= normalized >> 1;
+    normalized |= normalized >> 2;
+    normalized |= normalized >> 4;
+    normalized |= normalized >> 8;
+    normalized |= normalized >> 16;
+    normalized++;
+    return normalized;
 }
 
-static MEMHeapHandle get_heap(gl_mem_type_t type) {
-    return type == GL_MEM_TYPE_MEM1 ? mem1_heap : mem2_heap;
+static const char *mem_type_name(gl_mem_type_t type) {
+    switch (type) {
+    case GL_MEM_TYPE_MEM1: return "MEM1";
+    case GL_MEM_TYPE_MEM2: return "MEM2";
+    default: return "unknown";
+    }
 }
 
-static bool should_use_default_heap(gl_mem_type_t type) {
-    return type == GL_MEM_TYPE_MEM1 ? mem1_use_default_heap : mem2_use_default_heap;
+static gl_mem_type_t mem_type_from_gx2r_flags(GX2RResourceFlags flags) {
+    return (flags & GX2R_RESOURCE_USAGE_FORCE_MEM1) ? GL_MEM_TYPE_MEM1
+                                                    : GL_MEM_TYPE_MEM2;
+}
+
+static void *gx2gl_gx2r_alloc(GX2RResourceFlags flags,
+                              uint32_t size,
+                              uint32_t alignment) {
+    return gl_mem_alloc(mem_type_from_gx2r_flags(flags), size, alignment);
+}
+
+static void gx2gl_gx2r_free(GX2RResourceFlags flags, void *ptr) {
+    gl_mem_free(mem_type_from_gx2r_flags(flags), ptr);
 }
 
 void gl_mem_init(void) {
-    mem1_heap = MEMGetBaseHeapHandle(MEM_BASE_HEAP_MEM1);
-    mem2_heap = MEMGetBaseHeapHandle(MEM_BASE_HEAP_MEM2);
-
-    mem1_use_default_heap = true;
-    mem2_use_default_heap = true;
-
-    log_mem_step("gl_mem_init: base heaps mem1=%p tag=0x%X mem2=%p tag=0x%X using default heap for allocations",
-                 mem1_heap, mem1_heap ? (unsigned int)mem1_heap->tag : 0u,
-                 mem2_heap, mem2_heap ? (unsigned int)mem2_heap->tag : 0u);
+    g_mem_state.init_count++;
+    if (g_mem_state.init_count == 1) {
+        GX2RSetAllocator(gx2gl_gx2r_alloc, gx2gl_gx2r_free);
+    }
+    log_mem_step("gl_mem_init: count=%u", (unsigned int)g_mem_state.init_count);
 }
 
 void gl_mem_shutdown(void) {
-    log_mem_step("gl_mem_shutdown: releasing heap references only");
-    mem1_heap = NULL;
-    mem2_heap = NULL;
-    mem1_use_default_heap = false;
-    mem2_use_default_heap = false;
+    if (g_mem_state.init_count == 0) {
+        return;
+    }
+
+    g_mem_state.init_count--;
+    log_mem_step("gl_mem_shutdown: count=%u live=%u",
+                 (unsigned int)g_mem_state.init_count,
+                 (unsigned int)g_mem_state.live_allocations);
 }
 
 void* gl_mem_alloc(gl_mem_type_t type, size_t size, uint32_t align) {
-    void *ptr = NULL;
+    uint32_t normalized_align;
+    void *ptr;
 
-    if (align == 0) {
-        align = 4;
+    if (size == 0) {
+        return NULL;
     }
 
-    ptr = MEMAllocFromDefaultHeapEx((uint32_t)size, (int32_t)align);
+    normalized_align = normalize_alignment(align);
+    if (normalized_align == 0) {
+        log_mem_step("gl_mem_alloc: alignment overflow type=%s size=%u align=%u",
+                     mem_type_name(type), (unsigned int)size, (unsigned int)align);
+        return NULL;
+    }
 
+    ptr = memalign((size_t)normalized_align, size);
     if (!ptr) {
-        log_mem_step("gl_mem_alloc: failed type=%u size=%u align=%u",
-                     (unsigned int)type, (unsigned int)size, (unsigned int)align);
+        log_mem_step("gl_mem_alloc: failed type=%s size=%u align=%u normalized=%u",
+                     mem_type_name(type), (unsigned int)size,
+                     (unsigned int)align, (unsigned int)normalized_align);
+        return NULL;
     }
 
+    g_mem_state.live_allocations++;
     return ptr;
 }
 
 void gl_mem_free(gl_mem_type_t type, void* ptr) {
+    (void)type;
+
     if (!ptr) {
         return;
     }
 
-    (void)type;
-    MEMFreeToDefaultHeap(ptr);
+    if (g_mem_state.live_allocations > 0) {
+        g_mem_state.live_allocations--;
+    }
+    free(ptr);
 }

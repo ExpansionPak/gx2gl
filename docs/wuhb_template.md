@@ -1,6 +1,6 @@
 # CMake Pattern
 
-Use the stock `wut` helpers so the app keeps building a normal `.rpx` and an
+Use the stock `wut` helpers so the app builds a normal `.rpx` and an
 optional `.wuhb` for content:
 
 ```cmake
