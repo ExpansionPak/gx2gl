@@ -17,7 +17,6 @@ extern "C" {
 typedef struct {
   bool reserved;
   bool in_use;
-  GLenum initial_target;
   GLsizeiptr size;
   GLenum usage;
 
@@ -157,7 +156,7 @@ static GLBuffer *get_buffer(GLuint id) {
   return &g_buffers[id];
 }
 
-static bool ensure_buffer_object(GLuint id, GLenum initial_target) {
+static bool ensure_buffer_object(GLuint id) {
   GLBuffer *buf;
 
   if (id == 0 || id >= MAX_BUFFERS) return false;
@@ -168,7 +167,6 @@ static bool ensure_buffer_object(GLuint id, GLenum initial_target) {
   memset(buf, 0, sizeof(*buf));
   buf->in_use = true;
   buf->reserved = false;
-  buf->initial_target = initial_target;
   buf->usage = GL_STATIC_DRAW;
   reset_mapping_state(buf);
   return true;
@@ -419,7 +417,7 @@ void _gl_BindBuffer(GLenum target, GLuint buffer) {
     _gl_set_error(GL_INVALID_OPERATION);
     return;
   }
-  if (buffer != 0 && !ensure_buffer_object(buffer, target)) {
+  if (buffer != 0 && !ensure_buffer_object(buffer)) {
     _gl_set_error(GL_INVALID_OPERATION);
     return;
   }
@@ -446,7 +444,7 @@ void _gl_BindBufferBase(GLenum target, GLuint index, GLuint buffer) {
     _gl_set_error(GL_INVALID_OPERATION);
     return;
   }
-  if (buffer != 0 && !ensure_buffer_object(buffer, target)) {
+  if (buffer != 0 && !ensure_buffer_object(buffer)) {
     _gl_set_error(GL_INVALID_OPERATION);
     return;
   }
@@ -491,7 +489,7 @@ void _gl_BindBufferRange(GLenum target, GLuint index, GLuint buffer,
     }
     return;
   }
-  if (!ensure_buffer_object(buffer, target)) {
+  if (!ensure_buffer_object(buffer)) {
     _gl_set_error(GL_INVALID_OPERATION);
     return;
   }
@@ -689,6 +687,7 @@ void _gl_GetBufferPointerv(GLenum target, GLenum pname, GLvoid **params) {
 
 void *_gl_MapBuffer(GLenum target, GLenum access) {
   GLbitfield flags;
+  GLBuffer *buf;
 
   switch (access) {
   case GL_READ_ONLY:
@@ -705,10 +704,17 @@ void *_gl_MapBuffer(GLenum target, GLenum access) {
     return NULL;
   }
 
-  return _gl_MapBufferRange(target, 0, get_buffer(get_bound_buffer(target))
-                                           ? get_buffer(get_bound_buffer(target))->size
-                                           : 0,
-                            flags);
+  if (!is_buffer_target(target)) {
+    _gl_set_error(GL_INVALID_ENUM);
+    return NULL;
+  }
+  buf = get_buffer(get_bound_buffer(target));
+  if (!buf) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return NULL;
+  }
+
+  return _gl_MapBufferRange(target, 0, buf->size, flags);
 }
 
 void *_gl_MapBufferRange(GLenum target, GLintptr offset, GLsizeiptr length,
