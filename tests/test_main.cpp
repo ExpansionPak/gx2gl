@@ -1180,10 +1180,13 @@ int main(int argc, char **argv) {
     glBufferData(GL_INVALID_ENUM, 32, vertices, GL_STATIC_DRAW);
     expect_error("glBufferData(GL_INVALID_ENUM)", GL_INVALID_ENUM);
 
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, buffers[1]);
     unsigned short indices[] = { 0, 1, 2 };
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
-    check_gl_error("glBufferData(GL_ELEMENT_ARRAY_BUFFER)");
+    glBindBuffer(GL_ARRAY_BUFFER, buffers[1]);
+    check_gl_error("glBindBuffer(GL_ARRAY_BUFFER index data)");
+    glBufferData(GL_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
+    check_gl_error("glBufferData(GL_ARRAY_BUFFER index data)");
+    glBindBuffer(GL_ARRAY_BUFFER, buffers[0]);
+    check_gl_error("glBindBuffer(GL_ARRAY_BUFFER restore)");
 
     GLuint ubo;
     glGenBuffers(1, &ubo);
@@ -2418,12 +2421,12 @@ int main(int argc, char **argv) {
     GLuint vao;
     glGenVertexArrays(1, &vao);
     check_gl_error("glGenVertexArrays");
-    if (glIsVertexArray(vao) == GL_TRUE) {
-        OSReport("[PASS] glIsVertexArray returned true.\n");
+    if (glIsVertexArray(vao) == GL_FALSE) {
+        OSReport("[PASS] glIsVertexArray returned false before first bind.\n");
     } else {
-        OSReport("[FAIL] glIsVertexArray returned false.\n");
+        OSReport("[FAIL] glIsVertexArray returned true before first bind.\n");
     }
-    check_gl_error("glIsVertexArray");
+    check_gl_error("glIsVertexArray(before bind)");
 
     // Try invalid count
     glGenVertexArrays(-1, &vao);
@@ -2431,8 +2434,74 @@ int main(int argc, char **argv) {
 
     glBindVertexArray(vao);
     check_gl_error("glBindVertexArray");
+    if (glIsVertexArray(vao) == GL_TRUE) {
+        OSReport("[PASS] glIsVertexArray returned true after first bind.\n");
+    } else {
+        OSReport("[FAIL] glIsVertexArray returned false after first bind.\n");
+    }
+    check_gl_error("glIsVertexArray(after bind)");
+    GLint queried_vao_binding = 0;
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &queried_vao_binding);
+    check_gl_error("glGetIntegerv(GL_VERTEX_ARRAY_BINDING)");
+    if ((GLuint)queried_vao_binding == vao) {
+        OSReport("[PASS] GL_VERTEX_ARRAY_BINDING returned the bound VAO.\n");
+    } else {
+        OSReport("[FAIL] GL_VERTEX_ARRAY_BINDING returned %d instead of %u.\n",
+                 queried_vao_binding, (unsigned)vao);
+    }
+    glBindVertexArray(4095);
+    expect_error("glBindVertexArray(unreserved)", GL_INVALID_OPERATION);
+
+    glBindVertexArray(0);
+    check_gl_error("glBindVertexArray(0)");
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, (void*)0);
+    expect_error("glVertexAttribPointer(no VAO)", GL_INVALID_OPERATION);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, buffers[1]);
+    expect_error("glBindBuffer(GL_ELEMENT_ARRAY_BUFFER no VAO)", GL_INVALID_OPERATION);
+    glBindVertexArray(vao);
+    check_gl_error("glBindVertexArray(restore)");
 
     glBindBuffer(GL_ARRAY_BUFFER, buffers[0]);
+    check_gl_error("glBindBuffer(GL_ARRAY_BUFFER for VAO)");
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, buffers[1]);
+    check_gl_error("glBindBuffer(GL_ELEMENT_ARRAY_BUFFER for VAO)");
+    GLint vao_element_binding = 0;
+    glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &vao_element_binding);
+    check_gl_error("glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING)");
+    if (vao_element_binding == (GLint)buffers[1]) {
+        OSReport("[PASS] VAO stored GL_ELEMENT_ARRAY_BUFFER binding.\n");
+    } else {
+        OSReport("[FAIL] VAO element binding returned %d instead of %u.\n",
+                 vao_element_binding, (unsigned)buffers[1]);
+    }
+    GLuint vao2 = 0;
+    glGenVertexArrays(1, &vao2);
+    check_gl_error("glGenVertexArrays(vao2)");
+    glBindVertexArray(vao2);
+    check_gl_error("glBindVertexArray(vao2)");
+    glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &vao_element_binding);
+    check_gl_error("glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING vao2)");
+    if (vao_element_binding == 0) {
+        OSReport("[PASS] Element array binding is VAO-local.\n");
+    } else {
+        OSReport("[FAIL] New VAO inherited element binding %d.\n",
+                 vao_element_binding);
+    }
+    glDeleteVertexArrays(1, &vao2);
+    check_gl_error("glDeleteVertexArrays(bound vao2)");
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &queried_vao_binding);
+    check_gl_error("glGetIntegerv(GL_VERTEX_ARRAY_BINDING after delete)");
+    if (queried_vao_binding == 0 && glIsVertexArray(vao2) == GL_FALSE) {
+        OSReport("[PASS] Deleting bound VAO reset binding and freed the name.\n");
+    } else {
+        OSReport("[FAIL] Deleting bound VAO left binding=%d live=%u.\n",
+                 queried_vao_binding, glIsVertexArray(vao2));
+    }
+    check_gl_error("glIsVertexArray(deleted vao2)");
+    glBindVertexArray(vao2);
+    expect_error("glBindVertexArray(deleted name)", GL_INVALID_OPERATION);
+    glBindVertexArray(vao);
+    check_gl_error("glBindVertexArray(restore original)");
     glEnableVertexAttribArray(0);
     check_gl_error("glEnableVertexAttribArray");
 
@@ -2442,6 +2511,12 @@ int main(int argc, char **argv) {
 
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, (void*)0);
     check_gl_error("glVertexAttribPointer");
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    check_gl_error("glBindBuffer(GL_ARRAY_BUFFER 0 before pointer error)");
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, (void*)0);
+    expect_error("glVertexAttribPointer(no array buffer)", GL_INVALID_OPERATION);
+    glBindBuffer(GL_ARRAY_BUFFER, buffers[0]);
+    check_gl_error("glBindBuffer(GL_ARRAY_BUFFER restore after pointer error)");
 
     glVertexAttribDivisor(0, 1);
     check_gl_error("glVertexAttribDivisor");
@@ -2481,6 +2556,20 @@ int main(int argc, char **argv) {
         OSReport("[FAIL] glGetVertexAttribiv(GL_VERTEX_ATTRIB_ARRAY_DIVISOR) returned %d\n",
                  attrib_divisor);
     }
+    glVertexAttribIPointer(2, 4, GL_UNSIGNED_BYTE, 4, (void*)0);
+    check_gl_error("glVertexAttribIPointer(integer attrib)");
+    GLint attrib_integer = GL_FALSE;
+    GLint attrib_normalized = GL_TRUE;
+    glGetVertexAttribiv(2, GL_VERTEX_ATTRIB_ARRAY_INTEGER, &attrib_integer);
+    check_gl_error("glGetVertexAttribiv(GL_VERTEX_ATTRIB_ARRAY_INTEGER)");
+    glGetVertexAttribiv(2, GL_VERTEX_ATTRIB_ARRAY_NORMALIZED, &attrib_normalized);
+    check_gl_error("glGetVertexAttribiv(GL_VERTEX_ATTRIB_ARRAY_NORMALIZED integer)");
+    if (attrib_integer == GL_TRUE && attrib_normalized == GL_FALSE) {
+        OSReport("[PASS] glVertexAttribIPointer stored integer input state.\n");
+    } else {
+        OSReport("[FAIL] Integer attrib flags returned integer=%d normalized=%d.\n",
+                 attrib_integer, attrib_normalized);
+    }
     GLfloat attrib_size_float = 0.0f;
     glGetVertexAttribfv(0, GL_VERTEX_ATTRIB_ARRAY_SIZE, &attrib_size_float);
     check_gl_error("glGetVertexAttribfv(GL_VERTEX_ATTRIB_ARRAY_SIZE)");
@@ -2504,6 +2593,19 @@ int main(int argc, char **argv) {
         OSReport("[FAIL] glGetVertexAttribfv(GL_CURRENT_VERTEX_ATTRIB) returned {%f, %f, %f, %f}\n",
                  current_attrib[0], current_attrib[1], current_attrib[2],
                  current_attrib[3]);
+    }
+    glVertexAttribI4i(1, -7, 8, -9, 10);
+    check_gl_error("glVertexAttribI4i");
+    GLint current_attrib_i[4] = {0, 0, 0, 0};
+    glGetVertexAttribIiv(1, GL_CURRENT_VERTEX_ATTRIB, current_attrib_i);
+    check_gl_error("glGetVertexAttribIiv(GL_CURRENT_VERTEX_ATTRIB)");
+    if (current_attrib_i[0] == -7 && current_attrib_i[1] == 8 &&
+        current_attrib_i[2] == -9 && current_attrib_i[3] == 10) {
+        OSReport("[PASS] glGetVertexAttribIiv returned signed current attribute values.\n");
+    } else {
+        OSReport("[FAIL] glGetVertexAttribIiv returned {%d, %d, %d, %d}.\n",
+                 current_attrib_i[0], current_attrib_i[1],
+                 current_attrib_i[2], current_attrib_i[3]);
     }
     GLvoid* attrib_pointer = (GLvoid*)1;
     glGetVertexAttribPointerv(0, GL_VERTEX_ATTRIB_ARRAY_POINTER, &attrib_pointer);

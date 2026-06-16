@@ -1449,6 +1449,7 @@ static uint32_t gl_vertex_type_size(GLenum type) {
   case GL_UNSIGNED_INT:
   case GL_INT:
     return 4;
+  case GL_HALF_FLOAT:
   case GL_UNSIGNED_SHORT:
   case GL_SHORT:
     return 2;
@@ -1460,9 +1461,12 @@ static uint32_t gl_vertex_type_size(GLenum type) {
   }
 }
 
-static bool map_vertex_attrib_format(GLenum gl_type, GLboolean normalized, GLint size,
+static bool map_vertex_attrib_format(GLenum gl_type, GLboolean normalized,
+                                     GLboolean integer_input, GLint size,
                                      GX2AttribFormat *format, GX2EndianSwapMode *endian_swap,
                                      uint32_t *mask) {
+  uint32_t flags = 0;
+
   if (!format || !endian_swap || !mask) return false;
 
   *mask = attrib_mask_from_size(size);
@@ -1478,60 +1482,83 @@ static bool map_vertex_attrib_format(GLenum gl_type, GLboolean normalized, GLint
     case 4: *format = GX2_ATTRIB_FORMAT_FLOAT_32_32_32_32; return true;
     default: return false;
     }
+  case GL_HALF_FLOAT:
+    *endian_swap = GX2_ENDIAN_SWAP_8_IN_16;
+    switch (size) {
+    case 1: *format = (GX2AttribFormat)(GX2_ATTRIB_FLAG_SCALED | GX2_ATTRIB_TYPE_16_FLOAT); return true;
+    case 2: *format = (GX2AttribFormat)(GX2_ATTRIB_FLAG_SCALED | GX2_ATTRIB_TYPE_16_16_FLOAT); return true;
+    case 4: *format = (GX2AttribFormat)(GX2_ATTRIB_FLAG_SCALED | GX2_ATTRIB_TYPE_16_16_16_16_FLOAT); return true;
+    default: return false;
+    }
   case GL_UNSIGNED_BYTE:
     *endian_swap = GX2_ENDIAN_SWAP_NONE;
+    flags = integer_input ? GX2_ATTRIB_FLAG_INTEGER
+                          : (normalized ? 0u : GX2_ATTRIB_FLAG_SCALED);
     switch (size) {
-    case 1: *format = normalized ? GX2_ATTRIB_FORMAT_UNORM_8 : GX2_ATTRIB_FORMAT_UINT_8; return true;
-    case 2: *format = normalized ? GX2_ATTRIB_FORMAT_UNORM_8_8 : GX2_ATTRIB_FORMAT_UINT_8_8; return true;
-    case 4: *format = normalized ? GX2_ATTRIB_FORMAT_UNORM_8_8_8_8 : GX2_ATTRIB_FORMAT_UINT_8_8_8_8; return true;
+    case 1: *format = (GX2AttribFormat)(flags | GX2_ATTRIB_TYPE_8); return true;
+    case 2: *format = (GX2AttribFormat)(flags | GX2_ATTRIB_TYPE_8_8); return true;
+    case 4: *format = (GX2AttribFormat)(flags | GX2_ATTRIB_TYPE_8_8_8_8); return true;
     default: return false;
     }
   case GL_BYTE:
     *endian_swap = GX2_ENDIAN_SWAP_NONE;
+    flags = GX2_ATTRIB_FLAG_SIGNED |
+            (integer_input ? GX2_ATTRIB_FLAG_INTEGER
+                           : (normalized ? 0u : GX2_ATTRIB_FLAG_SCALED));
     switch (size) {
-    case 1: *format = normalized ? GX2_ATTRIB_FORMAT_SNORM_8 : GX2_ATTRIB_FORMAT_SINT_8; return true;
-    case 2: *format = normalized ? GX2_ATTRIB_FORMAT_SNORM_8_8 : GX2_ATTRIB_FORMAT_SINT_8_8; return true;
-    case 4: *format = normalized ? GX2_ATTRIB_FORMAT_SNORM_8_8_8_8 : GX2_ATTRIB_FORMAT_SINT_8_8_8_8; return true;
+    case 1: *format = (GX2AttribFormat)(flags | GX2_ATTRIB_TYPE_8); return true;
+    case 2: *format = (GX2AttribFormat)(flags | GX2_ATTRIB_TYPE_8_8); return true;
+    case 4: *format = (GX2AttribFormat)(flags | GX2_ATTRIB_TYPE_8_8_8_8); return true;
     default: return false;
     }
   case GL_UNSIGNED_SHORT:
     *endian_swap = GX2_ENDIAN_SWAP_8_IN_16;
+    flags = integer_input ? GX2_ATTRIB_FLAG_INTEGER
+                          : (normalized ? 0u : GX2_ATTRIB_FLAG_SCALED);
     switch (size) {
-    case 1:
-      *format = normalized ? (GX2AttribFormat)GX2_ATTRIB_TYPE_16
-                           : (GX2AttribFormat)(GX2_ATTRIB_FLAG_INTEGER | GX2_ATTRIB_TYPE_16);
-      return true;
-    case 2:
-      *format = normalized ? (GX2AttribFormat)GX2_ATTRIB_TYPE_16_16
-                           : (GX2AttribFormat)(GX2_ATTRIB_FLAG_INTEGER | GX2_ATTRIB_TYPE_16_16);
-      return true;
+    case 1: *format = (GX2AttribFormat)(flags | GX2_ATTRIB_TYPE_16); return true;
+    case 2: *format = (GX2AttribFormat)(flags | GX2_ATTRIB_TYPE_16_16); return true;
+    case 4: *format = (GX2AttribFormat)(flags | GX2_ATTRIB_TYPE_16_16_16_16); return true;
     default:
       return false;
     }
   case GL_SHORT:
     *endian_swap = GX2_ENDIAN_SWAP_8_IN_16;
+    flags = GX2_ATTRIB_FLAG_SIGNED |
+            (integer_input ? GX2_ATTRIB_FLAG_INTEGER
+                           : (normalized ? 0u : GX2_ATTRIB_FLAG_SCALED));
     switch (size) {
-    case 1:
-      *format = normalized ? (GX2AttribFormat)(GX2_ATTRIB_FLAG_SIGNED | GX2_ATTRIB_TYPE_16)
-                           : (GX2AttribFormat)(GX2_ATTRIB_FLAG_SIGNED | GX2_ATTRIB_FLAG_INTEGER | GX2_ATTRIB_TYPE_16);
-      return true;
-    case 2:
-      *format = normalized ? (GX2AttribFormat)(GX2_ATTRIB_FLAG_SIGNED | GX2_ATTRIB_TYPE_16_16)
-                           : (GX2AttribFormat)(GX2_ATTRIB_FLAG_SIGNED | GX2_ATTRIB_FLAG_INTEGER | GX2_ATTRIB_TYPE_16_16);
-      return true;
+    case 1: *format = (GX2AttribFormat)(flags | GX2_ATTRIB_TYPE_16); return true;
+    case 2: *format = (GX2AttribFormat)(flags | GX2_ATTRIB_TYPE_16_16); return true;
+    case 4: *format = (GX2AttribFormat)(flags | GX2_ATTRIB_TYPE_16_16_16_16); return true;
     default:
       return false;
     }
   case GL_UNSIGNED_INT:
-    if (normalized || size != 1) return false;
+    if (size < 1 || size > 4) return false;
     *endian_swap = GX2_ENDIAN_SWAP_8_IN_32;
-    *format = (GX2AttribFormat)(GX2_ATTRIB_FLAG_INTEGER | GX2_ATTRIB_TYPE_32);
-    return true;
+    flags = integer_input ? GX2_ATTRIB_FLAG_INTEGER
+                          : (normalized ? 0u : GX2_ATTRIB_FLAG_SCALED);
+    switch (size) {
+    case 1: *format = (GX2AttribFormat)(flags | GX2_ATTRIB_TYPE_32); return true;
+    case 2: *format = (GX2AttribFormat)(flags | GX2_ATTRIB_TYPE_32_32); return true;
+    case 3: *format = (GX2AttribFormat)(flags | GX2_ATTRIB_TYPE_32_32_32); return true;
+    case 4: *format = (GX2AttribFormat)(flags | GX2_ATTRIB_TYPE_32_32_32_32); return true;
+    default: return false;
+    }
   case GL_INT:
-    if (normalized || size != 1) return false;
+    if (size < 1 || size > 4) return false;
     *endian_swap = GX2_ENDIAN_SWAP_8_IN_32;
-    *format = (GX2AttribFormat)(GX2_ATTRIB_FLAG_SIGNED | GX2_ATTRIB_FLAG_INTEGER | GX2_ATTRIB_TYPE_32);
-    return true;
+    flags = GX2_ATTRIB_FLAG_SIGNED |
+            (integer_input ? GX2_ATTRIB_FLAG_INTEGER
+                           : (normalized ? 0u : GX2_ATTRIB_FLAG_SCALED));
+    switch (size) {
+    case 1: *format = (GX2AttribFormat)(flags | GX2_ATTRIB_TYPE_32); return true;
+    case 2: *format = (GX2AttribFormat)(flags | GX2_ATTRIB_TYPE_32_32); return true;
+    case 3: *format = (GX2AttribFormat)(flags | GX2_ATTRIB_TYPE_32_32_32); return true;
+    case 4: *format = (GX2AttribFormat)(flags | GX2_ATTRIB_TYPE_32_32_32_32); return true;
+    default: return false;
+    }
   default:
     return false;
   }
@@ -1621,7 +1648,8 @@ void gl_bind_program_fetch_shader(void) {
 
     component_size = gl_vertex_type_size(state.type);
     if (component_size == 0 ||
-        !map_vertex_attrib_format(state.type, state.normalized, state.size, &format, &endian_swap, &mask)) {
+        !map_vertex_attrib_format(state.type, state.normalized, state.integer_input,
+                                  state.size, &format, &endian_swap, &mask)) {
       WiiU_Log("gx2gl: unsupported vertex format for attribute %u (%s): type=0x%04x normalized=%u size=%d.",
                slot, reflection->name ? reflection->name : "<unnamed>",
                (unsigned int)state.type, (unsigned int)state.normalized, (int)state.size);

@@ -67,6 +67,7 @@ void _gl_DrawArrays(GLenum mode, GLint first, GLsizei count) { _gl_DrawArraysIns
 void _gl_DrawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLsizei instancecount) {
     GX2PrimitiveMode prim;
     if (!g_gl_context || !g_gl_context->bound_program) { _gl_set_error(GL_INVALID_OPERATION); return; }
+    if (!gl_vao_has_bound_array()) { _gl_set_error(GL_INVALID_OPERATION); return; }
     if (first < 0 || count < 0 || instancecount < 0) { _gl_set_error(GL_INVALID_VALUE); return; }
     if (!validate_draw_mode(mode, &prim)) { _gl_set_error(GL_INVALID_ENUM); return; }
     if (count == 0 || instancecount == 0) return;
@@ -81,6 +82,7 @@ void _gl_DrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *ind
 void _gl_DrawElementsInstanced(GLenum mode, GLsizei count, GLenum type, const GLvoid *indices, GLsizei instancecount) {
     GX2PrimitiveMode prim;
     if (!g_gl_context || !g_gl_context->bound_program) { _gl_set_error(GL_INVALID_OPERATION); return; }
+    if (!gl_vao_has_bound_array()) { _gl_set_error(GL_INVALID_OPERATION); return; }
     if (count < 0 || instancecount < 0) { _gl_set_error(GL_INVALID_VALUE); return; }
     if (!validate_draw_mode(mode, &prim)) { _gl_set_error(GL_INVALID_ENUM); return; }
     if (count == 0 || instancecount == 0) return;
@@ -100,6 +102,7 @@ void _gl_DrawRangeElements(GLenum mode, GLuint start, GLuint end, GLsizei count,
 void _gl_DrawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, const GLvoid *indices, GLint basevertex) {
     GX2PrimitiveMode prim;
     if (!g_gl_context || !g_gl_context->bound_program) { _gl_set_error(GL_INVALID_OPERATION); return; }
+    if (!gl_vao_has_bound_array()) { _gl_set_error(GL_INVALID_OPERATION); return; }
     if (count < 0) { _gl_set_error(GL_INVALID_VALUE); return; }
     if (!validate_draw_mode(mode, &prim)) { _gl_set_error(GL_INVALID_ENUM); return; }
     if (count == 0) return;
@@ -122,6 +125,7 @@ void _gl_DrawRangeElementsBaseVertex(GLenum mode, GLuint start, GLuint end, GLsi
 void _gl_DrawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLenum type, const GLvoid *indices, GLsizei instancecount, GLint basevertex) {
     GX2PrimitiveMode prim;
     if (!g_gl_context || !g_gl_context->bound_program) { _gl_set_error(GL_INVALID_OPERATION); return; }
+    if (!gl_vao_has_bound_array()) { _gl_set_error(GL_INVALID_OPERATION); return; }
     if (count < 0 || instancecount < 0) { _gl_set_error(GL_INVALID_VALUE); return; }
     if (!validate_draw_mode(mode, &prim)) { _gl_set_error(GL_INVALID_ENUM); return; }
     if (count == 0 || instancecount == 0) return;

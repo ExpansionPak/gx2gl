@@ -43,3 +43,9 @@ The current `gx2vk` slice is intentionally narrow:
 Don't use gx2vk. I'm warning you.
 
 (unless you wanna contribute)
+
+## Performance
+
+This has only really been tested with Sonic 3 A.I.R. so far, which is kind of a worst-case stress test and not the best performance benchmark.
+
+If you need maximum performance, interface with GX2 directly. If you want to skip the absolute horror of GX2 and actually get something rendering first, this is a good start.

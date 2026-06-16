@@ -66,6 +66,7 @@ void _gl_VertexAttribDivisor(GLuint index, GLuint divisor);
 void gl_vao_set_element_array_buffer(GLuint buffer);
 GLuint gl_vao_get_element_array_buffer(void);
 void gl_vao_unbind_buffer(GLuint buffer);
+GLboolean gl_vao_has_bound_array(void);
 GLboolean gl_vao_get_attrib_state(GLuint index, gl_vao_attrib_state_t *state);
 
 void gl_bind_vao(void);

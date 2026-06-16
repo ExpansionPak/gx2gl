@@ -417,6 +417,10 @@ void _gl_BindBuffer(GLenum target, GLuint buffer) {
     _gl_set_error(GL_INVALID_OPERATION);
     return;
   }
+  if (target == GL_ELEMENT_ARRAY_BUFFER && !gl_vao_has_bound_array()) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
   if (buffer != 0 && !ensure_buffer_object(buffer)) {
     _gl_set_error(GL_INVALID_OPERATION);
     return;
