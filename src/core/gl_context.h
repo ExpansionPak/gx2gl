@@ -258,6 +258,7 @@ typedef struct {
 #define GL_DIRTY_LOGIC_OP       (1 << 14)
 #define GL_DIRTY_POINT_SIZE     (1 << 15)
 #define GL_DIRTY_PRIMITIVE_RESTART (1 << 16)
+#define GL_DIRTY_MULTISAMPLE    (1 << 17)
 
 #define GL_ERROR_QUEUE_SIZE 8
 #define GL33_MAX_VERTEX_ATTRIBS 16
@@ -312,6 +313,7 @@ typedef struct {
     GLfloat clear_color[4], clear_depth;
     GLint clear_stencil;
     GLboolean depth_test_enabled, stencil_test_enabled, blend_enabled, cull_face_enabled, scissor_test_enabled, sample_coverage_enabled;
+    GLboolean sample_alpha_to_coverage_enabled, color_logic_op_enabled;
     GLboolean primitive_restart_enabled;
     GLboolean polygon_offset_point_enabled, polygon_offset_line_enabled, polygon_offset_fill_enabled, sample_coverage_invert;
     GLfloat sample_coverage_value;

@@ -75,8 +75,11 @@ void _gl_GetBooleanv(GLenum pname, GLboolean *data) {
     case GL_DEPTH_TEST: *data = g_gl_context->depth_test_enabled; break;
     case GL_STENCIL_TEST: *data = g_gl_context->stencil_test_enabled; break;
     case GL_BLEND: *data = g_gl_context->blend_enabled; break;
+    case GL_COLOR_LOGIC_OP: *data = g_gl_context->color_logic_op_enabled; break;
     case GL_CULL_FACE: *data = g_gl_context->cull_face_enabled; break;
     case GL_SCISSOR_TEST: *data = g_gl_context->scissor_test_enabled; break;
+    case GL_SAMPLE_ALPHA_TO_COVERAGE: *data = g_gl_context->sample_alpha_to_coverage_enabled; break;
+    case GL_SAMPLE_COVERAGE: *data = g_gl_context->sample_coverage_enabled; break;
     case GL_SAMPLE_COVERAGE_INVERT: *data = g_gl_context->sample_coverage_invert; break;
     case GL_DEPTH_WRITEMASK: *data = g_gl_context->depth_mask; break;
     case GL_COLOR_WRITEMASK:
