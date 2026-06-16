@@ -283,6 +283,7 @@ typedef struct {
     gl_uniform_buffer_binding_t uniform_buffer_bindings[GL33_MAX_UNIFORM_BUFFER_BINDINGS];
     gl_uniform_buffer_binding_t transform_feedback_buffer_bindings[GL33_MAX_TRANSFORM_FEEDBACK_BUFFER_BINDINGS];
     GLuint active_texture;
+    GLuint bound_texture_1d[32];
     GLuint bound_texture_2d[32];
     GLuint bound_texture_3d[32];
     GLuint bound_texture_cube[32];

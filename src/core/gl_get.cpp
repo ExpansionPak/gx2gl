@@ -44,6 +44,14 @@ static const char *g_extensions[] = {
 };
 static const uint32_t g_extension_count = 4;
 
+static unsigned active_texture_unit(void) {
+    if (!g_gl_context || g_gl_context->active_texture < GL_TEXTURE0) {
+        return 0;
+    }
+    unsigned unit = (unsigned)(g_gl_context->active_texture - GL_TEXTURE0);
+    return unit < 32 ? unit : 0;
+}
+
 const GLubyte *_gl_GetString(GLenum name) {
     switch (name) {
     case GL_VENDOR: return (const GLubyte *)g_vendor;
@@ -112,7 +120,11 @@ void _gl_GetIntegerv(GLenum pname, GLint *data) {
     case GL_COPY_WRITE_BUFFER_BINDING: *data = (GLint)g_gl_context->bound_copy_write_buffer; break;
     case GL_PIXEL_PACK_BUFFER_BINDING: *data = (GLint)g_gl_context->bound_pixel_pack_buffer; break;
     case GL_PIXEL_UNPACK_BUFFER_BINDING: *data = (GLint)g_gl_context->bound_pixel_unpack_buffer; break;
-    case GL_TEXTURE_BUFFER: *data = (GLint)g_gl_context->bound_texture_buffer; break;
+    case GL_TEXTURE_BINDING_1D: *data = (GLint)g_gl_context->bound_texture_1d[active_texture_unit()]; break;
+    case GL_TEXTURE_BINDING_2D: *data = (GLint)g_gl_context->bound_texture_2d[active_texture_unit()]; break;
+    case GL_TEXTURE_BINDING_3D: *data = (GLint)g_gl_context->bound_texture_3d[active_texture_unit()]; break;
+    case GL_TEXTURE_BINDING_CUBE_MAP: *data = (GLint)g_gl_context->bound_texture_cube[active_texture_unit()]; break;
+    case GL_TEXTURE_BINDING_BUFFER: *data = (GLint)g_gl_context->bound_texture_buffer; break;
     case GL_TRANSFORM_FEEDBACK_BUFFER_BINDING:
         *data = (GLint)g_gl_context->bound_transform_feedback_buffer;
         break;

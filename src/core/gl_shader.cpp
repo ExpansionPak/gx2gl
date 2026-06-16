@@ -1319,6 +1319,7 @@ static GLuint get_bound_texture_for_unit(GLuint unit) {
   tex_id = g_gl_context->bound_texture_2d[unit];
   if (tex_id == 0) tex_id = g_gl_context->bound_texture_cube[unit];
   if (tex_id == 0) tex_id = g_gl_context->bound_texture_3d[unit];
+  if (tex_id == 0) tex_id = g_gl_context->bound_texture_1d[unit];
   return tex_id;
 }
 

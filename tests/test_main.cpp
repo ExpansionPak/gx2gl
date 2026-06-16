@@ -833,7 +833,7 @@ int main(int argc, char **argv) {
     OSReport("-> Initializing Memory and Context...\n");
     gl_mem_init();
     g_gl_context = gl_context_create();
-    
+
     if (!g_gl_context) {
         OSReport("[CRITICAL FAIL] Context creation failed!\n");
         WHBGfxShutdown();
@@ -844,7 +844,7 @@ int main(int argc, char **argv) {
     OSReport("-> Testing Limits & Capabilities (Phase 11)...\n");
     const GLubyte* vendor = glGetString(GL_VENDOR);
     check_gl_error("glGetString(GL_VENDOR)");
-    
+
     OSReport("   Negative test: Invalid string query\n");
     glGetString(GL_INVALID_ENUM);
     expect_error("glGetString(GL_INVALID_ENUM)", GL_INVALID_ENUM);
@@ -1119,7 +1119,7 @@ int main(int argc, char **argv) {
         OSReport("[FAIL] glIsBuffer returned true before first bind.\n");
     }
     check_gl_error("glIsBuffer(unbound generated name)");
-    
+
     // Try invalid count
     GLuint bad_buffers[1] = {0};
     glGenBuffers(-1, bad_buffers);
@@ -1133,7 +1133,7 @@ int main(int argc, char **argv) {
         OSReport("[FAIL] glIsBuffer returned false after first bind.\n");
     }
     check_gl_error("glIsBuffer(bound name)");
-    
+
     // Try bad target
     glBindBuffer(GL_INVALID_ENUM, buffers[0]);
     expect_error("glBindBuffer(GL_INVALID_ENUM)", GL_INVALID_ENUM);
@@ -1248,23 +1248,40 @@ int main(int argc, char **argv) {
     GLuint tex[2];
     glGenTextures(2, tex);
     check_gl_error("glGenTextures");
-    if (glIsTexture(tex[0]) == GL_TRUE) {
-        OSReport("[PASS] glIsTexture returned true.\n");
+    if (glIsTexture(tex[0]) == GL_FALSE) {
+        OSReport("[PASS] glIsTexture returned false before first bind.\n");
     } else {
-        OSReport("[FAIL] glIsTexture returned false.\n");
+        OSReport("[FAIL] glIsTexture returned true before first bind.\n");
     }
-    check_gl_error("glIsTexture");
-    
+    check_gl_error("glIsTexture(before bind)");
+
     // Try invalid count
     glGenTextures(-5, tex);
     expect_error("glGenTextures(-5)", GL_INVALID_VALUE);
-    
+
     glBindTexture(GL_TEXTURE_2D, tex[0]);
     check_gl_error("glBindTexture");
-    
+    if (glIsTexture(tex[0]) == GL_TRUE) {
+        OSReport("[PASS] glIsTexture returned true after first bind.\n");
+    } else {
+        OSReport("[FAIL] glIsTexture returned false after first bind.\n");
+    }
+    check_gl_error("glIsTexture(after bind)");
+
     // Try bad target
     glBindTexture(GL_INVALID_ENUM, tex[0]);
     expect_error("glBindTexture(GL_INVALID_ENUM)", GL_INVALID_ENUM);
+    glBindTexture(GL_TEXTURE_3D, tex[0]);
+    expect_error("glBindTexture(target mismatch)", GL_INVALID_OPERATION);
+    GLint bound_2d_texture = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &bound_2d_texture);
+    check_gl_error("glGetIntegerv(GL_TEXTURE_BINDING_2D)");
+    if ((GLuint)bound_2d_texture == tex[0]) {
+        OSReport("[PASS] GL_TEXTURE_BINDING_2D tracked the active unit binding.\n");
+    } else {
+        OSReport("[FAIL] GL_TEXTURE_BINDING_2D returned %u instead of %u.\n",
+                 (unsigned)bound_2d_texture, (unsigned)tex[0]);
+    }
 
     unsigned char pixels[4 * 4 * 4]; // White texture data
     memset(pixels, 255, sizeof(pixels));
@@ -1302,9 +1319,84 @@ int main(int argc, char **argv) {
     expect_error("glTexSubImage3D(out_of_bounds)", GL_INVALID_VALUE);
     glGenerateMipmap(GL_TEXTURE_3D);
     check_gl_error("glGenerateMipmap(GL_TEXTURE_3D)");
+    GLuint tex1d = 0;
+    glGenTextures(1, &tex1d);
+    check_gl_error("glGenTextures(1D)");
+    glBindTexture(GL_TEXTURE_1D, tex1d);
+    check_gl_error("glBindTexture(GL_TEXTURE_1D)");
+    GLubyte pixels1d[8] = {9, 10, 11, 12, 13, 14, 15, 16};
+    glTexImage1D(GL_TEXTURE_1D, 0, GL_RGBA8, 2, 0, GL_RGBA,
+                 GL_UNSIGNED_BYTE, pixels1d);
+    check_gl_error("glTexImage1D");
+    GLint tex1d_width = 0;
+    GLint tex1d_height = 0;
+    GLint tex1d_internal = 0;
+    glGetTexLevelParameteriv(GL_TEXTURE_1D, 0, GL_TEXTURE_WIDTH, &tex1d_width);
+    check_gl_error("glGetTexLevelParameteriv(GL_TEXTURE_1D width)");
+    glGetTexLevelParameteriv(GL_TEXTURE_1D, 0, GL_TEXTURE_HEIGHT, &tex1d_height);
+    check_gl_error("glGetTexLevelParameteriv(GL_TEXTURE_1D height)");
+    glGetTexLevelParameteriv(GL_TEXTURE_1D, 0, GL_TEXTURE_INTERNAL_FORMAT,
+                             &tex1d_internal);
+    check_gl_error("glGetTexLevelParameteriv(GL_TEXTURE_1D internal)");
+    GLubyte readback1d[8] = {0};
+    glGetTexImage(GL_TEXTURE_1D, 0, GL_RGBA, GL_UNSIGNED_BYTE, readback1d);
+    check_gl_error("glGetTexImage(GL_TEXTURE_1D)");
+    if (tex1d_width == 2 && tex1d_height == 1 && tex1d_internal == GL_RGBA8 &&
+        readback1d[0] == 9 && readback1d[4] == 13) {
+        OSReport("[PASS] GL_TEXTURE_1D upload/query/readback paths worked.\n");
+    } else {
+        OSReport("[FAIL] GL_TEXTURE_1D returned width=%d height=%d internal=0x%04X pixels={%u,%u}.\n",
+                 tex1d_width, tex1d_height, tex1d_internal,
+                 readback1d[0], readback1d[4]);
+    }
+    glBindTexture(GL_TEXTURE_2D, tex[0]);
+    check_gl_error("glBindTexture(restore_2d_after_1d)");
+
+    GLuint cube_tex = 0;
+    glGenTextures(1, &cube_tex);
+    check_gl_error("glGenTextures(cube)");
+    glBindTexture(GL_TEXTURE_CUBE_MAP, cube_tex);
+    check_gl_error("glBindTexture(GL_TEXTURE_CUBE_MAP)");
+    GLubyte cube_face[2 * 2 * 4];
+    memset(cube_face, 42, sizeof(cube_face));
+    glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X, 0, GL_RGBA8, 2, 2, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, cube_face);
+    check_gl_error("glTexImage2D(cube +X)");
+    GLint cube_pos_width = 0;
+    GLint cube_neg_width = -1;
+    glGetTexLevelParameteriv(GL_TEXTURE_CUBE_MAP_POSITIVE_X, 0,
+                             GL_TEXTURE_WIDTH, &cube_pos_width);
+    check_gl_error("glGetTexLevelParameteriv(cube +X width)");
+    glGetTexLevelParameteriv(GL_TEXTURE_CUBE_MAP_NEGATIVE_X, 0,
+                             GL_TEXTURE_WIDTH, &cube_neg_width);
+    check_gl_error("glGetTexLevelParameteriv(cube -X width undefined)");
+    if (cube_pos_width == 2 && cube_neg_width == 0) {
+        OSReport("[PASS] Cube face level queries distinguish defined faces.\n");
+    } else {
+        OSReport("[FAIL] Cube face queries returned +X=%d -X=%d.\n",
+                 cube_pos_width, cube_neg_width);
+    }
+    for (GLenum face = GL_TEXTURE_CUBE_MAP_NEGATIVE_X;
+         face <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z; ++face) {
+        glTexImage2D(face, 0, GL_RGBA8, 2, 2, 0, GL_RGBA,
+                     GL_UNSIGNED_BYTE, cube_face);
+        check_gl_error("glTexImage2D(cube remaining face)");
+    }
+    glGenerateMipmap(GL_TEXTURE_CUBE_MAP);
+    check_gl_error("glGenerateMipmap(GL_TEXTURE_CUBE_MAP)");
+    GLint cube_mip_width = 0;
+    glGetTexLevelParameteriv(GL_TEXTURE_CUBE_MAP_POSITIVE_Z, 1,
+                             GL_TEXTURE_WIDTH, &cube_mip_width);
+    check_gl_error("glGetTexLevelParameteriv(cube mip width)");
+    if (cube_mip_width == 1) {
+        OSReport("[PASS] Cube map mipmap generation defined level 1.\n");
+    } else {
+        OSReport("[FAIL] Cube map mipmap level width returned %d.\n",
+                 cube_mip_width);
+    }
     glBindTexture(GL_TEXTURE_2D, tex[0]);
     check_gl_error("glBindTexture(restore_2d)");
-    
+
     // Try negative width
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, -4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
     expect_error("glTexImage2D(negative_width)", GL_INVALID_VALUE);
@@ -1337,7 +1429,7 @@ int main(int argc, char **argv) {
         OSReport("[FAIL] glGetTexParameterfv(GL_TEXTURE_WRAP_S) returned %f\n",
                  queried_wrap_s);
     }
-    
+
     // Try bad target
     glTexParameteri(GL_INVALID_ENUM, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     expect_error("glTexParameteri(GL_INVALID_ENUM)", GL_INVALID_ENUM);
@@ -1345,6 +1437,43 @@ int main(int argc, char **argv) {
     expect_error("glTexParameteri(invalid_mag_filter)", GL_INVALID_ENUM);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_INVALID_ENUM);
     expect_error("glTexParameteri(invalid_wrap)", GL_INVALID_ENUM);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 1);
+    check_gl_error("glTexParameteri(GL_TEXTURE_BASE_LEVEL)");
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 2);
+    check_gl_error("glTexParameteri(GL_TEXTURE_MAX_LEVEL)");
+    GLint swizzle_rgba[4] = {GL_BLUE, GL_GREEN, GL_RED, GL_ALPHA};
+    glTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_RGBA, swizzle_rgba);
+    check_gl_error("glTexParameteriv(GL_TEXTURE_SWIZZLE_RGBA)");
+    GLfloat border_color[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+    glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, border_color);
+    check_gl_error("glTexParameterfv(GL_TEXTURE_BORDER_COLOR)");
+    GLint queried_base_level = 0;
+    GLint queried_max_level = 0;
+    GLint queried_swizzle[4] = {0, 0, 0, 0};
+    GLfloat queried_border[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, &queried_base_level);
+    check_gl_error("glGetTexParameteriv(GL_TEXTURE_BASE_LEVEL)");
+    glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, &queried_max_level);
+    check_gl_error("glGetTexParameteriv(GL_TEXTURE_MAX_LEVEL)");
+    glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_RGBA, queried_swizzle);
+    check_gl_error("glGetTexParameteriv(GL_TEXTURE_SWIZZLE_RGBA)");
+    glGetTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, queried_border);
+    check_gl_error("glGetTexParameterfv(GL_TEXTURE_BORDER_COLOR)");
+    if (queried_base_level == 1 && queried_max_level == 2 &&
+        queried_swizzle[0] == GL_BLUE && queried_swizzle[2] == GL_RED &&
+        queried_border[0] == 1.0f && queried_border[3] == 1.0f) {
+        OSReport("[PASS] Texture object extended parameters round-tripped.\n");
+    } else {
+        OSReport("[FAIL] Texture params base=%d max=%d swizzle={0x%04X,0x%04X,0x%04X,0x%04X} border={%f,%f,%f,%f}.\n",
+                 queried_base_level, queried_max_level, queried_swizzle[0],
+                 queried_swizzle[1], queried_swizzle[2], queried_swizzle[3],
+                 queried_border[0], queried_border[1], queried_border[2],
+                 queried_border[3]);
+    }
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
+    check_gl_error("glTexParameteri(GL_TEXTURE_BASE_LEVEL restore)");
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 1000);
+    check_gl_error("glTexParameteri(GL_TEXTURE_MAX_LEVEL restore)");
     glCompressedTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 4, 4, 0, 64, pixels);
     expect_error("glCompressedTexImage2D(unsupported)", GL_INVALID_ENUM);
     glCompressedTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 4, 4, GL_RGBA, 64, pixels);
@@ -1684,6 +1813,16 @@ int main(int argc, char **argv) {
     GLfloat sampler_mag_filter_param = (GLfloat)GL_LINEAR;
     glSamplerParameterfv(sampler, GL_TEXTURE_MAG_FILTER, &sampler_mag_filter_param);
     check_gl_error("glSamplerParameterfv");
+    GLfloat sampler_lod_min = -2.0f;
+    GLfloat sampler_border_color[4] = {0.0f, 1.0f, 0.0f, 1.0f};
+    glSamplerParameterf(sampler, GL_TEXTURE_MIN_LOD, sampler_lod_min);
+    check_gl_error("glSamplerParameterf(GL_TEXTURE_MIN_LOD)");
+    glSamplerParameteri(sampler, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE);
+    check_gl_error("glSamplerParameteri(GL_TEXTURE_COMPARE_MODE)");
+    glSamplerParameteri(sampler, GL_TEXTURE_COMPARE_FUNC, GL_LESS);
+    check_gl_error("glSamplerParameteri(GL_TEXTURE_COMPARE_FUNC)");
+    glSamplerParameterfv(sampler, GL_TEXTURE_BORDER_COLOR, sampler_border_color);
+    check_gl_error("glSamplerParameterfv(GL_TEXTURE_BORDER_COLOR)");
     GLint sampler_min_filter = 0;
     glGetSamplerParameteriv(sampler, GL_TEXTURE_MIN_FILTER, &sampler_min_filter);
     check_gl_error("glGetSamplerParameteriv");
@@ -1696,10 +1835,39 @@ int main(int argc, char **argv) {
     GLfloat sampler_wrap_s = 0.0f;
     glGetSamplerParameterfv(sampler, GL_TEXTURE_WRAP_S, &sampler_wrap_s);
     check_gl_error("glGetSamplerParameterfv");
+    GLfloat queried_sampler_min_lod = 0.0f;
+    GLint queried_sampler_compare_mode = 0;
+    GLint queried_sampler_compare_func = 0;
+    GLfloat queried_sampler_border[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    glGetSamplerParameterfv(sampler, GL_TEXTURE_MIN_LOD,
+                            &queried_sampler_min_lod);
+    check_gl_error("glGetSamplerParameterfv(GL_TEXTURE_MIN_LOD)");
+    glGetSamplerParameteriv(sampler, GL_TEXTURE_COMPARE_MODE,
+                            &queried_sampler_compare_mode);
+    check_gl_error("glGetSamplerParameteriv(GL_TEXTURE_COMPARE_MODE)");
+    glGetSamplerParameteriv(sampler, GL_TEXTURE_COMPARE_FUNC,
+                            &queried_sampler_compare_func);
+    check_gl_error("glGetSamplerParameteriv(GL_TEXTURE_COMPARE_FUNC)");
+    glGetSamplerParameterfv(sampler, GL_TEXTURE_BORDER_COLOR,
+                            queried_sampler_border);
+    check_gl_error("glGetSamplerParameterfv(GL_TEXTURE_BORDER_COLOR)");
     if ((GLint)sampler_wrap_s == GL_CLAMP_TO_EDGE) {
         OSReport("[PASS] glGetSamplerParameterfv returned GL_CLAMP_TO_EDGE.\n");
     } else {
         OSReport("[FAIL] glGetSamplerParameterfv returned %f\n", sampler_wrap_s);
+    }
+    if (queried_sampler_min_lod == -2.0f &&
+        queried_sampler_compare_mode == GL_COMPARE_REF_TO_TEXTURE &&
+        queried_sampler_compare_func == GL_LESS &&
+        queried_sampler_border[1] == 1.0f &&
+        queried_sampler_border[3] == 1.0f) {
+        OSReport("[PASS] Extended sampler parameters round-tripped.\n");
+    } else {
+        OSReport("[FAIL] Extended sampler params lod=%f compare={0x%04X,0x%04X} border={%f,%f,%f,%f}.\n",
+                 queried_sampler_min_lod, queried_sampler_compare_mode,
+                 queried_sampler_compare_func, queried_sampler_border[0],
+                 queried_sampler_border[1], queried_sampler_border[2],
+                 queried_sampler_border[3]);
     }
     glBindSampler(0, sampler);
     check_gl_error("glBindSampler");
@@ -1715,7 +1883,7 @@ int main(int argc, char **argv) {
         OSReport("[FAIL] glIsShader returned false.\n");
     }
     check_gl_error("glIsShader");
-    
+
     // Try bad shader
     glCreateShader(GL_INVALID_ENUM);
     expect_error("glCreateShader(GL_INVALID_ENUM)", GL_INVALID_ENUM);
@@ -1787,7 +1955,7 @@ int main(int argc, char **argv) {
 
     glCompileShader(pshader);
     check_gl_error("glCompileShader(fragment)");
-    
+
     GLuint prog = glCreateProgram();
     check_gl_error("glCreateProgram");
     if (glIsProgram(prog) == GL_TRUE) {
@@ -1796,7 +1964,7 @@ int main(int argc, char **argv) {
         OSReport("[FAIL] glIsProgram returned false.\n");
     }
     check_gl_error("glIsProgram");
-    
+
     glAttachShader(prog, vshader);
     check_gl_error("glAttachShader");
 
@@ -1836,11 +2004,11 @@ int main(int argc, char **argv) {
         OSReport("[FAIL] glGetAttachedShaders returned %d\n",
                  attached_shader_written);
     }
-    
+
     // Try null program
     glAttachShader(0, vshader);
     expect_error("glAttachShader(0, ...)", GL_INVALID_OPERATION);
-    
+
     glLinkProgram(prog);
     check_gl_error("glLinkProgram(compiled_pair)");
     GLint program_link_status = GL_TRUE;
@@ -2176,15 +2344,15 @@ int main(int argc, char **argv) {
     } else {
         expect_error("glUseProgram(compiled_pair)", GL_INVALID_OPERATION);
     }
-    
+
     // Try bad program
     glUseProgram(999);
     expect_error("glUseProgram(999)", GL_INVALID_VALUE);
-    
+
     // Drop current program
     glUseProgram(0);
     check_gl_error("glUseProgram(0)");
-    
+
     // Uniform without program
     glUniform1f(0, 1.0f);
     expect_error("glUniform1f(unbound_prog)", GL_INVALID_OPERATION);
@@ -2256,18 +2424,18 @@ int main(int argc, char **argv) {
         OSReport("[FAIL] glIsVertexArray returned false.\n");
     }
     check_gl_error("glIsVertexArray");
-    
+
     // Try invalid count
     glGenVertexArrays(-1, &vao);
     expect_error("glGenVertexArrays(-1)", GL_INVALID_VALUE);
 
     glBindVertexArray(vao);
     check_gl_error("glBindVertexArray");
-    
+
     glBindBuffer(GL_ARRAY_BUFFER, buffers[0]);
     glEnableVertexAttribArray(0);
     check_gl_error("glEnableVertexAttribArray");
-    
+
     // Try bad attrib
     glEnableVertexAttribArray(999);
     expect_error("glEnableVertexAttribArray(999)", GL_INVALID_VALUE);
@@ -2346,7 +2514,7 @@ int main(int argc, char **argv) {
         OSReport("[FAIL] glGetVertexAttribPointerv(GL_VERTEX_ATTRIB_ARRAY_POINTER) returned %p\n",
                  attrib_pointer);
     }
-    
+
     // Try bad size
     glVertexAttribPointer(0, 5, GL_FLOAT, GL_FALSE, 0, (void*)0);
     expect_error("glVertexAttribPointer(size=5)", GL_INVALID_VALUE);
@@ -2373,7 +2541,7 @@ int main(int argc, char **argv) {
     }
     glEnableVertexAttribArray(0);
     check_gl_error("glEnableVertexAttribArray(restore)");
-    
+
     // Framebuffer tests next
 
     OSReport("-> Testing Framebuffers (Phase 8)...\n");
@@ -2386,10 +2554,10 @@ int main(int argc, char **argv) {
         OSReport("[FAIL] glIsFramebuffer returned false.\n");
     }
     check_gl_error("glIsFramebuffer");
-    
+
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     check_gl_error("glBindFramebuffer");
-    
+
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex[0], 0);
     check_gl_error("glFramebufferTexture2D");
 
@@ -2430,11 +2598,11 @@ int main(int argc, char **argv) {
     GLenum remap_bufs[2] = { GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT0 };
     glDrawBuffers(2, remap_bufs);
     check_gl_error("glDrawBuffers(remap_supported)");
-    
+
     // Try bad attachment
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_INVALID_ENUM, GL_TEXTURE_2D, tex[0], 0);
     expect_error("glFramebufferTexture2D(GL_INVALID_ENUM attachment)", GL_INVALID_ENUM);
-    
+
     // Try bad target
     glBindFramebuffer(GL_INVALID_ENUM, fbo);
     expect_error("glBindFramebuffer(GL_INVALID_ENUM)", GL_INVALID_ENUM);
@@ -2495,7 +2663,7 @@ int main(int argc, char **argv) {
     expect_error("glReadBuffer(GL_BACK on FBO)", GL_INVALID_OPERATION);
     glReadBuffer(GL_INVALID_ENUM);
     expect_error("glReadBuffer(GL_INVALID_ENUM)", GL_INVALID_ENUM);
-    
+
     glBindFramebuffer(GL_FRAMEBUFFER, 0); // Back to default
     glReadBuffer(GL_BACK);
     check_gl_error("glReadBuffer(default_back)");
@@ -2613,7 +2781,7 @@ int main(int argc, char **argv) {
     check_gl_error("glBindFramebuffer(renderbuffer restore_default)");
 
     OSReport("-> Testing Draw Calls & Synchronization (Phase 9/10)...\n");
-    
+
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     glBindVertexArray(vao);
     // Draw with no program
@@ -2625,14 +2793,14 @@ int main(int argc, char **argv) {
 
     glFlush();
     check_gl_error("glFlush");
-    
+
     glFinish();
     check_gl_error("glFinish");
 
     OSReport("-> Testing Deletions...\n");
     glDeleteVertexArrays(1, &vao);
     check_gl_error("glDeleteVertexArrays");
-    
+
     glDeleteRenderbuffers(2, renderbuffers);
     check_gl_error("glDeleteRenderbuffers");
     glDeleteSamplers(1, &sampler);
@@ -2657,7 +2825,7 @@ int main(int argc, char **argv) {
     gl_context_destroy(g_gl_context);
     g_gl_context = NULL;
     gl_mem_shutdown();
-    
+
     WHBGfxShutdown();
     WHBProcShutdown();
     return 0;
