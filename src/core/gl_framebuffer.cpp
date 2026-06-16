@@ -2219,8 +2219,11 @@ GLboolean gl_read_color_pixels_rgba8(GLint x, GLint y, GLsizei width, GLsizei he
                 break;
             }
             case GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8: {
-                const uint32_t *src_words = (const uint32_t *)read_surface->image;
-                uint32_t pixel = src_words[(size_t)src_y * (size_t)read_surface->pitch + (size_t)src_x];
+                const uint8_t *src_texel =
+                    (const uint8_t *)read_surface->image +
+                    (((size_t)src_y * (size_t)read_surface->pitch) + (size_t)src_x) * 4u;
+                uint32_t pixel;
+                memcpy(&pixel, src_texel, sizeof(pixel));
                 pixel = GPU_TO_CPU_32(pixel);
                 dst_texel[0] = (uint8_t)((pixel >> 24) & 0xFFu);
                 dst_texel[1] = (uint8_t)((pixel >> 16) & 0xFFu);

@@ -1071,14 +1071,33 @@ static bool rebuild_texture_storage(GLTexture *tex, GLsizei width,
   return true;
 }
 
+static uint16_t load_unaligned_u16(const uint8_t *ptr) {
+  uint16_t value;
+  memcpy(&value, ptr, sizeof(value));
+  return value;
+}
+
+static void store_unaligned_u16(uint8_t *ptr, uint16_t value) {
+  memcpy(ptr, &value, sizeof(value));
+}
+
+static uint32_t load_unaligned_u32(const uint8_t *ptr) {
+  uint32_t value;
+  memcpy(&value, ptr, sizeof(value));
+  return value;
+}
+
+static void store_unaligned_u32(uint8_t *ptr, uint32_t value) {
+  memcpy(ptr, &value, sizeof(value));
+}
+
 static void copy_texture_row(uint8_t *dst, const uint8_t *src,
                              uint32_t texel_count,
                              const TextureFormatInfo *info) {
   if (info->packed_u32) {
-    const uint32_t *src32 = (const uint32_t *)src;
-    uint32_t *dst32 = (uint32_t *)dst;
     for (uint32_t i = 0; i < texel_count; ++i) {
-      dst32[i] = CPU_TO_GPU_32(src32[i]);
+      uint32_t word = load_unaligned_u32(src + i * sizeof(uint32_t));
+      store_unaligned_u32(dst + i * sizeof(uint32_t), CPU_TO_GPU_32(word));
     }
     return;
   }
@@ -1086,10 +1105,9 @@ static void copy_texture_row(uint8_t *dst, const uint8_t *src,
   if (info->bytes_per_component == 1) {
     if (info->dst_bytes_per_texel == 4 && info->src_bytes_per_texel == 4 &&
         info->src_components == 4 && info->dst_components == 4) {
-      const uint32_t *src32 = (const uint32_t *)src;
-      uint32_t *dst32 = (uint32_t *)dst;
       for (uint32_t i = 0; i < texel_count; ++i) {
-        dst32[i] = CPU_TO_GPU_32(src32[i]);
+        uint32_t word = load_unaligned_u32(src + i * sizeof(uint32_t));
+        store_unaligned_u32(dst + i * sizeof(uint32_t), CPU_TO_GPU_32(word));
       }
       return;
     }
@@ -1122,21 +1140,21 @@ static void copy_texture_row(uint8_t *dst, const uint8_t *src,
   }
 
   if (info->bytes_per_component == 2) {
-    const uint16_t *src16 = (const uint16_t *)src;
-    uint16_t *dst16 = (uint16_t *)dst;
     uint32_t count = texel_count * info->dst_components;
     for (uint32_t i = 0; i < count; ++i) {
-      dst16[i] = CPU_TO_GPU_16(src16[i]);
+      uint32_t byte_offset = i * sizeof(uint16_t);
+      uint16_t word = load_unaligned_u16(src + byte_offset);
+      store_unaligned_u16(dst + byte_offset, CPU_TO_GPU_16(word));
     }
     return;
   }
 
   if (info->bytes_per_component == 4) {
-    const uint32_t *src32 = (const uint32_t *)src;
-    uint32_t *dst32 = (uint32_t *)dst;
     uint32_t count = texel_count * info->dst_components;
     for (uint32_t i = 0; i < count; ++i) {
-      dst32[i] = CPU_TO_GPU_32(src32[i]);
+      uint32_t byte_offset = i * sizeof(uint32_t);
+      uint32_t word = load_unaligned_u32(src + byte_offset);
+      store_unaligned_u32(dst + byte_offset, CPU_TO_GPU_32(word));
     }
     return;
   }
@@ -1146,10 +1164,9 @@ static void read_texture_row(uint8_t *dst, const uint8_t *src,
                              uint32_t texel_count,
                              const TextureFormatInfo *info) {
   if (info->packed_u32) {
-    const uint32_t *src32 = (const uint32_t *)src;
-    uint32_t *dst32 = (uint32_t *)dst;
     for (uint32_t i = 0; i < texel_count; ++i) {
-      dst32[i] = GPU_TO_CPU_32(src32[i]);
+      uint32_t word = load_unaligned_u32(src + i * sizeof(uint32_t));
+      store_unaligned_u32(dst + i * sizeof(uint32_t), GPU_TO_CPU_32(word));
     }
     return;
   }
@@ -1157,10 +1174,9 @@ static void read_texture_row(uint8_t *dst, const uint8_t *src,
   if (info->bytes_per_component == 1) {
     if (info->dst_bytes_per_texel == 4 && info->src_bytes_per_texel == 4 &&
         info->src_components == 4 && info->dst_components == 4) {
-      const uint32_t *src32 = (const uint32_t *)src;
-      uint32_t *dst32 = (uint32_t *)dst;
       for (uint32_t i = 0; i < texel_count; ++i) {
-        dst32[i] = GPU_TO_CPU_32(src32[i]);
+        uint32_t word = load_unaligned_u32(src + i * sizeof(uint32_t));
+        store_unaligned_u32(dst + i * sizeof(uint32_t), GPU_TO_CPU_32(word));
       }
       return;
     }
@@ -1179,21 +1195,21 @@ static void read_texture_row(uint8_t *dst, const uint8_t *src,
   }
 
   if (info->bytes_per_component == 2) {
-    const uint16_t *src16 = (const uint16_t *)src;
-    uint16_t *dst16 = (uint16_t *)dst;
     uint32_t count = texel_count * info->src_components;
     for (uint32_t i = 0; i < count; ++i) {
-      dst16[i] = GPU_TO_CPU_16(src16[i]);
+      uint32_t byte_offset = i * sizeof(uint16_t);
+      uint16_t word = load_unaligned_u16(src + byte_offset);
+      store_unaligned_u16(dst + byte_offset, GPU_TO_CPU_16(word));
     }
     return;
   }
 
   if (info->bytes_per_component == 4) {
-    const uint32_t *src32 = (const uint32_t *)src;
-    uint32_t *dst32 = (uint32_t *)dst;
     uint32_t count = texel_count * info->src_components;
     for (uint32_t i = 0; i < count; ++i) {
-      dst32[i] = GPU_TO_CPU_32(src32[i]);
+      uint32_t byte_offset = i * sizeof(uint32_t);
+      uint32_t word = load_unaligned_u32(src + byte_offset);
+      store_unaligned_u32(dst + byte_offset, GPU_TO_CPU_32(word));
     }
   }
 }
