@@ -259,6 +259,8 @@ typedef struct {
 #define GL_DIRTY_POINT_SIZE     (1 << 15)
 #define GL_DIRTY_PRIMITIVE_RESTART (1 << 16)
 #define GL_DIRTY_MULTISAMPLE    (1 << 17)
+#define GL_DIRTY_PROVOKING_VERTEX (1 << 18)
+#define GL_DIRTY_RASTERIZER_DISCARD (1 << 19)
 
 #define GL_ERROR_QUEUE_SIZE 8
 #define GL33_MAX_VERTEX_ATTRIBS 16
@@ -310,6 +312,7 @@ typedef struct {
     GLenum stencil_func[2], stencil_fail[2], stencil_zfail[2], stencil_zpass[2];
     GLint stencil_ref[2];
     GLenum cull_face_mode, front_face, polygon_mode, logic_op;
+    GLenum provoking_vertex;
     GLenum clamp_read_color;
     GLfloat polygon_offset_factor, polygon_offset_units, line_width, point_size;
     GLboolean color_mask[4];
@@ -318,7 +321,7 @@ typedef struct {
     GLint clear_stencil;
     GLboolean depth_test_enabled, stencil_test_enabled, blend_enabled, cull_face_enabled, scissor_test_enabled, sample_coverage_enabled;
     GLboolean sample_alpha_to_coverage_enabled, color_logic_op_enabled;
-    GLboolean primitive_restart_enabled;
+    GLboolean primitive_restart_enabled, rasterizer_discard_enabled;
     GLboolean polygon_offset_point_enabled, polygon_offset_line_enabled, polygon_offset_fill_enabled, sample_coverage_invert;
     GLfloat sample_coverage_value;
     GLuint primitive_restart_index;

@@ -1068,6 +1068,48 @@ int main(int argc, char **argv) {
     expect_error("glClampColor(GL_CLAMP_VERTEX_COLOR)", GL_INVALID_ENUM);
     glClampColor(GL_CLAMP_READ_COLOR, GL_INVALID_ENUM);
     expect_error("glClampColor(invalid clamp)", GL_INVALID_ENUM);
+    GLint provoking_vertex = 0;
+    glGetIntegerv(GL_PROVOKING_VERTEX, &provoking_vertex);
+    check_gl_error("glGetIntegerv(GL_PROVOKING_VERTEX default)");
+    if (provoking_vertex == GL_LAST_VERTEX_CONVENTION) {
+        OSReport("[PASS] GL_PROVOKING_VERTEX defaulted to GL_LAST_VERTEX_CONVENTION.\n");
+    } else {
+        OSReport("[FAIL] GL_PROVOKING_VERTEX defaulted to 0x%04X.\n",
+                 provoking_vertex);
+    }
+    glProvokingVertex(GL_FIRST_VERTEX_CONVENTION);
+    check_gl_error("glProvokingVertex(GL_FIRST_VERTEX_CONVENTION)");
+    glGetIntegerv(GL_PROVOKING_VERTEX, &provoking_vertex);
+    check_gl_error("glGetIntegerv(GL_PROVOKING_VERTEX first)");
+    if (provoking_vertex == GL_FIRST_VERTEX_CONVENTION) {
+        OSReport("[PASS] glProvokingVertex stored GL_FIRST_VERTEX_CONVENTION.\n");
+    } else {
+        OSReport("[FAIL] glProvokingVertex stored 0x%04X for first convention.\n",
+                 provoking_vertex);
+    }
+    glProvokingVertex(GL_LAST_VERTEX_CONVENTION);
+    check_gl_error("glProvokingVertex(GL_LAST_VERTEX_CONVENTION)");
+    glProvokingVertex(GL_INVALID_ENUM);
+    expect_error("glProvokingVertex(GL_INVALID_ENUM)", GL_INVALID_ENUM);
+    glEnable(GL_RASTERIZER_DISCARD);
+    check_gl_error("glEnable(GL_RASTERIZER_DISCARD)");
+    if (glIsEnabled(GL_RASTERIZER_DISCARD) == GL_TRUE) {
+        OSReport("[PASS] glEnable(GL_RASTERIZER_DISCARD) updated rasterizer discard state.\n");
+    } else {
+        OSReport("[FAIL] glEnable(GL_RASTERIZER_DISCARD) did not enable the state.\n");
+    }
+    check_gl_error("glIsEnabled(GL_RASTERIZER_DISCARD)");
+    glDisable(GL_RASTERIZER_DISCARD);
+    check_gl_error("glDisable(GL_RASTERIZER_DISCARD)");
+    GLint rasterizer_discard = GL_TRUE;
+    glGetIntegerv(GL_RASTERIZER_DISCARD, &rasterizer_discard);
+    check_gl_error("glGetIntegerv(GL_RASTERIZER_DISCARD)");
+    if (rasterizer_discard == GL_FALSE) {
+        OSReport("[PASS] glDisable(GL_RASTERIZER_DISCARD) restored rasterization.\n");
+    } else {
+        OSReport("[FAIL] glDisable(GL_RASTERIZER_DISCARD) left state at %d.\n",
+                 rasterizer_discard);
+    }
     GLint precision_range[2] = {0, 0};
     GLint precision_bits = -1;
     glGetShaderPrecisionFormat(GL_FRAGMENT_SHADER, GL_HIGH_FLOAT,

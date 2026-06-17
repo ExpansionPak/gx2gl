@@ -126,6 +126,9 @@
 #ifndef GL_LAST_VERTEX_CONVENTION
 #define GL_LAST_VERTEX_CONVENTION 0x8E4E
 #endif
+#ifndef GL_PROVOKING_VERTEX
+#define GL_PROVOKING_VERTEX 0x8E4F
+#endif
 #ifndef GL_TEXTURE_CUBE_MAP_POSITIVE_X
 #define GL_TEXTURE_CUBE_MAP_POSITIVE_X 0x8515
 #endif
@@ -229,6 +232,7 @@ static void gl_context_init_raster_state(gl_context_t *ctx) {
   ctx->cull_face_mode = GL_BACK;
   ctx->front_face = GL_CCW;
   ctx->polygon_mode = GL_FILL;
+  ctx->provoking_vertex = GL_LAST_VERTEX_CONVENTION;
   ctx->clamp_read_color = GL_FIXED_ONLY;
   ctx->line_width = 1.0f;
   ctx->logic_op = GL_COPY;
@@ -1572,7 +1576,11 @@ void glProvokingVertex(GLenum mode) {
         _gl_set_error(GL_INVALID_ENUM);
         return;
     }
-    _gl_set_error(GL_INVALID_OPERATION);
+    if (!g_gl_context) return;
+    if (g_gl_context->provoking_vertex != mode) {
+        g_gl_context->provoking_vertex = mode;
+        g_gl_context->dirty_flags |= GL_DIRTY_PROVOKING_VERTEX;
+    }
 }
 
 

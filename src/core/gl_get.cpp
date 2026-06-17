@@ -426,6 +426,8 @@ static bool get_context_value(GLenum pname, GetValue *value) {
     return set_bool1(value, g_gl_context->sample_coverage_invert);
   case GL_PRIMITIVE_RESTART:
     return set_bool1(value, g_gl_context->primitive_restart_enabled);
+  case GL_RASTERIZER_DISCARD:
+    return set_bool1(value, g_gl_context->rasterizer_discard_enabled);
   case GL_POLYGON_OFFSET_POINT:
     return set_bool1(value, g_gl_context->polygon_offset_point_enabled);
   case GL_POLYGON_OFFSET_LINE:
@@ -571,6 +573,8 @@ static bool get_context_value(GLenum pname, GetValue *value) {
     return set_int1(value, (GLint)g_gl_context->logic_op);
   case GL_PRIMITIVE_RESTART_INDEX:
     return set_int1(value, (GLint)g_gl_context->primitive_restart_index);
+  case GL_PROVOKING_VERTEX:
+    return set_int1(value, (GLint)g_gl_context->provoking_vertex);
   case GL_GENERATE_MIPMAP_HINT:
     return set_int1(value, (GLint)g_gl_context->generate_mipmap_hint);
   case GL_CLAMP_READ_COLOR:

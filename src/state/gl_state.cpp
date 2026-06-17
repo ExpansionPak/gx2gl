@@ -28,6 +28,8 @@ extern "C" {
 #define GL_POLYGON_OFFSET_UNITS 0x2A00
 #endif
 
+#define GX2GL_PA_SU_SC_MODE_CNTL_PROVOKING_VTX_LAST (1u << 19)
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -282,6 +284,8 @@ static uint32_t dirty_for_cap(GLenum cap) {
     return GL_DIRTY_MULTISAMPLE;
   case GL_PRIMITIVE_RESTART:
     return GL_DIRTY_PRIMITIVE_RESTART;
+  case GL_RASTERIZER_DISCARD:
+    return GL_DIRTY_RASTERIZER_DISCARD;
   case GL_POLYGON_OFFSET_FILL:
   case GL_POLYGON_OFFSET_LINE:
   case GL_POLYGON_OFFSET_POINT:
@@ -313,6 +317,8 @@ static GLboolean *cap_storage(GLenum cap) {
     return &g_gl_context->sample_coverage_enabled;
   case GL_PRIMITIVE_RESTART:
     return &g_gl_context->primitive_restart_enabled;
+  case GL_RASTERIZER_DISCARD:
+    return &g_gl_context->rasterizer_discard_enabled;
   case GL_POLYGON_OFFSET_FILL:
     return &g_gl_context->polygon_offset_fill_enabled;
   case GL_POLYGON_OFFSET_LINE:
@@ -1020,21 +1026,29 @@ static void emit_depth_stencil_state(void) {
 
 static void emit_raster_state(void) {
   GX2PolygonMode mode = map_polygon_mode(g_gl_context->polygon_mode);
+  GX2PolygonControlReg polygon;
   bool polygon_mode_enabled = mode != GX2_POLYGON_MODE_TRIANGLE;
   bool offset_enabled = polygon_offset_enabled_for_mode();
 
   GX2SetCullOnlyControl(map_front_face(g_gl_context->front_face),
                         cull_front_enabled(),
                         cull_back_enabled());
-  GX2SetPolygonControl(map_front_face(g_gl_context->front_face),
-                       cull_front_enabled(),
-                       cull_back_enabled(),
-                       polygon_mode_enabled ? GX2_ENABLE : GX2_DISABLE,
-                       mode,
-                       mode,
-                       offset_enabled ? GX2_ENABLE : GX2_DISABLE,
-                       offset_enabled ? GX2_ENABLE : GX2_DISABLE,
-                       GX2_DISABLE);
+  GX2InitPolygonControlReg(&polygon,
+                           map_front_face(g_gl_context->front_face),
+                           cull_front_enabled(),
+                           cull_back_enabled(),
+                           polygon_mode_enabled ? GX2_ENABLE : GX2_DISABLE,
+                           mode,
+                           mode,
+                           offset_enabled ? GX2_ENABLE : GX2_DISABLE,
+                           offset_enabled ? GX2_ENABLE : GX2_DISABLE,
+                           GX2_DISABLE);
+  if (g_gl_context->provoking_vertex == GL_LAST_VERTEX_CONVENTION) {
+    polygon.pa_su_sc_mode_cntl |= GX2GL_PA_SU_SC_MODE_CNTL_PROVOKING_VTX_LAST;
+  } else {
+    polygon.pa_su_sc_mode_cntl &= ~GX2GL_PA_SU_SC_MODE_CNTL_PROVOKING_VTX_LAST;
+  }
+  GX2SetPolygonControlReg(&polygon);
 
   if (offset_enabled) {
     GX2SetPolygonOffset(g_gl_context->polygon_offset_units,
@@ -1043,6 +1057,12 @@ static void emit_raster_state(void) {
                         g_gl_context->polygon_offset_factor,
                         0.0f);
   }
+}
+
+static void emit_rasterizer_discard_state(void) {
+  GX2SetRasterizerClipControl(
+      g_gl_context->rasterizer_discard_enabled ? GX2_DISABLE : GX2_ENABLE,
+      GX2_ENABLE);
 }
 
 void gl_flush_state(void) {
@@ -1075,8 +1095,12 @@ void gl_flush_state(void) {
   if (dirty & GL_DIRTY_LINE_WIDTH) {
     GX2SetLineWidth(g_gl_context->line_width);
   }
-  if (dirty & (GL_DIRTY_CULL | GL_DIRTY_POLYGON_MODE)) {
+  if (dirty & (GL_DIRTY_CULL | GL_DIRTY_POLYGON_MODE |
+               GL_DIRTY_PROVOKING_VERTEX)) {
     emit_raster_state();
+  }
+  if (dirty & GL_DIRTY_RASTERIZER_DISCARD) {
+    emit_rasterizer_discard_state();
   }
 
   gl_bind_shaders();

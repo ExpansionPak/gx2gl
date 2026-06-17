@@ -672,6 +672,45 @@ static int run_compare_suite(const char *reference_ppm_path) {
     expect_error("glClampColor(GL_CLAMP_VERTEX_COLOR)", GL_INVALID_ENUM);
     glClampColor(GL_CLAMP_READ_COLOR, GL_INVALID_ENUM);
     expect_error("glClampColor(invalid clamp)", GL_INVALID_ENUM);
+    GLint provoking_vertex = 0;
+    glGetIntegerv(GL_PROVOKING_VERTEX, &provoking_vertex);
+    check_gl_error("glGetIntegerv(GL_PROVOKING_VERTEX default)");
+    if (provoking_vertex == GL_LAST_VERTEX_CONVENTION) {
+        pass("GL_PROVOKING_VERTEX defaulted to GL_LAST_VERTEX_CONVENTION.");
+    } else {
+        fail("GL_PROVOKING_VERTEX default was unexpected.");
+    }
+    glProvokingVertex(GL_FIRST_VERTEX_CONVENTION);
+    check_gl_error("glProvokingVertex(GL_FIRST_VERTEX_CONVENTION)");
+    glGetIntegerv(GL_PROVOKING_VERTEX, &provoking_vertex);
+    check_gl_error("glGetIntegerv(GL_PROVOKING_VERTEX first)");
+    if (provoking_vertex == GL_FIRST_VERTEX_CONVENTION) {
+        pass("glProvokingVertex stored GL_FIRST_VERTEX_CONVENTION.");
+    } else {
+        fail("glProvokingVertex did not store GL_FIRST_VERTEX_CONVENTION.");
+    }
+    glProvokingVertex(GL_LAST_VERTEX_CONVENTION);
+    check_gl_error("glProvokingVertex(GL_LAST_VERTEX_CONVENTION)");
+    glProvokingVertex(GL_INVALID_ENUM);
+    expect_error("glProvokingVertex(GL_INVALID_ENUM)", GL_INVALID_ENUM);
+    glEnable(GL_RASTERIZER_DISCARD);
+    check_gl_error("glEnable(GL_RASTERIZER_DISCARD)");
+    if (glIsEnabled(GL_RASTERIZER_DISCARD) == GL_TRUE) {
+        pass("glEnable(GL_RASTERIZER_DISCARD) updated rasterizer discard state.");
+    } else {
+        fail("glEnable(GL_RASTERIZER_DISCARD) did not enable the state.");
+    }
+    check_gl_error("glIsEnabled(GL_RASTERIZER_DISCARD)");
+    glDisable(GL_RASTERIZER_DISCARD);
+    check_gl_error("glDisable(GL_RASTERIZER_DISCARD)");
+    GLint rasterizer_discard = GL_TRUE;
+    glGetIntegerv(GL_RASTERIZER_DISCARD, &rasterizer_discard);
+    check_gl_error("glGetIntegerv(GL_RASTERIZER_DISCARD)");
+    if (rasterizer_discard == GL_FALSE) {
+        pass("glDisable(GL_RASTERIZER_DISCARD) restored rasterization.");
+    } else {
+        fail("glDisable(GL_RASTERIZER_DISCARD) left the state enabled.");
+    }
 
     glDisable(GL_SCISSOR_TEST);
     glViewport(0, 0, 64, 64);
