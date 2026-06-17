@@ -37,6 +37,8 @@ extern "C" {
 #define GL_LOCATION_BLOCK_MASK 0x3FFFu
 #define GX2GL_INFO_LOG_CAPACITY 4096
 #define GX2GL_CAFEGLSL_VIRTUAL_UNIFORM_BLOCK_LOCATION 15u
+#define GX2GL_MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS 64u
+#define GX2GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS 4u
 
 #ifndef GL_UNIFORM_BLOCK_BINDING
 #define GL_UNIFORM_BLOCK_BINDING 0x8A3F
@@ -148,8 +150,16 @@ typedef struct {
 } ProgramUniformValueShadow;
 
 typedef struct {
+  char *name;
+  GLint size;
+  GLenum type;
+  uint32_t component_count;
+} ProgramTransformFeedbackVarying;
+
+typedef struct {
   bool in_use;
   bool linked;
+  bool link_attempted;
   bool validated;
   bool delete_pending;
   GLuint attached_vertex_shader;
@@ -176,6 +186,15 @@ typedef struct {
   uint32_t ps_direct_uniform_shadow_size;
   ProgramUniformValueShadow *uniform_value_shadows;
   uint32_t uniform_value_shadow_count;
+  char **tf_pending_varyings;
+  uint32_t tf_pending_count;
+  GLenum tf_pending_buffer_mode;
+  ProgramTransformFeedbackVarying *tf_linked_varyings;
+  uint32_t tf_linked_count;
+  GLenum tf_linked_buffer_mode;
+  GLsizei tf_linked_max_name_length;
+  GLuint tf_required_binding_count;
+  bool tf_stream_out_ready;
   ProgramAttribReflection attrib_reflection[GL33_MAX_VERTEX_ATTRIBS];
   GX2FetchShader dynamic_fetch_shader;
   void *dynamic_fetch_shader_program;
@@ -195,6 +214,8 @@ static bool location_is_pixel(GLint l);
 static bool location_is_direct(GLint l);
 static void free_program_uniform_blocks(GLProgram *prog);
 static void free_program_attrib_reflection(GLProgram *prog);
+static void free_program_transform_feedback_pending(GLProgram *prog);
+static void free_program_transform_feedback_linked(GLProgram *prog);
 static bool is_cafeglsl_implicit_uniform_block(const GX2UniformBlock *block);
 
 static void invalidate_shader_program_memory(void *program, uint32_t size) {
@@ -833,6 +854,7 @@ static void clear_program_runtime_state(GLProgram *prog) {
   free_program_uniform_value_shadows(prog);
   free_program_uniform_blocks(prog);
   free_program_attrib_reflection(prog);
+  free_program_transform_feedback_linked(prog);
 
   if (prog->owns_whb_group) {
     WHBGfxFreeShaderGroup(&prog->owned_group);
@@ -853,6 +875,11 @@ static void clear_program_runtime_state(GLProgram *prog) {
   prog->owns_whb_group = false;
   prog->linked = false;
   prog->validated = false;
+  prog->tf_linked_buffer_mode =
+      prog->tf_pending_buffer_mode ? prog->tf_pending_buffer_mode
+                                   : GL_INTERLEAVED_ATTRIBS;
+  prog->tf_required_binding_count = 0;
+  prog->tf_stream_out_ready = false;
   memset(prog->vertex_sampler_units, -1, sizeof(prog->vertex_sampler_units));
   memset(prog->pixel_sampler_units, -1, sizeof(prog->pixel_sampler_units));
   memset(prog->vertex_sampler_bindings, 0, sizeof(prog->vertex_sampler_bindings));
@@ -863,6 +890,7 @@ static void destroy_program_object(GLProgram *prog) {
   if (!prog) return;
 
   clear_program_runtime_state(prog);
+  free_program_transform_feedback_pending(prog);
   free(prog->info_log);
   prog->info_log = NULL;
 
@@ -890,6 +918,47 @@ static void free_program_attrib_reflection(GLProgram *prog) {
     free(prog->attrib_reflection[i].name);
     memset(&prog->attrib_reflection[i], 0, sizeof(prog->attrib_reflection[i]));
   }
+}
+
+static void free_program_transform_feedback_pending(GLProgram *prog) {
+  if (!prog || !prog->tf_pending_varyings) return;
+  for (uint32_t i = 0; i < prog->tf_pending_count; ++i) {
+    free(prog->tf_pending_varyings[i]);
+  }
+  free(prog->tf_pending_varyings);
+  prog->tf_pending_varyings = NULL;
+  prog->tf_pending_count = 0;
+}
+
+static void free_program_transform_feedback_linked(GLProgram *prog) {
+  if (!prog || !prog->tf_linked_varyings) {
+    if (prog) {
+      prog->tf_linked_count = 0;
+      prog->tf_linked_max_name_length = 0;
+      prog->tf_required_binding_count = 0;
+      prog->tf_stream_out_ready = false;
+    }
+    return;
+  }
+
+  for (uint32_t i = 0; i < prog->tf_linked_count; ++i) {
+    free(prog->tf_linked_varyings[i].name);
+  }
+  free(prog->tf_linked_varyings);
+  prog->tf_linked_varyings = NULL;
+  prog->tf_linked_count = 0;
+  prog->tf_linked_max_name_length = 0;
+  prog->tf_required_binding_count = 0;
+  prog->tf_stream_out_ready = false;
+}
+
+static void free_transform_feedback_varying_array(
+    ProgramTransformFeedbackVarying *varyings, uint32_t count) {
+  if (!varyings) return;
+  for (uint32_t i = 0; i < count; ++i) {
+    free(varyings[i].name);
+  }
+  free(varyings);
 }
 
 static ProgramUniformBlock *find_program_uniform_block(GLProgram *prog, const char *name) {
@@ -1086,6 +1155,177 @@ static void build_program_attrib_reflection(GLProgram *prog, GX2VertexShader *ve
   }
 }
 
+static GLuint program_stream_out_binding_count(const GLProgram *prog) {
+  const GX2VertexShader *vs;
+  GLuint count = 0;
+
+  if (!prog || !prog->group) return 0;
+
+  vs = prog->group->vertexShader;
+  if (vs && vs->hasStreamOut) {
+    for (GLuint i = 0; i < GL33_MAX_TRANSFORM_FEEDBACK_BUFFER_BINDINGS; ++i) {
+      if (vs->streamOutStride[i] != 0) count = i + 1u;
+    }
+    if (count == 0) count = 1;
+  }
+
+  return count;
+}
+
+static void initialize_program_prelinked_stream_out(GLProgram *prog) {
+  GLuint binding_count;
+
+  if (!prog) return;
+
+  free_program_transform_feedback_linked(prog);
+  prog->tf_linked_buffer_mode =
+      prog->tf_pending_buffer_mode ? prog->tf_pending_buffer_mode
+                                   : GL_INTERLEAVED_ATTRIBS;
+
+  binding_count = program_stream_out_binding_count(prog);
+  if (binding_count != 0) {
+    prog->tf_stream_out_ready = true;
+    prog->tf_required_binding_count = binding_count;
+  }
+}
+
+static bool set_transform_feedback_link_error(char *message,
+                                              size_t message_capacity,
+                                              const char *text) {
+  if (message && message_capacity > 0) {
+    snprintf(message, message_capacity, "%s", text ? text : "");
+  }
+  return false;
+}
+
+static bool build_program_transform_feedback_link_state(GLProgram *prog,
+                                                        const GLShader *vertex_shader,
+                                                        char *message,
+                                                        size_t message_capacity) {
+  ProgramTransformFeedbackVarying *varyings = NULL;
+  uint32_t total_components = 0;
+  GLuint required_bindings;
+  GLsizei max_name_length = 0;
+
+  if (!prog) return false;
+
+  free_program_transform_feedback_linked(prog);
+  prog->tf_linked_buffer_mode =
+      prog->tf_pending_buffer_mode ? prog->tf_pending_buffer_mode
+                                   : GL_INTERLEAVED_ATTRIBS;
+
+  if (prog->tf_pending_count == 0) {
+    return true;
+  }
+
+  if (!vertex_shader || !vertex_shader->source) {
+    return set_transform_feedback_link_error(
+        message, message_capacity,
+        "Transform feedback varying validation requires vertex shader source.");
+  }
+
+  for (uint32_t i = 0; i < prog->tf_pending_count; ++i) {
+    if (!prog->tf_pending_varyings[i]) {
+      return set_transform_feedback_link_error(
+          message, message_capacity,
+          "Transform feedback varying names must not be null.");
+    }
+    for (uint32_t j = i + 1; j < prog->tf_pending_count; ++j) {
+      if (prog->tf_pending_varyings[j] &&
+          strcmp(prog->tf_pending_varyings[i],
+                 prog->tf_pending_varyings[j]) == 0) {
+        return set_transform_feedback_link_error(
+            message, message_capacity,
+            "Transform feedback varying names must be unique.");
+      }
+    }
+  }
+
+  varyings = (ProgramTransformFeedbackVarying *)calloc(
+      prog->tf_pending_count, sizeof(ProgramTransformFeedbackVarying));
+  if (!varyings) {
+    _gl_set_error(GL_OUT_OF_MEMORY);
+    return false;
+  }
+
+  for (uint32_t i = 0; i < prog->tf_pending_count; ++i) {
+    GLenum type = 0;
+    GLint size = 0;
+    uint32_t components = 0;
+    const char *name = prog->tf_pending_varyings[i];
+    char error_message[256];
+
+    if (!gx2gl_find_shader_output_info(vertex_shader->source, name, &type,
+                                       &size, &components)) {
+      snprintf(error_message, sizeof(error_message),
+               "Transform feedback varying '%s' is not a supported vertex shader output.",
+               name);
+      set_transform_feedback_link_error(message, message_capacity,
+                                        error_message);
+      free_transform_feedback_varying_array(varyings, i);
+      return false;
+    }
+
+    if (prog->tf_linked_buffer_mode == GL_SEPARATE_ATTRIBS &&
+        components > GX2GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS) {
+      snprintf(error_message, sizeof(error_message),
+               "Transform feedback varying '%s' exceeds the separate component limit.",
+               name);
+      set_transform_feedback_link_error(message, message_capacity,
+                                        error_message);
+      free_transform_feedback_varying_array(varyings, i);
+      return false;
+    }
+
+    total_components += components;
+    varyings[i].name = strdup(name);
+    if (!varyings[i].name) {
+      free_transform_feedback_varying_array(varyings, i);
+      _gl_set_error(GL_OUT_OF_MEMORY);
+      return false;
+    }
+    varyings[i].size = size;
+    varyings[i].type = type;
+    varyings[i].component_count = components;
+    if ((GLsizei)strlen(name) + 1 > max_name_length) {
+      max_name_length = (GLsizei)strlen(name) + 1;
+    }
+  }
+
+  if (prog->tf_linked_buffer_mode == GL_INTERLEAVED_ATTRIBS &&
+      total_components > GX2GL_MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS) {
+    free_transform_feedback_varying_array(varyings, prog->tf_pending_count);
+    return set_transform_feedback_link_error(
+        message, message_capacity,
+        "Transform feedback varyings exceed the interleaved component limit.");
+  }
+
+  required_bindings =
+      prog->tf_linked_buffer_mode == GL_INTERLEAVED_ATTRIBS
+          ? 1u
+          : (GLuint)prog->tf_pending_count;
+  if (required_bindings > GL33_MAX_TRANSFORM_FEEDBACK_BUFFER_BINDINGS) {
+    free_transform_feedback_varying_array(varyings, prog->tf_pending_count);
+    return set_transform_feedback_link_error(
+        message, message_capacity,
+        "Transform feedback varyings exceed the separate buffer limit.");
+  }
+
+  if (program_stream_out_binding_count(prog) == 0) {
+    free_transform_feedback_varying_array(varyings, prog->tf_pending_count);
+    return set_transform_feedback_link_error(
+        message, message_capacity,
+        "Transform feedback varyings are valid, but this shader backend did not emit stream-out metadata.");
+  }
+
+  prog->tf_linked_varyings = varyings;
+  prog->tf_linked_count = prog->tf_pending_count;
+  prog->tf_linked_max_name_length = max_name_length;
+  prog->tf_required_binding_count = required_bindings;
+  prog->tf_stream_out_ready = true;
+  return true;
+}
+
 static bool initialize_program_block_shadows(GLProgram *prog, GX2VertexShader *vs, GX2PixelShader *ps) {
   if (!prog) return false;
 
@@ -1191,6 +1431,7 @@ static bool initialize_program_from_group(GLProgram *prog, const WHBGfxShaderGro
   initialize_program_sampler_tables(prog, vs, ps);
   build_program_uniform_blocks(prog);
   build_program_attrib_reflection(prog, vs);
+  initialize_program_prelinked_stream_out(prog);
   prog->linked = true;
   prog->validated = false;
   return true;
@@ -1927,6 +2168,8 @@ GLuint _gl_CreateProgram(void) {
       if (!g_programs[i].in_use) {
         memset(&g_programs[i], 0, sizeof(g_programs[i]));
         g_programs[i].in_use = true;
+        g_programs[i].tf_pending_buffer_mode = GL_INTERLEAVED_ATTRIBS;
+        g_programs[i].tf_linked_buffer_mode = GL_INTERLEAVED_ATTRIBS;
         memset(g_programs[i].vertex_sampler_units, -1, sizeof(g_programs[i].vertex_sampler_units));
         memset(g_programs[i].pixel_sampler_units, -1, sizeof(g_programs[i].pixel_sampler_units));
         return i;
@@ -2004,13 +2247,19 @@ void _gl_LinkProgram(GLuint p) {
   GLProgram *prog;
   GLShader *vertex_shader;
   GLShader *pixel_shader;
+  char transform_feedback_error[512];
 
   if (!is_valid_program(p)) {
     _gl_set_error(GL_INVALID_VALUE);
     return;
   }
+  if (gl_transform_feedback_program_active(p)) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
 
   prog = &g_programs[p];
+  prog->link_attempted = true;
   replace_owned_string(&prog->info_log, "");
   prog->linked = false;
   prog->validated = false;
@@ -2049,10 +2298,27 @@ void _gl_LinkProgram(GLuint p) {
     return;
   }
 
+  transform_feedback_error[0] = '\0';
+  if (!build_program_transform_feedback_link_state(
+          prog, vertex_shader, transform_feedback_error,
+          sizeof(transform_feedback_error))) {
+    replace_owned_string(
+        &prog->info_log,
+        transform_feedback_error[0]
+            ? transform_feedback_error
+            : "Failed to link transform feedback state for this program.");
+    clear_program_runtime_state(prog);
+    return;
+  }
+
   replace_owned_string(&prog->info_log, "");
 }
 void _gl_UseProgram(GLuint p) {
   if (!g_gl_context) return;
+  if (gl_transform_feedback_current_active_unpaused()) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
   if (p != 0 && !is_valid_program(p)) {
     _gl_set_error(GL_INVALID_VALUE);
     return;
@@ -2218,6 +2484,9 @@ void _gl_GetProgramiv(GLuint p, GLenum n, GLint *v) {
   case GL_ACTIVE_ATTRIBUTES:    *v = (GLint)get_active_attribute_count(prog); break;
   case GL_ACTIVE_UNIFORM_MAX_LENGTH: *v = (GLint)get_active_uniform_max_name_length(prog); break;
   case GL_ACTIVE_ATTRIBUTE_MAX_LENGTH: *v = (GLint)get_active_attribute_max_name_length(prog); break;
+  case GL_TRANSFORM_FEEDBACK_BUFFER_MODE: *v = (GLint)prog->tf_linked_buffer_mode; break;
+  case GL_TRANSFORM_FEEDBACK_VARYINGS: *v = (GLint)prog->tf_linked_count; break;
+  case GL_TRANSFORM_FEEDBACK_VARYING_MAX_LENGTH: *v = (GLint)prog->tf_linked_max_name_length; break;
   default: _gl_set_error(GL_INVALID_ENUM); break;
   }
 }
@@ -2347,6 +2616,7 @@ void _gl_UniformBlockBinding(GLuint p, GLuint i, GLuint b) {
 }
 void _gl_WiiULoadShaderGroup(GLuint p, const void *g) {
   if (!is_valid_program(p) || !g) return;
+  g_programs[p].link_attempted = true;
   if (!initialize_program_from_group(&g_programs[p], (const WHBGfxShaderGroup *)g, false, false)) {
     replace_owned_string(&g_programs[p].info_log, "Failed to initialize the supplied Wii U shader group.");
   } else {
@@ -2358,6 +2628,7 @@ void _gl_WiiULoadShaderGroupGFD(GLuint p, GLuint idx, const void *d) {
 
   if (!is_valid_program(p) || !d) return;
 
+  g_programs[p].link_attempted = true;
   memset(&loaded_group, 0, sizeof(loaded_group));
   if (!WHBGfxLoadGFDShaderGroup(&loaded_group, idx, d)) {
     replace_owned_string(&g_programs[p].info_log,
@@ -2606,6 +2877,114 @@ void _gl_GetActiveUniformName(GLuint p, GLuint i, GLsizei s, GLsizei *l, GLchar 
     return;
   }
   copy_gl_string(info.name, s, l, n);
+}
+
+void _gl_TransformFeedbackVaryings(GLuint program, GLsizei count,
+                                    const GLchar *const *varyings,
+                                    GLenum bufferMode) {
+  GLProgram *prog;
+  char **names = NULL;
+
+  if (!is_valid_program(program)) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+  if (count < 0 || (count > 0 && !varyings)) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+  if (bufferMode != GL_INTERLEAVED_ATTRIBS &&
+      bufferMode != GL_SEPARATE_ATTRIBS) {
+    _gl_set_error(GL_INVALID_ENUM);
+    return;
+  }
+  if (bufferMode == GL_SEPARATE_ATTRIBS &&
+      count > GL33_MAX_TRANSFORM_FEEDBACK_BUFFER_BINDINGS) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+
+  if (count > 0) {
+    names = (char **)calloc((size_t)count, sizeof(char *));
+    if (!names) {
+      _gl_set_error(GL_OUT_OF_MEMORY);
+      return;
+    }
+    for (GLsizei i = 0; i < count; ++i) {
+      if (!varyings[i]) {
+        for (GLsizei j = 0; j < i; ++j) free(names[j]);
+        free(names);
+        _gl_set_error(GL_INVALID_VALUE);
+        return;
+      }
+      names[i] = strdup(varyings[i]);
+      if (!names[i]) {
+        for (GLsizei j = 0; j < i; ++j) free(names[j]);
+        free(names);
+        _gl_set_error(GL_OUT_OF_MEMORY);
+        return;
+      }
+    }
+  }
+
+  prog = &g_programs[program];
+  free_program_transform_feedback_pending(prog);
+  prog->tf_pending_varyings = names;
+  prog->tf_pending_count = (uint32_t)count;
+  prog->tf_pending_buffer_mode = bufferMode;
+}
+
+void _gl_GetTransformFeedbackVarying(GLuint program, GLuint index,
+                                     GLsizei bufSize, GLsizei *length,
+                                     GLsizei *size, GLenum *type,
+                                     GLchar *name) {
+  GLProgram *prog;
+  ProgramTransformFeedbackVarying *varying;
+
+  if (!is_valid_program(program)) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+  if (bufSize < 0 || (bufSize > 0 && !name)) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+
+  prog = &g_programs[program];
+  if (!prog->link_attempted) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
+  if (index >= prog->tf_linked_count) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+
+  varying = &prog->tf_linked_varyings[index];
+  if (size) *size = varying->size;
+  if (type) *type = varying->type;
+  copy_gl_string(varying->name, bufSize, length, name);
+}
+
+GLboolean gl_program_transform_feedback_ready(GLuint program) {
+  GLProgram *prog;
+
+  if (!is_valid_program(program)) return GL_FALSE;
+  prog = &g_programs[program];
+  return (prog->linked && prog->tf_stream_out_ready &&
+          prog->tf_required_binding_count > 0)
+             ? GL_TRUE
+             : GL_FALSE;
+}
+
+GLuint gl_program_transform_feedback_binding_count(GLuint program) {
+  if (!is_valid_program(program) || !g_programs[program].linked) return 0;
+  return g_programs[program].tf_required_binding_count;
+}
+
+GLenum gl_program_transform_feedback_buffer_mode(GLuint program) {
+  if (!is_valid_program(program)) return GL_INTERLEAVED_ATTRIBS;
+  return g_programs[program].tf_linked_buffer_mode;
 }
 
 void gl_bind_shaders(void) {

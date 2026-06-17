@@ -188,6 +188,8 @@ extern "C" {
 #define GX2GL_UNIFORM_BUFFER_ALIGNMENT 256
 #define GX2GL_MAX_VARYING_COMPONENTS 64
 #define GX2GL_MAX_SHADER_UNIFORM_COMPONENTS 4096
+#define GX2GL_MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS 64
+#define GX2GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS 4
 #define GX2GL_MAX_POINT_SIZE 64.0f
 #define GX2GL_MAX_TEXTURE_LOD_BIAS 15.0f
 
@@ -377,6 +379,12 @@ static bool get_context_value(GLenum pname, GetValue *value) {
     return set_int1(value, GX2GL_MAX_SHADER_UNIFORM_COMPONENTS);
   case GL_MAX_VARYING_COMPONENTS:
     return set_int1(value, GX2GL_MAX_VARYING_COMPONENTS);
+  case GL_MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS:
+    return set_int1(value, GX2GL_MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS);
+  case GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS:
+    return set_int1(value, GL33_MAX_TRANSFORM_FEEDBACK_BUFFER_BINDINGS);
+  case GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS:
+    return set_int1(value, GX2GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS);
   case GL_MAX_VIEWPORT_DIMS:
     return set_int2(value, GX2GL_MAX_TEXTURE_SIZE, GX2GL_MAX_TEXTURE_SIZE);
   case GL_SUBPIXEL_BITS:
@@ -470,6 +478,12 @@ static bool get_context_value(GLenum pname, GetValue *value) {
   case GL_TRANSFORM_FEEDBACK_BUFFER_BINDING:
     return set_int1(value,
                     (GLint)g_gl_context->bound_transform_feedback_buffer);
+  case GL_TRANSFORM_FEEDBACK_BINDING:
+    return set_int1(value, (GLint)g_gl_context->bound_transform_feedback);
+  case GL_TRANSFORM_FEEDBACK_ACTIVE:
+    return set_bool1(value, gl_transform_feedback_current_active());
+  case GL_TRANSFORM_FEEDBACK_PAUSED:
+    return set_bool1(value, gl_transform_feedback_current_active_paused());
   case GL_FRAMEBUFFER_BINDING:
 #if GL_DRAW_FRAMEBUFFER_BINDING != GL_FRAMEBUFFER_BINDING
   case GL_DRAW_FRAMEBUFFER_BINDING:

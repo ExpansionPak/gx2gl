@@ -113,6 +113,10 @@ static bool validate_common_draw_state(GLenum mode, GX2PrimitiveMode *prim) {
     _gl_set_error(GL_INVALID_OPERATION);
     return false;
   }
+  if (gl_transform_feedback_validate_draw_mode(mode) != GL_TRUE) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return false;
+  }
 
   framebuffer_status = _gl_CheckFramebufferStatus(GL_DRAW_FRAMEBUFFER);
   if (framebuffer_status != GL_FRAMEBUFFER_COMPLETE) {

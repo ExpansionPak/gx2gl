@@ -28,6 +28,7 @@ struct InterfaceDecl {
   std::string storage;
   std::string type;
   std::string name;
+  int array_size;
 };
 
 static void write_info_log(char *info_log_out, int info_log_max_length,
@@ -260,6 +261,7 @@ static bool parse_uniform_declaration(const std::string &line,
 static bool parse_interface_declaration(const std::string &line,
                                         InterfaceDecl *decl) {
   size_t cursor = 0;
+  size_t name_end;
 
   decl->layout = LayoutInfo();
   decl->layout.location = -1;
@@ -267,6 +269,7 @@ static bool parse_interface_declaration(const std::string &line,
   decl->storage.clear();
   decl->type.clear();
   decl->name.clear();
+  decl->array_size = 1;
 
   if (!consume_layout(line, &cursor, &decl->layout)) {
     return false;
@@ -286,6 +289,27 @@ static bool parse_interface_declaration(const std::string &line,
       !consume_identifier(line, &cursor, &decl->name)) {
     return false;
   }
+  name_end = skip_whitespace(line, cursor);
+  if (name_end < line.size() && line[name_end] == '[') {
+    size_t close = line.find(']', name_end + 1u);
+    int size = 0;
+    if (close == std::string::npos) {
+      return false;
+    }
+    for (size_t i = name_end + 1u; i < close; ++i) {
+      if (line[i] == ' ' || line[i] == '\t' || line[i] == '\r') {
+        continue;
+      }
+      if (line[i] < '0' || line[i] > '9') {
+        return false;
+      }
+      size = (size * 10) + (line[i] - '0');
+    }
+    if (size <= 0) {
+      return false;
+    }
+    decl->array_size = size;
+  }
   return true;
 }
 
@@ -295,6 +319,52 @@ static bool is_sampler_type(const std::string &type) {
 
 static bool is_builtin_name(const std::string &name) {
   return name.compare(0, 3, "gl_") == 0;
+}
+
+static bool shader_output_type_info(const std::string &type, GLenum *gl_type,
+                                    uint32_t *component_count) {
+  struct TypeInfo {
+    const char *name;
+    GLenum gl_type;
+    uint32_t components;
+  };
+  static const TypeInfo kTypes[] = {
+      {"float", GL_FLOAT, 1},
+      {"vec2", GL_FLOAT_VEC2, 2},
+      {"vec3", GL_FLOAT_VEC3, 3},
+      {"vec4", GL_FLOAT_VEC4, 4},
+      {"int", GL_INT, 1},
+      {"ivec2", GL_INT_VEC2, 2},
+      {"ivec3", GL_INT_VEC3, 3},
+      {"ivec4", GL_INT_VEC4, 4},
+      {"uint", GL_UNSIGNED_INT, 1},
+      {"uvec2", GL_UNSIGNED_INT_VEC2, 2},
+      {"uvec3", GL_UNSIGNED_INT_VEC3, 3},
+      {"uvec4", GL_UNSIGNED_INT_VEC4, 4},
+      {"bool", GL_BOOL, 1},
+      {"bvec2", GL_BOOL_VEC2, 2},
+      {"bvec3", GL_BOOL_VEC3, 3},
+      {"bvec4", GL_BOOL_VEC4, 4},
+      {"mat2", GL_FLOAT_MAT2, 4},
+      {"mat3", GL_FLOAT_MAT3, 9},
+      {"mat4", GL_FLOAT_MAT4, 16},
+      {"mat2x3", GL_FLOAT_MAT2x3, 6},
+      {"mat2x4", GL_FLOAT_MAT2x4, 8},
+      {"mat3x2", GL_FLOAT_MAT3x2, 6},
+      {"mat3x4", GL_FLOAT_MAT3x4, 12},
+      {"mat4x2", GL_FLOAT_MAT4x2, 8},
+      {"mat4x3", GL_FLOAT_MAT4x3, 12},
+  };
+
+  for (size_t i = 0; i < sizeof(kTypes) / sizeof(kTypes[0]); ++i) {
+    if (type == kTypes[i].name) {
+      if (gl_type) *gl_type = kTypes[i].gl_type;
+      if (component_count) *component_count = kTypes[i].components;
+      return true;
+    }
+  }
+
+  return false;
 }
 
 static const char *shader_stage_name(GLenum shader_type) {
@@ -405,4 +475,54 @@ char *gx2gl_prepare_shader_source_for_cafeglsl_ex(const char *source,
   }
 
   return copy_source(source);
+}
+
+bool gx2gl_find_shader_output_info(const char *source, const char *name,
+                                   GLenum *type_out, GLint *size_out,
+                                   uint32_t *component_count_out) {
+  const char *line_start;
+
+  if (!source || !name) {
+    return false;
+  }
+
+  if (strcmp(name, "gl_Position") == 0) {
+    if (type_out) *type_out = GL_FLOAT_VEC4;
+    if (size_out) *size_out = 1;
+    if (component_count_out) *component_count_out = 4;
+    return true;
+  }
+
+  line_start = source;
+  while (*line_start) {
+    const char *line_end = strchr(line_start, '\n');
+    size_t line_length = line_end ? (size_t)(line_end - line_start)
+                                  : strlen(line_start);
+    std::string line = strip_line_comment(std::string(line_start, line_length));
+    size_t first = skip_whitespace(line, 0);
+    InterfaceDecl decl;
+
+    if (first < line.size() && line[first] != '#' &&
+        parse_interface_declaration(line, &decl) && decl.storage == "out" &&
+        decl.name == name) {
+      GLenum type = 0;
+      uint32_t components = 0;
+      if (!shader_output_type_info(decl.type, &type, &components)) {
+        return false;
+      }
+      if (type_out) *type_out = type;
+      if (size_out) *size_out = decl.array_size;
+      if (component_count_out) {
+        *component_count_out = components * (uint32_t)decl.array_size;
+      }
+      return true;
+    }
+
+    if (!line_end) {
+      break;
+    }
+    line_start = line_end + 1;
+  }
+
+  return false;
 }

@@ -1362,6 +1362,80 @@ int main(int argc, char **argv) {
     glBindBufferBase(GL_UNIFORM_BUFFER, 0, ubo);
     check_gl_error("glBindBufferBase(GL_UNIFORM_BUFFER)");
 
+    GLint max_tf_separate = 0;
+    glGetIntegerv(GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS, &max_tf_separate);
+    check_gl_error("glGetIntegerv(GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS)");
+    if (max_tf_separate >= 4) {
+        OSReport("[PASS] Transform feedback separate buffer limit meets GL 3.3 minimum.\n");
+    } else {
+        OSReport("[FAIL] Transform feedback separate buffer limit was %d\n",
+                 max_tf_separate);
+    }
+
+    GLuint tf = 0;
+    glGenTransformFeedbacks(1, &tf);
+    check_gl_error("glGenTransformFeedbacks");
+    if (tf != 0 && glIsTransformFeedback(tf) == GL_FALSE) {
+        OSReport("[PASS] Transform feedback generated name is not an object before bind.\n");
+    } else {
+        OSReport("[FAIL] Transform feedback generated name had unexpected pre-bind state.\n");
+    }
+    check_gl_error("glIsTransformFeedback(pre-bind)");
+    glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, tf);
+    check_gl_error("glBindTransformFeedback");
+    if (glIsTransformFeedback(tf) == GL_TRUE) {
+        OSReport("[PASS] glIsTransformFeedback returned true after bind.\n");
+    } else {
+        OSReport("[FAIL] glIsTransformFeedback returned false after bind.\n");
+    }
+    check_gl_error("glIsTransformFeedback(post-bind)");
+    GLint tf_binding = 0;
+    glGetIntegerv(GL_TRANSFORM_FEEDBACK_BINDING, &tf_binding);
+    check_gl_error("glGetIntegerv(GL_TRANSFORM_FEEDBACK_BINDING)");
+    if ((GLuint)tf_binding == tf) {
+        OSReport("[PASS] GL_TRANSFORM_FEEDBACK_BINDING returned the bound object.\n");
+    } else {
+        OSReport("[FAIL] GL_TRANSFORM_FEEDBACK_BINDING returned %d\n", tf_binding);
+    }
+    glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, ubo);
+    check_gl_error("glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER)");
+    GLint indexed_tf_binding = 0;
+    glGetIntegeri_v(GL_TRANSFORM_FEEDBACK_BUFFER_BINDING, 0, &indexed_tf_binding);
+    check_gl_error("glGetIntegeri_v(GL_TRANSFORM_FEEDBACK_BUFFER_BINDING)");
+    if ((GLuint)indexed_tf_binding == ubo) {
+        OSReport("[PASS] Indexed transform feedback binding returned expected buffer.\n");
+    } else {
+        OSReport("[FAIL] Indexed transform feedback binding returned %d\n",
+                 indexed_tf_binding);
+    }
+    glBindBufferRange(GL_TRANSFORM_FEEDBACK_BUFFER, 0, ubo, 2, 16);
+    expect_error("glBindBufferRange(GL_TRANSFORM_FEEDBACK_BUFFER unaligned)", GL_INVALID_VALUE);
+    glBindBufferRange(GL_TRANSFORM_FEEDBACK_BUFFER, 0, ubo, 0, 16);
+    check_gl_error("glBindBufferRange(GL_TRANSFORM_FEEDBACK_BUFFER)");
+    GLint tf_range_size = 0;
+    glGetIntegeri_v(GL_TRANSFORM_FEEDBACK_BUFFER_SIZE, 0, &tf_range_size);
+    check_gl_error("glGetIntegeri_v(GL_TRANSFORM_FEEDBACK_BUFFER_SIZE)");
+    if (tf_range_size == 16) {
+        OSReport("[PASS] Transform feedback buffer range size query returned 16.\n");
+    } else {
+        OSReport("[FAIL] Transform feedback buffer range size query returned %d\n",
+                 tf_range_size);
+    }
+    glBindTransformFeedback(GL_INVALID_ENUM, tf);
+    expect_error("glBindTransformFeedback(GL_INVALID_ENUM)", GL_INVALID_ENUM);
+    glBeginTransformFeedback(GL_TRIANGLES);
+    expect_error("glBeginTransformFeedback(no stream-out backend)", GL_INVALID_OPERATION);
+    glDeleteTransformFeedbacks(1, &tf);
+    check_gl_error("glDeleteTransformFeedbacks");
+    glGetIntegerv(GL_TRANSFORM_FEEDBACK_BINDING, &tf_binding);
+    check_gl_error("glGetIntegerv(GL_TRANSFORM_FEEDBACK_BINDING after delete)");
+    if (tf_binding == 0) {
+        OSReport("[PASS] Deleting the bound transform feedback restored object 0.\n");
+    } else {
+        OSReport("[FAIL] Deleting the bound transform feedback left binding %d\n",
+                 tf_binding);
+    }
+
     void* mapped_ubo = glMapBufferRange(GL_UNIFORM_BUFFER, 0, 256, GL_MAP_WRITE_BIT);
     if (!mapped_ubo) {
         OSReport("[FAIL] glMapBufferRange(GL_UNIFORM_BUFFER) returned NULL\n");
@@ -2199,6 +2273,47 @@ int main(int argc, char **argv) {
         OSReport("[FAIL] glGetProgramInfoLog(compiled_pair) returned: %s\n",
                  program_info_log);
     }
+
+    GLuint tf_prog = glCreateProgram();
+    check_gl_error("glCreateProgram(transform_feedback)");
+    glAttachShader(tf_prog, vshader);
+    check_gl_error("glAttachShader(transform_feedback vertex)");
+    glAttachShader(tf_prog, pshader);
+    check_gl_error("glAttachShader(transform_feedback fragment)");
+    const GLchar* tf_varyings[] = {"gl_Position"};
+    glTransformFeedbackVaryings(tf_prog, 1, tf_varyings, GL_INTERLEAVED_ATTRIBS);
+    check_gl_error("glTransformFeedbackVaryings(gl_Position)");
+    GLint tf_linked_varyings = -1;
+    glGetProgramiv(tf_prog, GL_TRANSFORM_FEEDBACK_VARYINGS, &tf_linked_varyings);
+    check_gl_error("glGetProgramiv(GL_TRANSFORM_FEEDBACK_VARYINGS before link)");
+    if (tf_linked_varyings == 0) {
+        OSReport("[PASS] Transform feedback varying query stayed linked-state before relink.\n");
+    } else {
+        OSReport("[FAIL] Transform feedback varying query before link returned %d\n",
+                 tf_linked_varyings);
+    }
+    glLinkProgram(tf_prog);
+    check_gl_error("glLinkProgram(transform_feedback)");
+    GLint tf_program_link_status = GL_TRUE;
+    glGetProgramiv(tf_prog, GL_LINK_STATUS, &tf_program_link_status);
+    check_gl_error("glGetProgramiv(transform_feedback, GL_LINK_STATUS)");
+    if (tf_program_link_status == GL_FALSE) {
+        OSReport("[PASS] Transform feedback program failed link until stream-out metadata is available.\n");
+    } else {
+        OSReport("[FAIL] Transform feedback program linked without stream-out metadata.\n");
+    }
+    GLchar tf_active_name[64];
+    GLsizei tf_active_name_length = 0;
+    GLint tf_active_size = 0;
+    GLenum tf_active_type = 0;
+    glGetTransformFeedbackVarying(tf_prog, 0, sizeof(tf_active_name), &tf_active_name_length,
+                                  &tf_active_size, &tf_active_type, tf_active_name);
+    expect_error("glGetTransformFeedbackVarying(failed_link)", GL_INVALID_VALUE);
+    const GLchar* too_many_tf_varyings[] = {"a", "b", "c", "d", "e"};
+    glTransformFeedbackVaryings(tf_prog, 5, too_many_tf_varyings, GL_SEPARATE_ATTRIBS);
+    expect_error("glTransformFeedbackVaryings(too_many_separate)", GL_INVALID_VALUE);
+    glDeleteProgram(tf_prog);
+    check_gl_error("glDeleteProgram(transform_feedback)");
 
     glDetachShader(prog, pshader);
     check_gl_error("glDetachShader(fragment)");

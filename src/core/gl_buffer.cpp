@@ -316,8 +316,7 @@ static gl_uniform_buffer_binding_t *indexed_binding_for_target(GLenum target,
     return &g_gl_context->uniform_buffer_bindings[index];
   }
   if (target == GL_TRANSFORM_FEEDBACK_BUFFER) {
-    if (index >= GL33_MAX_TRANSFORM_FEEDBACK_BUFFER_BINDINGS) return NULL;
-    return &g_gl_context->transform_feedback_buffer_bindings[index];
+    return gl_transform_feedback_current_buffer_binding(index);
   }
   return NULL;
 }
@@ -394,6 +393,7 @@ void _gl_DeleteBuffers(GLsizei n, const GLuint *buffers) {
                  sizeof(g_gl_context->transform_feedback_buffer_bindings[binding]));
         }
       }
+      gl_transform_feedback_unbind_buffer(id);
       g_gl_context->dirty_flags |= GL_DIRTY_UNIFORM_BINDINGS | GL_DIRTY_VAO;
     }
 
@@ -444,6 +444,11 @@ void _gl_BindBufferBase(GLenum target, GLuint index, GLuint buffer) {
     _gl_set_error(GL_INVALID_VALUE);
     return;
   }
+  if (target == GL_TRANSFORM_FEEDBACK_BUFFER &&
+      gl_transform_feedback_current_active() == GL_TRUE) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
   if (!valid_buffer_name_for_bind(buffer)) {
     _gl_set_error(GL_INVALID_OPERATION);
     return;
@@ -460,6 +465,9 @@ void _gl_BindBufferBase(GLenum target, GLuint index, GLuint buffer) {
   binding->offset = 0;
   binding->size = 0;
   binding->whole_buffer = buffer ? GL_TRUE : GL_FALSE;
+  if (target == GL_TRANSFORM_FEEDBACK_BUFFER) {
+    g_gl_context->transform_feedback_buffer_bindings[index] = *binding;
+  }
 
   if (target == GL_UNIFORM_BUFFER) {
     g_gl_context->dirty_flags |= GL_DIRTY_UNIFORM_BINDINGS;
@@ -480,6 +488,11 @@ void _gl_BindBufferRange(GLenum target, GLuint index, GLuint buffer,
     _gl_set_error(GL_INVALID_VALUE);
     return;
   }
+  if (target == GL_TRANSFORM_FEEDBACK_BUFFER &&
+      gl_transform_feedback_current_active() == GL_TRUE) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
   if (!valid_buffer_name_for_bind(buffer)) {
     _gl_set_error(GL_INVALID_OPERATION);
     return;
@@ -488,6 +501,10 @@ void _gl_BindBufferRange(GLenum target, GLuint index, GLuint buffer,
     set_bound_buffer(target, 0);
     binding = indexed_binding_for_target(target, index);
     if (binding) memset(binding, 0, sizeof(*binding));
+    if (target == GL_TRANSFORM_FEEDBACK_BUFFER) {
+      memset(&g_gl_context->transform_feedback_buffer_bindings[index], 0,
+             sizeof(g_gl_context->transform_feedback_buffer_bindings[index]));
+    }
     if (target == GL_UNIFORM_BUFFER) {
       g_gl_context->dirty_flags |= GL_DIRTY_UNIFORM_BINDINGS;
     }
@@ -511,6 +528,11 @@ void _gl_BindBufferRange(GLenum target, GLuint index, GLuint buffer,
     _gl_set_error(GL_INVALID_VALUE);
     return;
   }
+  if (target == GL_TRANSFORM_FEEDBACK_BUFFER &&
+      (((offset | size) & 0x3) != 0)) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
 
   set_bound_buffer(target, buffer);
   binding = indexed_binding_for_target(target, index);
@@ -519,6 +541,9 @@ void _gl_BindBufferRange(GLenum target, GLuint index, GLuint buffer,
   binding->offset = offset;
   binding->size = size;
   binding->whole_buffer = GL_FALSE;
+  if (target == GL_TRANSFORM_FEEDBACK_BUFFER) {
+    g_gl_context->transform_feedback_buffer_bindings[index] = *binding;
+  }
 
   if (target == GL_UNIFORM_BUFFER) {
     g_gl_context->dirty_flags |= GL_DIRTY_UNIFORM_BINDINGS;

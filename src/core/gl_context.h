@@ -287,6 +287,7 @@ typedef struct {
     GLuint bound_pixel_unpack_buffer;
     GLuint bound_texture_buffer;
     GLuint bound_transform_feedback_buffer;
+    GLuint bound_transform_feedback;
     gl_uniform_buffer_binding_t uniform_buffer_bindings[GL33_MAX_UNIFORM_BUFFER_BINDINGS];
     gl_uniform_buffer_binding_t transform_feedback_buffer_bindings[GL33_MAX_TRANSFORM_FEEDBACK_BUFFER_BINDINGS];
     GLuint active_texture;
@@ -369,6 +370,13 @@ void _gl_EndQueryIndexed(GLenum target, GLuint index);
 void _gl_GetQueryIndexediv(GLenum target, GLuint index, GLenum pname, GLint *params);
 void _gl_GenTransformFeedbacks(GLsizei n, GLuint *ids);
 void _gl_DeleteTransformFeedbacks(GLsizei n, const GLuint *ids);
+gl_uniform_buffer_binding_t *gl_transform_feedback_current_buffer_binding(GLuint index);
+GLboolean gl_transform_feedback_current_active(void);
+GLboolean gl_transform_feedback_current_active_unpaused(void);
+GLboolean gl_transform_feedback_current_active_paused(void);
+GLboolean gl_transform_feedback_program_active(GLuint program);
+void gl_transform_feedback_unbind_buffer(GLuint buffer);
+GLboolean gl_transform_feedback_validate_draw_mode(GLenum mode);
 
 #ifdef __cplusplus
 }

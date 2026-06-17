@@ -83,6 +83,16 @@ void _gl_GetActiveUniformBlockiv(GLuint p, GLuint i, GLenum n, GLint *v);
 void _gl_GetActiveUniformBlockName(GLuint p, GLuint i, GLsizei s, GLsizei *l, GLchar *n);
 void _gl_GetActiveUniformsiv(GLuint p, GLsizei c, const GLuint *i, GLenum n, GLint *v);
 void _gl_GetActiveUniformName(GLuint p, GLuint i, GLsizei s, GLsizei *l, GLchar *n);
+void _gl_TransformFeedbackVaryings(GLuint program, GLsizei count,
+                                    const GLchar *const *varyings,
+                                    GLenum bufferMode);
+void _gl_GetTransformFeedbackVarying(GLuint program, GLuint index,
+                                     GLsizei bufSize, GLsizei *length,
+                                     GLsizei *size, GLenum *type,
+                                     GLchar *name);
+GLboolean gl_program_transform_feedback_ready(GLuint program);
+GLuint gl_program_transform_feedback_binding_count(GLuint program);
+GLenum gl_program_transform_feedback_buffer_mode(GLuint program);
 
 void gl_bind_shaders(void);
 void gl_bind_program_fetch_shader(void);
