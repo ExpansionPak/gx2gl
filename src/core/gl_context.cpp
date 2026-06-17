@@ -120,18 +120,6 @@
 #ifndef GL_SEPARATE_ATTRIBS
 #define GL_SEPARATE_ATTRIBS 0x8C8D
 #endif
-#ifndef GL_CLAMP_VERTEX_COLOR
-#define GL_CLAMP_VERTEX_COLOR 0x891A
-#endif
-#ifndef GL_CLAMP_FRAGMENT_COLOR
-#define GL_CLAMP_FRAGMENT_COLOR 0x891B
-#endif
-#ifndef GL_CLAMP_READ_COLOR
-#define GL_CLAMP_READ_COLOR 0x891C
-#endif
-#ifndef GL_FIXED_ONLY
-#define GL_FIXED_ONLY 0x891D
-#endif
 #ifndef GL_FIRST_VERTEX_CONVENTION
 #define GL_FIRST_VERTEX_CONVENTION 0x8E4D
 #endif
@@ -241,6 +229,7 @@ static void gl_context_init_raster_state(gl_context_t *ctx) {
   ctx->cull_face_mode = GL_BACK;
   ctx->front_face = GL_CCW;
   ctx->polygon_mode = GL_FILL;
+  ctx->clamp_read_color = GL_FIXED_ONLY;
   ctx->line_width = 1.0f;
   ctx->logic_op = GL_COPY;
   ctx->point_size = 1.0f;
@@ -1580,9 +1569,7 @@ void glDrawTransformFeedback(GLenum mode, GLuint id) {
     _gl_set_error(GL_INVALID_OPERATION);
 }
 void glClampColor(GLenum target, GLenum clamp) {
-    if (target != GL_CLAMP_VERTEX_COLOR &&
-        target != GL_CLAMP_FRAGMENT_COLOR &&
-        target != GL_CLAMP_READ_COLOR) {
+    if (target != GL_CLAMP_READ_COLOR) {
         _gl_set_error(GL_INVALID_ENUM);
         return;
     }
@@ -1590,7 +1577,8 @@ void glClampColor(GLenum target, GLenum clamp) {
         _gl_set_error(GL_INVALID_ENUM);
         return;
     }
-    _gl_set_error(GL_INVALID_OPERATION);
+    if (!g_gl_context) return;
+    g_gl_context->clamp_read_color = clamp;
 }
 void glProvokingVertex(GLenum mode) {
     if (mode != GL_FIRST_VERTEX_CONVENTION &&

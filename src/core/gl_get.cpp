@@ -169,6 +169,9 @@
 #ifndef GL_STEREO
 #define GL_STEREO 0x0C33
 #endif
+#ifndef GL_CLAMP_READ_COLOR
+#define GL_CLAMP_READ_COLOR 0x891C
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -570,6 +573,8 @@ static bool get_context_value(GLenum pname, GetValue *value) {
     return set_int1(value, (GLint)g_gl_context->primitive_restart_index);
   case GL_GENERATE_MIPMAP_HINT:
     return set_int1(value, (GLint)g_gl_context->generate_mipmap_hint);
+  case GL_CLAMP_READ_COLOR:
+    return set_int1(value, (GLint)g_gl_context->clamp_read_color);
 
   case GL_STENCIL_WRITEMASK:
     return set_int1(value, (GLint)g_gl_context->stencil_write_mask[0]);

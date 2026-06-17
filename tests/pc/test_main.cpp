@@ -649,6 +649,29 @@ static int run_compare_suite(const char *reference_ppm_path) {
     } else {
         fail("float/double getters returned unexpected scalar state.");
     }
+    GLint clamp_read_color = 0;
+    glGetIntegerv(GL_CLAMP_READ_COLOR, &clamp_read_color);
+    check_gl_error("glGetIntegerv(GL_CLAMP_READ_COLOR default)");
+    if (clamp_read_color == GL_FIXED_ONLY) {
+        pass("GL_CLAMP_READ_COLOR defaulted to GL_FIXED_ONLY.");
+    } else {
+        fail("GL_CLAMP_READ_COLOR default was unexpected.");
+    }
+    glClampColor(GL_CLAMP_READ_COLOR, GL_FALSE);
+    check_gl_error("glClampColor(GL_CLAMP_READ_COLOR, GL_FALSE)");
+    glGetIntegerv(GL_CLAMP_READ_COLOR, &clamp_read_color);
+    check_gl_error("glGetIntegerv(GL_CLAMP_READ_COLOR false)");
+    if (clamp_read_color == GL_FALSE) {
+        pass("glClampColor stored GL_FALSE for read clamp state.");
+    } else {
+        fail("glClampColor stored unexpected read clamp state.");
+    }
+    glClampColor(GL_CLAMP_READ_COLOR, GL_FIXED_ONLY);
+    check_gl_error("glClampColor(GL_CLAMP_READ_COLOR, GL_FIXED_ONLY)");
+    glClampColor(GL_CLAMP_VERTEX_COLOR, GL_TRUE);
+    expect_error("glClampColor(GL_CLAMP_VERTEX_COLOR)", GL_INVALID_ENUM);
+    glClampColor(GL_CLAMP_READ_COLOR, GL_INVALID_ENUM);
+    expect_error("glClampColor(invalid clamp)", GL_INVALID_ENUM);
 
     glDisable(GL_SCISSOR_TEST);
     glViewport(0, 0, 64, 64);

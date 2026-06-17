@@ -1043,6 +1043,31 @@ int main(int argc, char **argv) {
     GLfloat legacy_blend_color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     glGetFloatv(GL_BLEND_COLOR, legacy_blend_color);
     check_gl_error("glGetFloatv(GL_BLEND_COLOR)");
+    GLint clamp_read_color = 0;
+    glGetIntegerv(GL_CLAMP_READ_COLOR, &clamp_read_color);
+    check_gl_error("glGetIntegerv(GL_CLAMP_READ_COLOR default)");
+    if (clamp_read_color == GL_FIXED_ONLY) {
+        OSReport("[PASS] GL_CLAMP_READ_COLOR defaulted to GL_FIXED_ONLY.\n");
+    } else {
+        OSReport("[FAIL] GL_CLAMP_READ_COLOR defaulted to 0x%04X.\n",
+                 clamp_read_color);
+    }
+    glClampColor(GL_CLAMP_READ_COLOR, GL_FALSE);
+    check_gl_error("glClampColor(GL_CLAMP_READ_COLOR, GL_FALSE)");
+    glGetIntegerv(GL_CLAMP_READ_COLOR, &clamp_read_color);
+    check_gl_error("glGetIntegerv(GL_CLAMP_READ_COLOR false)");
+    if (clamp_read_color == GL_FALSE) {
+        OSReport("[PASS] glClampColor stored GL_FALSE for read clamp state.\n");
+    } else {
+        OSReport("[FAIL] glClampColor stored 0x%04X for read clamp state.\n",
+                 clamp_read_color);
+    }
+    glClampColor(GL_CLAMP_READ_COLOR, GL_FIXED_ONLY);
+    check_gl_error("glClampColor(GL_CLAMP_READ_COLOR, GL_FIXED_ONLY)");
+    glClampColor(GL_CLAMP_VERTEX_COLOR, GL_TRUE);
+    expect_error("glClampColor(GL_CLAMP_VERTEX_COLOR)", GL_INVALID_ENUM);
+    glClampColor(GL_CLAMP_READ_COLOR, GL_INVALID_ENUM);
+    expect_error("glClampColor(invalid clamp)", GL_INVALID_ENUM);
     GLint precision_range[2] = {0, 0};
     GLint precision_bits = -1;
     glGetShaderPrecisionFormat(GL_FRAGMENT_SHADER, GL_HIGH_FLOAT,

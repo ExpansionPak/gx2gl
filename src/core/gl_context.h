@@ -310,6 +310,7 @@ typedef struct {
     GLenum stencil_func[2], stencil_fail[2], stencil_zfail[2], stencil_zpass[2];
     GLint stencil_ref[2];
     GLenum cull_face_mode, front_face, polygon_mode, logic_op;
+    GLenum clamp_read_color;
     GLfloat polygon_offset_factor, polygon_offset_units, line_width, point_size;
     GLboolean color_mask[4];
     GLfloat current_vertex_attrib[GL33_MAX_VERTEX_ATTRIBS][4];
