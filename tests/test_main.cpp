@@ -2937,6 +2937,98 @@ int main(int argc, char **argv) {
     glReadBuffer(GL_INVALID_ENUM);
     expect_error("glReadBuffer(GL_INVALID_ENUM)", GL_INVALID_ENUM);
 
+    GLuint layered_tex = 0;
+    GLuint layered_fbo = 0;
+    GLubyte layered_seed[4 * 4 * 2 * 4] = {0};
+    glGenTextures(1, &layered_tex);
+    check_gl_error("glGenTextures(layered)");
+    glBindTexture(GL_TEXTURE_3D, layered_tex);
+    check_gl_error("glBindTexture(layered GL_TEXTURE_3D)");
+    glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA8, 4, 4, 2, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, layered_seed);
+    check_gl_error("glTexImage3D(layered)");
+    glGenFramebuffers(1, &layered_fbo);
+    check_gl_error("glGenFramebuffers(layered)");
+    glBindFramebuffer(GL_FRAMEBUFFER, layered_fbo);
+    check_gl_error("glBindFramebuffer(layered)");
+    glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                              layered_tex, 0, 1);
+    check_gl_error("glFramebufferTextureLayer(color layer 1)");
+    glDrawBuffer(GL_COLOR_ATTACHMENT0);
+    check_gl_error("glDrawBuffer(layered)");
+    glReadBuffer(GL_COLOR_ATTACHMENT0);
+    check_gl_error("glReadBuffer(layered)");
+    GLenum layered_status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    if (layered_status == GL_FRAMEBUFFER_COMPLETE) {
+        OSReport("[PASS] glFramebufferTextureLayer produced a complete FBO.\n");
+    } else {
+        OSReport("[FAIL] glFramebufferTextureLayer FBO status was 0x%04X\n",
+                 layered_status);
+    }
+    GLint reported_layer = -1;
+    GLint reported_layered = -1;
+    glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                          GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER,
+                                          &reported_layer);
+    check_gl_error("glGetFramebufferAttachmentParameteriv(layer)");
+    glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                          GL_FRAMEBUFFER_ATTACHMENT_LAYERED,
+                                          &reported_layered);
+    check_gl_error("glGetFramebufferAttachmentParameteriv(layered)");
+    if (reported_layer == 1 && reported_layered == GL_FALSE) {
+        OSReport("[PASS] Layered attachment queries returned the attached layer.\n");
+    } else {
+        OSReport("[FAIL] Layered attachment queries returned layer=%d layered=%d\n",
+                 reported_layer, reported_layered);
+    }
+    glClearColor(13.0f / 255.0f, 140.0f / 255.0f, 217.0f / 255.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    check_gl_error("glClear(layered FBO)");
+    glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, readback_rgba);
+    check_gl_error("glReadPixels(layered FBO)");
+    if (readback_rgba[0] == 13 && readback_rgba[1] == 140 &&
+        readback_rgba[2] == 217 && readback_rgba[3] == 255) {
+        OSReport("[PASS] glReadPixels(layered FBO) read layer 1.\n");
+    } else {
+        OSReport("[FAIL] glReadPixels(layered FBO) returned {%u, %u, %u, %u}\n",
+                 readback_rgba[0], readback_rgba[1], readback_rgba[2],
+                 readback_rgba[3]);
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    check_gl_error("glBindFramebuffer(default after layered)");
+    glBindTexture(GL_TEXTURE_3D, layered_tex);
+    check_gl_error("glBindTexture(layered readback)");
+    GLubyte layered_readback[4 * 4 * 2 * 4] = {0};
+    glGetTexImage(GL_TEXTURE_3D, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                  layered_readback);
+    check_gl_error("glGetTexImage(layered)");
+    if (layered_readback[0] == 0 && layered_readback[1] == 0 &&
+        layered_readback[2] == 0 && layered_readback[3] == 0 &&
+        layered_readback[4 * 4 * 4 + 0] == 13 &&
+        layered_readback[4 * 4 * 4 + 1] == 140 &&
+        layered_readback[4 * 4 * 4 + 2] == 217 &&
+        layered_readback[4 * 4 * 4 + 3] == 255) {
+        OSReport("[PASS] glFramebufferTextureLayer updated only layer 1.\n");
+    } else {
+        OSReport("[FAIL] glFramebufferTextureLayer readback layer0={%u,%u,%u,%u} layer1={%u,%u,%u,%u}\n",
+                 layered_readback[0], layered_readback[1],
+                 layered_readback[2], layered_readback[3],
+                 layered_readback[4 * 4 * 4 + 0],
+                 layered_readback[4 * 4 * 4 + 1],
+                 layered_readback[4 * 4 * 4 + 2],
+                 layered_readback[4 * 4 * 4 + 3]);
+    }
+    glDeleteFramebuffers(1, &layered_fbo);
+    check_gl_error("glDeleteFramebuffers(layered)");
+    glDeleteTextures(1, &layered_tex);
+    check_gl_error("glDeleteTextures(layered)");
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    check_gl_error("glBindFramebuffer(restore after layered)");
+    glDrawBuffers(2, mrt_bufs);
+    check_gl_error("glDrawBuffers(restore after layered)");
+    glReadBuffer(GL_COLOR_ATTACHMENT1);
+    check_gl_error("glReadBuffer(restore after layered)");
+
     glBindFramebuffer(GL_FRAMEBUFFER, 0); // Back to default
     glReadBuffer(GL_BACK);
     check_gl_error("glReadBuffer(default_back)");

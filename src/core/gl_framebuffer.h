@@ -22,6 +22,7 @@ void _gl_BindRenderbuffer(GLenum target, GLuint renderbuffer);
 GLenum _gl_CheckFramebufferStatus(GLenum target);
 void _gl_FramebufferTexture(GLenum target, GLenum attachment, GLuint texture, GLint level);
 void _gl_FramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level);
+void _gl_FramebufferTextureLayer(GLenum target, GLenum attachment, GLuint texture, GLint level, GLint layer);
 void _gl_FramebufferRenderbuffer(GLenum target, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer);
 void _gl_RenderbufferStorage(GLenum target, GLenum internalformat, GLsizei width, GLsizei height);
 void _gl_RenderbufferStorageMultisample(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height);

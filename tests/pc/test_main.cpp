@@ -957,6 +957,68 @@ static int run_compare_suite(const char *reference_ppm_path) {
                       tex_image[0], tex_image[1], tex_image[2], tex_image[3]);
         fail(buffer);
     }
+
+    GLuint layered_texture = 0;
+    GLuint layered_fbo = 0;
+    GLubyte layered_seed[4 * 4 * 2 * 4] = {0};
+    glGenTextures(1, &layered_texture);
+    glBindTexture(GL_TEXTURE_3D, layered_texture);
+    glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA8, 4, 4, 2, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, layered_seed);
+    glGenFramebuffers(1, &layered_fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, layered_fbo);
+    glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                              layered_texture, 0, 1);
+    glDrawBuffer(GL_COLOR_ATTACHMENT0);
+    glReadBuffer(GL_COLOR_ATTACHMENT0);
+    check_gl_error("layered framebuffer setup");
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
+        pass("glFramebufferTextureLayer framebuffer is complete.");
+    } else {
+        fail("glFramebufferTextureLayer framebuffer is not complete.");
+    }
+    GLint reported_layer = -1;
+    GLint reported_layered = -1;
+    glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                          GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER,
+                                          &reported_layer);
+    glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                          GL_FRAMEBUFFER_ATTACHMENT_LAYERED,
+                                          &reported_layered);
+    check_gl_error("layered framebuffer attachment queries");
+    if (reported_layer == 1 && reported_layered == GL_FALSE) {
+        pass("layered framebuffer attachment queries matched expected values.");
+    } else {
+        fail("layered framebuffer attachment queries returned unexpected values.");
+    }
+    glClearColor(13.0f / 255.0f, 140.0f / 255.0f, 217.0f / 255.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    check_gl_error("layered framebuffer clear");
+    glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, default_readback);
+    check_gl_error("glReadPixels(layered framebuffer)");
+    if (rgba_equals(default_readback, 13, 140, 217, 255)) {
+        pass("layered framebuffer readback matched attached layer.");
+    } else {
+        fail("layered framebuffer readback did not match attached layer.");
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glBindTexture(GL_TEXTURE_3D, layered_texture);
+    GLubyte layered_image[4 * 4 * 2 * 4] = {0};
+    glGetTexImage(GL_TEXTURE_3D, 0, GL_RGBA, GL_UNSIGNED_BYTE, layered_image);
+    check_gl_error("glGetTexImage(layered texture)");
+    if (rgba_equals(layered_image, 0, 0, 0, 0) &&
+        rgba_equals(layered_image + 4 * 4 * 4, 13, 140, 217, 255)) {
+        pass("glFramebufferTextureLayer updated only the selected 3D layer.");
+    } else {
+        fail("glFramebufferTextureLayer updated the wrong texture layer.");
+    }
+    glDeleteFramebuffers(1, &layered_fbo);
+    glDeleteTextures(1, &layered_texture);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glDrawBuffer(GL_COLOR_ATTACHMENT0);
+    glReadBuffer(GL_COLOR_ATTACHMENT0);
+    check_gl_error("restore framebuffer after layered test");
+
     render_complex_scene_to_window_and_file(reference_ppm_path);
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     glDrawBuffer(GL_COLOR_ATTACHMENT0);

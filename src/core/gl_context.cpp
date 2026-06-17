@@ -1460,21 +1460,7 @@ static bool is_transform_feedback_primitive_mode(GLenum mode) {
 
 
 void glFramebufferTextureLayer(GLenum target, GLenum attachment, GLuint texture, GLint level, GLint layer) {
-    if (!is_wrapper_framebuffer_target(target) ||
-        !is_wrapper_framebuffer_attachment(attachment)) {
-        _gl_set_error(GL_INVALID_ENUM);
-        return;
-    }
-    if (level < 0 || layer < 0) {
-        _gl_set_error(GL_INVALID_VALUE);
-        return;
-    }
-    if (texture != 0 && !_gl_IsTexture(texture)) {
-        _gl_set_error(GL_INVALID_VALUE);
-        return;
-    }
-    /* gx2gl does not yet support layered framebuffer attachments. */
-    _gl_set_error(GL_INVALID_OPERATION);
+    _gl_FramebufferTextureLayer(target, attachment, texture, level, layer);
 }
 
 
@@ -1964,8 +1950,7 @@ void glFramebufferTexture3D(GLenum target, GLenum attachment, GLenum textarget, 
         _gl_set_error(GL_INVALID_VALUE);
         return;
     }
-    /* gx2gl does not support legacy 3D texture slice attachment entrypoints yet. */
-    _gl_set_error(GL_INVALID_OPERATION);
+    _gl_FramebufferTextureLayer(target, attachment, texture, level, zoffset);
 }
 void glGetBooleani_v(GLenum target, GLuint index, GLboolean *data) {
     if (!g_gl_context || !data) return;

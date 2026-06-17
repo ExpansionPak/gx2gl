@@ -35,6 +35,7 @@ extern "C" {
 #define MAX_RENDERBUFFERS 256
 #define GX2GL_MAX_RENDERBUFFER_SIZE 8192
 #define GX2GL_MAX_RENDERBUFFER_SAMPLES 1
+#define GX2GL_MAX_FRAMEBUFFER_3D_TEXTURE_SIZE 2048
 
 typedef enum {
     GL_ATTACHMENT_KIND_NONE = 0,
@@ -47,6 +48,8 @@ typedef struct {
     GLuint object;
     GLenum textarget;
     GLint level;
+    GLint layer;
+    GLboolean layered;
 } GLAttachmentRef;
 
 typedef struct {
@@ -94,6 +97,10 @@ static GLRenderbuffer *get_renderbuffer(GLuint id);
 static GX2ColorBuffer *get_default_color_buffer(void);
 static void clear_attachment_ref(GLAttachmentRef *attachment);
 static void free_framebuffer_texture_target(GLFramebuffer *fb, uint32_t index);
+static uint32_t texture_level_extent(uint32_t extent, GLint level);
+static uint32_t attachment_view_slice(const GLAttachmentRef *attachment);
+static uint32_t texture_level_depth_for_attachment(const GLAttachmentRef *attachment,
+                                                   const GX2Surface *surface);
 
 static void detach_renderbuffer_from_framebuffer(GLuint framebuffer,
                                                 GLuint renderbuffer) {
@@ -321,7 +328,10 @@ static bool stage_color_surface_for_cpu_read(const GX2Surface *source,
     return true;
 }
 
-static bool init_color_buffer_from_surface(GX2ColorBuffer *cb, const GX2Surface *s) {
+static bool init_color_buffer_from_surface_view(GX2ColorBuffer *cb,
+                                                const GX2Surface *s,
+                                                GLint level,
+                                                uint32_t slice) {
     uint32_t aux_size = 0;
     uint32_t aux_alignment = 0;
 
@@ -331,6 +341,8 @@ static bool init_color_buffer_from_surface(GX2ColorBuffer *cb, const GX2Surface 
 
     memset(cb, 0, sizeof(*cb));
     cb->surface = *s;
+    cb->viewMip = (uint32_t)(level < 0 ? 0 : level);
+    cb->viewFirstSlice = slice;
     cb->viewNumSlices = 1;
 
     GX2CalcColorBufferAuxInfo(cb, &aux_size, &aux_alignment);
@@ -349,20 +361,32 @@ static bool init_color_buffer_from_surface(GX2ColorBuffer *cb, const GX2Surface 
     return true;
 }
 
+static bool init_color_buffer_from_surface(GX2ColorBuffer *cb, const GX2Surface *s) {
+    return init_color_buffer_from_surface_view(cb, s, 0, 0);
+}
+
 static bool ensure_texture_color_target(GLFramebuffer *fb, uint32_t index, const GX2Texture *texture) {
     GLTextureColorTarget *target;
     GX2Surface *surface;
     GX2RResourceFlags surface_flags;
+    const GLAttachmentRef *attachment;
+    uint32_t depth;
+    uint32_t slice;
 
     if (!fb || index >= 8 || !texture || !texture->surface.image) return false;
+
+    attachment = &fb->color_attachments[index];
+    depth = texture_level_depth_for_attachment(attachment, &texture->surface);
+    slice = attachment_view_slice(attachment);
+    if (slice >= depth) return false;
 
     target = &fb->texture_targets[index];
     surface = &target->surface;
     if (target->allocated &&
         surface->dim == texture->surface.dim &&
-        surface->width == texture->surface.width &&
-        surface->height == texture->surface.height &&
-        surface->depth == texture->surface.depth &&
+        surface->width == texture_level_extent(texture->surface.width, attachment->level) &&
+        surface->height == texture_level_extent(texture->surface.height, attachment->level) &&
+        surface->depth == depth &&
         surface->format == texture->surface.format) {
         return true;
     }
@@ -371,9 +395,9 @@ static bool ensure_texture_color_target(GLFramebuffer *fb, uint32_t index, const
 
     memset(surface, 0, sizeof(*surface));
     surface->dim = texture->surface.dim;
-    surface->width = texture->surface.width;
-    surface->height = texture->surface.height;
-    surface->depth = texture->surface.depth ? texture->surface.depth : 1;
+    surface->width = texture_level_extent(texture->surface.width, attachment->level);
+    surface->height = texture_level_extent(texture->surface.height, attachment->level);
+    surface->depth = depth;
     surface->mipLevels = 1;
     surface->format = texture->surface.format;
     surface->aa = GX2_AA_MODE1X;
@@ -393,7 +417,8 @@ static bool ensure_texture_color_target(GLFramebuffer *fb, uint32_t index, const
     if (surface->mipmaps && surface->mipmapSize)
         memset(surface->mipmaps, 0, surface->mipmapSize);
 
-    if (!init_color_buffer_from_surface(&target->color_buffer, surface)) {
+    if (!init_color_buffer_from_surface_view(&target->color_buffer, surface,
+                                             0, slice)) {
         free_surface_storage(surface);
         return false;
     }
@@ -422,7 +447,11 @@ static void resolve_framebuffer_texture_targets(GLFramebuffer *fb) {
         target = &fb->texture_targets[i];
         GX2DrawDone();
         if (target->allocated && target->surface.image) {
-            GX2CopySurface(&target->surface, 0, 0, &texture->surface, 0, 0);
+            uint32_t slice = attachment_view_slice(&fb->color_attachments[i]);
+            GX2CopySurface(&target->surface, 0, slice,
+                           &texture->surface,
+                           (uint32_t)fb->color_attachments[i].level,
+                           slice);
             GX2DrawDone();
         }
         invalidate_surface_after_color_write(&texture->surface);
@@ -450,6 +479,113 @@ static bool is_cube_map_face_target(GLenum target) {
            target <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z;
 }
 
+static uint32_t cube_map_face_slice(GLenum target) {
+    return is_cube_map_face_target(target)
+               ? (uint32_t)(target - GL_TEXTURE_CUBE_MAP_POSITIVE_X)
+               : 0u;
+}
+
+static uint32_t texture_level_extent(uint32_t extent, GLint level) {
+    uint32_t shifted;
+
+    if (level <= 0) return extent ? extent : 1u;
+    shifted = extent >> (uint32_t)level;
+    return shifted ? shifted : 1u;
+}
+
+static GLint max_texture_level_for_size(uint32_t size) {
+    GLint level = 0;
+
+    while (size > 1u) {
+        size >>= 1u;
+        ++level;
+    }
+    return level;
+}
+
+static uint32_t attachment_view_slice(const GLAttachmentRef *attachment) {
+    if (!attachment || attachment->kind != GL_ATTACHMENT_KIND_TEXTURE) return 0u;
+    if (attachment->textarget == GL_TEXTURE_3D) return (uint32_t)attachment->layer;
+    return cube_map_face_slice(attachment->textarget);
+}
+
+static uint32_t texture_level_depth_for_attachment(const GLAttachmentRef *attachment,
+                                                   const GX2Surface *surface) {
+    if (!attachment || !surface) return 1u;
+    if (attachment->textarget == GL_TEXTURE_3D) {
+        return texture_level_extent(surface->depth, attachment->level);
+    }
+    if (is_cube_map_face_target(attachment->textarget)) {
+        return surface->depth ? surface->depth : 6u;
+    }
+    return 1u;
+}
+
+static bool attachment_view_exists(const GLAttachmentRef *attachment,
+                                   const GX2Texture *texture) {
+    uint32_t depth;
+
+    if (!attachment_ref_present(attachment) || !texture ||
+        !texture->surface.image || attachment->level < 0 ||
+        (uint32_t)attachment->level >= texture->surface.mipLevels) {
+        return false;
+    }
+
+    depth = texture_level_depth_for_attachment(attachment, &texture->surface);
+    return attachment_view_slice(attachment) < depth;
+}
+
+static bool build_texture_attachment_read_surface(const GLAttachmentRef *attachment,
+                                                  const GX2Surface *source,
+                                                  GX2Surface *view) {
+    GX2Surface level_surface;
+    uint8_t *level_base;
+    uint32_t depth;
+    uint32_t slice;
+    uint32_t slice_size;
+
+    if (!attachment || !source || !view || !source->image ||
+        attachment->level < 0 ||
+        (uint32_t)attachment->level >= source->mipLevels) {
+        return false;
+    }
+
+    depth = texture_level_depth_for_attachment(attachment, source);
+    slice = attachment_view_slice(attachment);
+    if (depth == 0 || slice >= depth) return false;
+
+    level_base = attachment->level == 0
+                     ? (uint8_t *)source->image
+                     : (source->mipmaps
+                            ? (uint8_t *)source->mipmaps +
+                                  source->mipLevelOffset[attachment->level - 1]
+                            : NULL);
+    if (!level_base) return false;
+
+    memset(&level_surface, 0, sizeof(level_surface));
+    level_surface.dim = source->dim;
+    level_surface.width = texture_level_extent(source->width, attachment->level);
+    level_surface.height = texture_level_extent(source->height, attachment->level);
+    level_surface.depth = depth;
+    level_surface.mipLevels = 1;
+    level_surface.format = source->format;
+    level_surface.aa = source->aa;
+    level_surface.use = source->use;
+    level_surface.tileMode = source->tileMode;
+    GX2CalcSurfaceSizeAndAlignment(&level_surface);
+
+    slice_size = depth > 0 ? level_surface.imageSize / depth
+                           : level_surface.imageSize;
+    *view = level_surface;
+    view->depth = 1;
+    view->image = level_base + (size_t)slice * (size_t)slice_size;
+    view->imageSize = slice_size;
+    view->mipmaps = NULL;
+    view->mipmapSize = 0;
+    view->resourceFlags = (GX2RResourceFlags)0;
+    return true;
+}
+
 static GLuint get_bound_framebuffer_for_target(GLenum target) {
     switch (target) {
     case GL_FRAMEBUFFER:
@@ -468,6 +604,8 @@ static void clear_attachment_ref(GLAttachmentRef *attachment) {
     attachment->object = 0;
     attachment->textarget = 0;
     attachment->level = 0;
+    attachment->layer = 0;
+    attachment->layered = GL_FALSE;
 }
 
 static bool attachment_ref_present(const GLAttachmentRef *attachment) {
@@ -477,12 +615,16 @@ static bool attachment_ref_present(const GLAttachmentRef *attachment) {
 static void set_texture_attachment_ref(GLAttachmentRef *attachment,
                                        GLuint texture,
                                        GLenum textarget,
-                                       GLint level) {
+                                       GLint level,
+                                       GLint layer,
+                                       GLboolean layered) {
     if (!attachment) return;
     attachment->kind = GL_ATTACHMENT_KIND_TEXTURE;
     attachment->object = texture;
     attachment->textarget = textarget;
     attachment->level = level;
+    attachment->layer = layer;
+    attachment->layered = layered;
 }
 
 static void set_renderbuffer_attachment_ref(GLAttachmentRef *attachment,
@@ -492,6 +634,8 @@ static void set_renderbuffer_attachment_ref(GLAttachmentRef *attachment,
     attachment->object = renderbuffer;
     attachment->textarget = 0;
     attachment->level = 0;
+    attachment->layer = 0;
+    attachment->layered = GL_FALSE;
 }
 
 static void init_framebuffer_object(GLFramebuffer *fb, bool is_default) {
@@ -746,12 +890,21 @@ static void apply_framebuffer_output_state(GLFramebuffer *fb, bool is_default) {
                        active_target_mask != 0 ? GX2_ENABLE : GX2_DISABLE);
 }
 
-static void init_depth_buffer_from_surface(GX2DepthBuffer *db, const GX2Surface *s) {
+static void init_depth_buffer_from_surface_view(GX2DepthBuffer *db,
+                                                const GX2Surface *s,
+                                                GLint level,
+                                                uint32_t slice) {
     memset(db, 0, sizeof(*db));
     db->surface = *s;
+    db->viewMip = (uint32_t)(level < 0 ? 0 : level);
+    db->viewFirstSlice = slice;
     db->viewNumSlices = 1;
     db->depthClear = 1.0f;
     GX2InitDepthBufferRegs(db);
+}
+
+static void init_depth_buffer_from_surface(GX2DepthBuffer *db, const GX2Surface *s) {
+    init_depth_buffer_from_surface_view(db, s, 0, 0);
 }
 
 typedef struct {
@@ -769,9 +922,11 @@ static bool get_attachment_image_info(const GLAttachmentRef *attachment,
 
     if (attachment->kind == GL_ATTACHMENT_KIND_TEXTURE) {
         GX2Texture *texture = gl_get_gx2_texture(attachment->object);
-        if (!texture || !texture->surface.image) return false;
-        info->width = (GLsizei)texture->surface.width;
-        info->height = (GLsizei)texture->surface.height;
+        if (!attachment_view_exists(attachment, texture)) return false;
+        info->width = (GLsizei)texture_level_extent(texture->surface.width,
+                                                    attachment->level);
+        info->height = (GLsizei)texture_level_extent(texture->surface.height,
+                                                     attachment->level);
         info->samples = 0;
         info->internal_format = gl_get_texture_internal_format(attachment->object);
         info->depth_renderable = is_depth_internal_format(info->internal_format);
@@ -882,7 +1037,10 @@ static GX2ColorBuffer *get_read_color_buffer(void) {
                 if (fb->color_attachments[i].kind == GL_ATTACHMENT_KIND_TEXTURE) {
                     GX2Texture *t = gl_get_gx2_texture(fb->color_attachments[i].object);
                     free_framebuffer_texture_target(fb, i);
-                    if (t && init_color_buffer_from_surface(&fb->cb[i], &t->surface)) {
+                    if (t && init_color_buffer_from_surface_view(
+                                 &fb->cb[i], &t->surface,
+                                 fb->color_attachments[i].level,
+                                 attachment_view_slice(&fb->color_attachments[i]))) {
                         fb->color_buffer_owns_aux[i] = true;
                     }
                 } else {
@@ -898,7 +1056,9 @@ static GX2ColorBuffer *get_read_color_buffer(void) {
             if (attachment_ref_present(&fb->depth_attachment)) {
                 if (fb->depth_attachment.kind == GL_ATTACHMENT_KIND_TEXTURE) {
                     GX2Texture *t = gl_get_gx2_texture(fb->depth_attachment.object);
-                    if (t) init_depth_buffer_from_surface(&fb->db, &t->surface);
+                    if (t) init_depth_buffer_from_surface_view(
+                               &fb->db, &t->surface, fb->depth_attachment.level,
+                               attachment_view_slice(&fb->depth_attachment));
                 } else {
                     GLRenderbuffer *rb = get_renderbuffer(fb->depth_attachment.object);
                     if (rb && rb->is_depth) fb->db = rb->depth_buffer;
@@ -906,7 +1066,9 @@ static GX2ColorBuffer *get_read_color_buffer(void) {
             } else if (attachment_ref_present(&fb->stencil_attachment)) {
                 if (fb->stencil_attachment.kind == GL_ATTACHMENT_KIND_TEXTURE) {
                     GX2Texture *t = gl_get_gx2_texture(fb->stencil_attachment.object);
-                    if (t) init_depth_buffer_from_surface(&fb->db, &t->surface);
+                    if (t) init_depth_buffer_from_surface_view(
+                               &fb->db, &t->surface, fb->stencil_attachment.level,
+                               attachment_view_slice(&fb->stencil_attachment));
                 } else {
                     GLRenderbuffer *rb = get_renderbuffer(fb->stencil_attachment.object);
                     if (rb && rb->is_depth) fb->db = rb->depth_buffer;
@@ -1134,9 +1296,9 @@ void _gl_FramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget
             clear_attachment_ref(&g_framebuffers[fbo].stencil_attachment);
         } else {
             set_texture_attachment_ref(&g_framebuffers[fbo].depth_attachment,
-                                       texture, textarget, level);
+                                       texture, textarget, level, 0, GL_FALSE);
             set_texture_attachment_ref(&g_framebuffers[fbo].stencil_attachment,
-                                       texture, textarget, level);
+                                       texture, textarget, level, 0, GL_FALSE);
         }
         g_framebuffers[fbo].dirty = true;
         g_gl_context->dirty_flags |= GL_DIRTY_FRAMEBUFFER;
@@ -1145,10 +1307,87 @@ void _gl_FramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget
     GLAttachmentRef *ref = get_attachment_ref(&g_framebuffers[fbo], attachment);
     if (!ref) { _gl_set_error(GL_INVALID_ENUM); return; }
     if (texture == 0) clear_attachment_ref(ref);
-    else set_texture_attachment_ref(ref, texture, textarget, level);
+    else set_texture_attachment_ref(ref, texture, textarget, level, 0, GL_FALSE);
     if (attachment >= GL_COLOR_ATTACHMENT0 && attachment <= GL_COLOR_ATTACHMENT7)
         free_framebuffer_texture_target(&g_framebuffers[fbo], attachment - GL_COLOR_ATTACHMENT0);
     g_framebuffers[fbo].dirty = true;
+    g_gl_context->dirty_flags |= GL_DIRTY_FRAMEBUFFER;
+}
+
+void _gl_FramebufferTextureLayer(GLenum target, GLenum attachment, GLuint texture, GLint level, GLint layer) {
+    GLenum texture_target;
+    GLuint fbo;
+    GLFramebuffer *fb;
+
+    if (!g_gl_context) return;
+    if (!is_framebuffer_target(target)) {
+        _gl_set_error(GL_INVALID_ENUM);
+        return;
+    }
+    if (attachment != GL_DEPTH_STENCIL_ATTACHMENT &&
+        !get_attachment_ref(&g_framebuffers[0], attachment)) {
+        _gl_set_error(GL_INVALID_ENUM);
+        return;
+    }
+    if (level < 0) {
+        _gl_set_error(GL_INVALID_VALUE);
+        return;
+    }
+    if (texture != 0) {
+        if (_gl_IsTexture(texture) != GL_TRUE) {
+            _gl_set_error(GL_INVALID_VALUE);
+            return;
+        }
+        if (layer < 0 ||
+            layer >= GX2GL_MAX_FRAMEBUFFER_3D_TEXTURE_SIZE ||
+            level > max_texture_level_for_size(GX2GL_MAX_FRAMEBUFFER_3D_TEXTURE_SIZE)) {
+            _gl_set_error(GL_INVALID_VALUE);
+            return;
+        }
+        texture_target = gl_get_texture_target(texture);
+        if (texture_target != GL_TEXTURE_3D) {
+            _gl_set_error(GL_INVALID_OPERATION);
+            return;
+        }
+    }
+
+    fbo = get_bound_framebuffer_for_target(target);
+    if (fbo == 0) {
+        _gl_set_error(GL_INVALID_OPERATION);
+        return;
+    }
+
+    fb = &g_framebuffers[fbo];
+    if (attachment == GL_DEPTH_STENCIL_ATTACHMENT) {
+        if (texture == 0) {
+            clear_attachment_ref(&fb->depth_attachment);
+            clear_attachment_ref(&fb->stencil_attachment);
+        } else {
+            set_texture_attachment_ref(&fb->depth_attachment, texture,
+                                       GL_TEXTURE_3D, level, layer, GL_FALSE);
+            set_texture_attachment_ref(&fb->stencil_attachment, texture,
+                                       GL_TEXTURE_3D, level, layer, GL_FALSE);
+        }
+        fb->dirty = true;
+        g_gl_context->dirty_flags |= GL_DIRTY_FRAMEBUFFER;
+        return;
+    }
+
+    {
+        GLAttachmentRef *ref = get_attachment_ref(fb, attachment);
+        if (!ref) {
+            _gl_set_error(GL_INVALID_ENUM);
+            return;
+        }
+        if (texture == 0) clear_attachment_ref(ref);
+        else set_texture_attachment_ref(ref, texture, GL_TEXTURE_3D, level,
+                                        layer, GL_FALSE);
+    }
+
+    if (attachment >= GL_COLOR_ATTACHMENT0 && attachment <= GL_COLOR_ATTACHMENT7) {
+        free_framebuffer_texture_target(fb, attachment - GL_COLOR_ATTACHMENT0);
+    }
+    fb->dirty = true;
     g_gl_context->dirty_flags |= GL_DIRTY_FRAMEBUFFER;
 }
 
@@ -1940,12 +2179,12 @@ void _gl_GetFramebufferAttachmentParameteriv(GLenum target, GLenum attachment, G
     case GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER:
         if (!attachment_ref_present(ref)) { _gl_set_error(GL_INVALID_OPERATION); return; }
         if (ref->kind != GL_ATTACHMENT_KIND_TEXTURE) { _gl_set_error(GL_INVALID_ENUM); return; }
-        *params = 0;
+        *params = ref->textarget == GL_TEXTURE_3D ? ref->layer : 0;
         break;
     case GL_FRAMEBUFFER_ATTACHMENT_LAYERED:
         if (!attachment_ref_present(ref)) { _gl_set_error(GL_INVALID_OPERATION); return; }
         if (ref->kind != GL_ATTACHMENT_KIND_TEXTURE) { _gl_set_error(GL_INVALID_ENUM); return; }
-        *params = GL_FALSE;
+        *params = ref->layered;
         break;
     default: _gl_set_error(GL_INVALID_ENUM); break;
     }
@@ -1972,7 +2211,10 @@ void gl_bind_framebuffers(void) {
             if (fb->color_attachments[i].kind == GL_ATTACHMENT_KIND_TEXTURE) {
                 GX2Texture *t = gl_get_gx2_texture(fb->color_attachments[i].object);
                 free_framebuffer_texture_target(fb, i);
-                if (t && init_color_buffer_from_surface(&fb->cb[i], &t->surface)) {
+                if (t && init_color_buffer_from_surface_view(
+                             &fb->cb[i], &t->surface,
+                             fb->color_attachments[i].level,
+                             attachment_view_slice(&fb->color_attachments[i]))) {
                     fb->color_buffer_owns_aux[i] = true;
                 }
             } else {
@@ -1988,7 +2230,9 @@ void gl_bind_framebuffers(void) {
         if (attachment_ref_present(&fb->depth_attachment)) {
             if (fb->depth_attachment.kind == GL_ATTACHMENT_KIND_TEXTURE) {
                 GX2Texture *t = gl_get_gx2_texture(fb->depth_attachment.object);
-                if (t) init_depth_buffer_from_surface(&fb->db, &t->surface);
+                if (t) init_depth_buffer_from_surface_view(
+                           &fb->db, &t->surface, fb->depth_attachment.level,
+                           attachment_view_slice(&fb->depth_attachment));
             } else {
                 GLRenderbuffer *rb = get_renderbuffer(fb->depth_attachment.object);
                 if (rb && rb->is_depth) fb->db = rb->depth_buffer;
@@ -1996,7 +2240,9 @@ void gl_bind_framebuffers(void) {
         } else if (attachment_ref_present(&fb->stencil_attachment)) {
             if (fb->stencil_attachment.kind == GL_ATTACHMENT_KIND_TEXTURE) {
                 GX2Texture *t = gl_get_gx2_texture(fb->stencil_attachment.object);
-                if (t) init_depth_buffer_from_surface(&fb->db, &t->surface);
+                if (t) init_depth_buffer_from_surface_view(
+                           &fb->db, &t->surface, fb->stencil_attachment.level,
+                           attachment_view_slice(&fb->stencil_attachment));
             } else {
                 GLRenderbuffer *rb = get_renderbuffer(fb->stencil_attachment.object);
                 if (rb && rb->is_depth) fb->db = rb->depth_buffer;
@@ -2128,6 +2374,7 @@ GLboolean gl_read_color_pixels_rgba8(GLint x, GLint y, GLsizei width, GLsizei he
     GX2ColorBuffer *cb;
     GX2Surface *surface;
     GX2Surface staging_surface;
+    GX2Surface texture_read_surface;
     GX2Surface *read_surface;
     uint8_t *dst;
     GLint internal_format;
@@ -2142,14 +2389,19 @@ GLboolean gl_read_color_pixels_rgba8(GLint x, GLint y, GLsizei width, GLsizei he
     if (!cb || !cb->surface.image) return GL_FALSE;
 
     surface = &cb->surface;
+    memset(&texture_read_surface, 0, sizeof(texture_read_surface));
     read_fbo = g_gl_context->bound_read_framebuffer;
     if (read_fbo > 0 && read_fbo < MAX_FRAMEBUFFERS &&
         get_color_attachment_index(g_framebuffers[read_fbo].read_buffer, &texture_attachment_index) &&
         g_framebuffers[read_fbo].color_attachments[texture_attachment_index].kind == GL_ATTACHMENT_KIND_TEXTURE) {
+        GLAttachmentRef *attachment =
+            &g_framebuffers[read_fbo].color_attachments[texture_attachment_index];
         GX2Texture *texture =
-            gl_get_gx2_texture(g_framebuffers[read_fbo].color_attachments[texture_attachment_index].object);
-        if (texture && texture->surface.image) {
-            surface = &texture->surface;
+            gl_get_gx2_texture(attachment->object);
+        if (texture && build_texture_attachment_read_surface(attachment,
+                                                             &texture->surface,
+                                                             &texture_read_surface)) {
+            surface = &texture_read_surface;
         }
     }
     internal_format = get_read_color_internal_format();
