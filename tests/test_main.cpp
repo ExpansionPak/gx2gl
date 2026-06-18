@@ -2520,6 +2520,33 @@ int main(int argc, char **argv) {
                  program_info_log);
     }
 
+    if (source_shader_compiler_available && program_link_status == GL_TRUE) {
+        const char *replacement_vsrc =
+            "#version 330 core\n"
+            "void main() { gl_Position = vec4(0.5, 0.0, 0.0, 1.0); }";
+        glShaderSource(vshader, 1, &replacement_vsrc, NULL);
+        check_gl_error("glShaderSource(linked_vertex_recompile)");
+        GLint source_only_compile_status = GL_FALSE;
+        glGetShaderiv(vshader, GL_COMPILE_STATUS, &source_only_compile_status);
+        check_gl_error("glGetShaderiv(linked_vertex_source_only)");
+        glCompileShader(vshader);
+        check_gl_error("glCompileShader(linked_vertex_recompile)");
+        GLint recompile_status = GL_FALSE;
+        glGetShaderiv(vshader, GL_COMPILE_STATUS, &recompile_status);
+        check_gl_error("glGetShaderiv(linked_vertex_recompile)");
+        glUseProgram(prog);
+        GLenum recompile_use_error = glGetError();
+        if (source_only_compile_status == GL_TRUE && recompile_status == GL_TRUE &&
+            recompile_use_error == GL_NO_ERROR) {
+            OSReport("[PASS] Recompiling an attached shader preserved the linked program executable.\n");
+        } else {
+            OSReport("[FAIL] Attached shader source_status=%d recompile_status=%d use_error=0x%04X\n",
+                     source_only_compile_status, recompile_status, recompile_use_error);
+        }
+        glUseProgram(0);
+        check_gl_error("glUseProgram(0, linked_vertex_recompile)");
+    }
+
     GLuint tf_prog = glCreateProgram();
     check_gl_error("glCreateProgram(transform_feedback)");
     glAttachShader(tf_prog, vshader);

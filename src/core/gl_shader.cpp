@@ -104,6 +104,14 @@ extern "C" {
 #define GL_SAMPLER_3D 0x8B5F
 #endif
 
+typedef struct GLCompiledShader {
+  GLenum type;
+  uint32_t reference_count;
+  char *source;
+  GX2VertexShader *vertex_shader;
+  GX2PixelShader *pixel_shader;
+} GLCompiledShader;
+
 typedef struct {
   bool in_use;
   bool delete_pending;
@@ -114,6 +122,7 @@ typedef struct {
   bool source_present;
   bool compile_requested;
   bool compile_succeeded;
+  GLCompiledShader *compiled_binary;
   GX2VertexShader *compiled_vertex_shader;
   GX2PixelShader *compiled_pixel_shader;
 } GLShader;
@@ -170,6 +179,8 @@ typedef struct {
   bool owns_group;
   bool owns_whb_group;
   WHBGfxShaderGroup owned_group;
+  GLCompiledShader *linked_vertex_binary;
+  GLCompiledShader *linked_pixel_binary;
   UniformBlockShadow *vs_blocks;
   uint32_t vs_block_count;
   UniformBlockShadow *ps_blocks;
@@ -629,34 +640,48 @@ static bool has_sampler_binding_conflict(const GX2SamplerVar *samplers,
   return false;
 }
 
+static GLCompiledShader *create_compiled_shader(GLenum type, const char *source) {
+  GLCompiledShader *binary = (GLCompiledShader *)calloc(1u, sizeof(*binary));
+  if (!binary) return NULL;
+  binary->source = source ? strdup(source) : NULL;
+  if (!binary->source) {
+    free(binary);
+    return NULL;
+  }
+  binary->type = type;
+  binary->reference_count = 1;
+  return binary;
+}
+
+static void retain_compiled_shader(GLCompiledShader *binary) {
+  if (binary) ++binary->reference_count;
+}
+
+static void release_compiled_shader(GLCompiledShader *binary) {
+  if (!binary || binary->reference_count == 0) return;
+  if (--binary->reference_count != 0) return;
+
+  if (binary->vertex_shader) {
+    gx2gl_cafeglsl_free_vertex_shader(binary->vertex_shader);
+  }
+  if (binary->pixel_shader) {
+    gx2gl_cafeglsl_free_pixel_shader(binary->pixel_shader);
+  }
+  free(binary->source);
+  free(binary);
+}
+
 static void free_shader_binary(GLShader *shader) {
   if (!shader) return;
-
-  if (shader->compiled_vertex_shader) {
-    gx2gl_cafeglsl_free_vertex_shader(shader->compiled_vertex_shader);
-    shader->compiled_vertex_shader = NULL;
-  }
-  if (shader->compiled_pixel_shader) {
-    gx2gl_cafeglsl_free_pixel_shader(shader->compiled_pixel_shader);
-    shader->compiled_pixel_shader = NULL;
-  }
+  release_compiled_shader(shader->compiled_binary);
+  shader->compiled_binary = NULL;
+  shader->compiled_vertex_shader = NULL;
+  shader->compiled_pixel_shader = NULL;
 }
 
 static bool shader_is_attached_to_any_program(GLuint shader_id) {
   for (uint32_t i = 1; i < MAX_PROGRAMS; ++i) {
     if (!g_programs[i].in_use) continue;
-    if (g_programs[i].attached_vertex_shader == shader_id ||
-        g_programs[i].attached_pixel_shader == shader_id ||
-        g_programs[i].attached_geometry_shader == shader_id) {
-      return true;
-    }
-  }
-  return false;
-}
-
-static bool shader_is_used_by_linked_program(GLuint shader_id) {
-  for (uint32_t i = 1; i < MAX_PROGRAMS; ++i) {
-    if (!g_programs[i].in_use || !g_programs[i].linked) continue;
     if (g_programs[i].attached_vertex_shader == shader_id ||
         g_programs[i].attached_pixel_shader == shader_id ||
         g_programs[i].attached_geometry_shader == shader_id) {
@@ -864,12 +889,16 @@ static void clear_program_runtime_state(GLProgram *prog) {
   if (prog->dynamic_fetch_shader_program) {
     gl_mem_free(GL_MEM_TYPE_MEM2, prog->dynamic_fetch_shader_program);
   }
+  release_compiled_shader(prog->linked_vertex_binary);
+  release_compiled_shader(prog->linked_pixel_binary);
 
   memset(&prog->owned_group, 0, sizeof(prog->owned_group));
   memset(&prog->dynamic_fetch_shader, 0, sizeof(prog->dynamic_fetch_shader));
   prog->dynamic_fetch_shader_program = NULL;
   prog->dynamic_fetch_shader_program_size = 0;
   prog->dynamic_fetch_shader_attrib_count = 0;
+  prog->linked_vertex_binary = NULL;
+  prog->linked_pixel_binary = NULL;
   prog->group = NULL;
   prog->owns_group = false;
   prog->owns_whb_group = false;
@@ -1199,7 +1228,7 @@ static bool set_transform_feedback_link_error(char *message,
 }
 
 static bool build_program_transform_feedback_link_state(GLProgram *prog,
-                                                        const GLShader *vertex_shader,
+                                                        const char *vertex_source,
                                                         char *message,
                                                         size_t message_capacity) {
   ProgramTransformFeedbackVarying *varyings = NULL;
@@ -1218,7 +1247,7 @@ static bool build_program_transform_feedback_link_state(GLProgram *prog,
     return true;
   }
 
-  if (!vertex_shader || !vertex_shader->source) {
+  if (!vertex_source) {
     return set_transform_feedback_link_error(
         message, message_capacity,
         "Transform feedback varying validation requires vertex shader source.");
@@ -1255,7 +1284,7 @@ static bool build_program_transform_feedback_link_state(GLProgram *prog,
     const char *name = prog->tf_pending_varyings[i];
     char error_message[256];
 
-    if (!gx2gl_find_shader_output_info(vertex_shader->source, name, &type,
+    if (!gx2gl_find_shader_output_info(vertex_source, name, &type,
                                        &size, &components)) {
       snprintf(error_message, sizeof(error_message),
                "Transform feedback varying '%s' is not a supported vertex shader output.",
@@ -2074,12 +2103,10 @@ void _gl_ShaderSource(GLuint s, GLsizei c, const GLchar* const* str, const GLint
   shader->source = combined;
   shader->source_length = source_length;
   shader->source_present = true;
-  shader->compile_requested = false;
-  shader->compile_succeeded = false;
-  replace_owned_string(&shader->info_log, "");
 }
 void _gl_CompileShader(GLuint s) {
   GLShader *shader;
+  GLCompiledShader *new_binary;
   char info_log_buffer[GX2GL_INFO_LOG_CAPACITY];
   char *prepared_source = NULL;
 
@@ -2091,18 +2118,11 @@ void _gl_CompileShader(GLuint s) {
   shader = &g_shaders[s];
   shader->compile_requested = true;
   shader->compile_succeeded = false;
+  free_shader_binary(shader);
   memset(info_log_buffer, 0, sizeof(info_log_buffer));
 
   if (!shader->source_present || !shader->source) {
     replace_owned_string(&shader->info_log, "No shader source was provided.");
-    return;
-  }
-
-  if (shader_is_used_by_linked_program(s) &&
-      ((shader->type == GL_VERTEX_SHADER && shader->compiled_vertex_shader) ||
-       (shader->type == GL_FRAGMENT_SHADER && shader->compiled_pixel_shader))) {
-    replace_owned_string(&shader->info_log,
-                         "Recompiling shaders attached to linked programs is not supported yet.");
     return;
   }
 
@@ -2119,40 +2139,48 @@ void _gl_CompileShader(GLuint s) {
     return;
   }
 
+  new_binary = create_compiled_shader(shader->type, shader->source);
+  if (!new_binary) {
+    replace_owned_string(&shader->info_log,
+                         "Failed to allocate the compiled shader record.");
+    free(prepared_source);
+    return;
+  }
+
   if (shader->type == GL_VERTEX_SHADER) {
-    if (shader->compiled_vertex_shader) {
-      gx2gl_cafeglsl_free_vertex_shader(shader->compiled_vertex_shader);
-      shader->compiled_vertex_shader = NULL;
-    }
-    shader->compiled_vertex_shader =
+    new_binary->vertex_shader =
         gx2gl_cafeglsl_compile_vertex_shader(prepared_source,
                                              info_log_buffer,
                                              (int)sizeof(info_log_buffer),
                                              GX2GL_CAFEGLSL_FLAG_NONE);
-    shader->compile_succeeded = shader->compiled_vertex_shader != NULL;
+    shader->compile_succeeded = new_binary->vertex_shader != NULL;
     if (shader->compile_succeeded) {
-      invalidate_shader_program_memory(shader->compiled_vertex_shader->program,
-                                       shader->compiled_vertex_shader->size);
+      invalidate_shader_program_memory(new_binary->vertex_shader->program,
+                                       new_binary->vertex_shader->size);
     }
   } else if (shader->type == GL_FRAGMENT_SHADER) {
-    if (shader->compiled_pixel_shader) {
-      gx2gl_cafeglsl_free_pixel_shader(shader->compiled_pixel_shader);
-      shader->compiled_pixel_shader = NULL;
-    }
-    shader->compiled_pixel_shader =
+    new_binary->pixel_shader =
         gx2gl_cafeglsl_compile_pixel_shader(prepared_source,
                                             info_log_buffer,
                                             (int)sizeof(info_log_buffer),
                                             GX2GL_CAFEGLSL_FLAG_NONE);
-    shader->compile_succeeded = shader->compiled_pixel_shader != NULL;
+    shader->compile_succeeded = new_binary->pixel_shader != NULL;
     if (shader->compile_succeeded) {
-      invalidate_shader_program_memory(shader->compiled_pixel_shader->program,
-                                       shader->compiled_pixel_shader->size);
+      invalidate_shader_program_memory(new_binary->pixel_shader->program,
+                                       new_binary->pixel_shader->size);
     }
   } else {
     snprintf(info_log_buffer, sizeof(info_log_buffer),
              "Geometry shaders are not supported by gx2gl yet.");
     shader->compile_succeeded = false;
+  }
+
+  if (shader->compile_succeeded) {
+    shader->compiled_binary = new_binary;
+    shader->compiled_vertex_shader = new_binary->vertex_shader;
+    shader->compiled_pixel_shader = new_binary->pixel_shader;
+  } else {
+    release_compiled_shader(new_binary);
   }
 
   if (!shader->compile_succeeded && info_log_buffer[0] == '\0') {
@@ -2289,8 +2317,9 @@ void _gl_LinkProgram(GLuint p) {
   }
 
   interface_error[0] = '\0';
-  if (!gx2gl_validate_program_shader_interfaces(vertex_shader->source,
-                                                pixel_shader->source,
+  if (!gx2gl_validate_program_shader_interfaces(
+                                                vertex_shader->compiled_binary->source,
+                                                pixel_shader->compiled_binary->source,
                                                 interface_error,
                                                 sizeof(interface_error))) {
     replace_owned_string(
@@ -2313,9 +2342,14 @@ void _gl_LinkProgram(GLuint p) {
     return;
   }
 
+  retain_compiled_shader(vertex_shader->compiled_binary);
+  retain_compiled_shader(pixel_shader->compiled_binary);
+  prog->linked_vertex_binary = vertex_shader->compiled_binary;
+  prog->linked_pixel_binary = pixel_shader->compiled_binary;
+
   transform_feedback_error[0] = '\0';
   if (!build_program_transform_feedback_link_state(
-          prog, vertex_shader, transform_feedback_error,
+          prog, vertex_shader->compiled_binary->source, transform_feedback_error,
           sizeof(transform_feedback_error))) {
     replace_owned_string(
         &prog->info_log,
