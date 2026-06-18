@@ -1,4 +1,5 @@
 #include "gl_framebuffer.h"
+#include "gl_buffer.h"
 #include "gl_texture.h"
 #include "endian/endian.h"
 #include "mem/gl_mem.h"
@@ -1506,6 +1507,10 @@ void _gl_ReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum form
     size_t tight_size;
     uint8_t *tight_pixels;
     uint8_t *dst_base;
+    GLvoid *resolved_pixels = pixels;
+    GLuint pack_buffer;
+    GLintptr pack_buffer_offset = 0;
+    GLsizeiptr pack_byte_count = 0;
     GLint pack_row_length;
     GLint pack_skip_rows;
     GLint pack_skip_pixels;
@@ -1513,10 +1518,12 @@ void _gl_ReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum form
     size_t dst_row_pixels;
     size_t dst_row_bytes;
     size_t dst_stride;
+    uint64_t required_size;
 
     if (!g_gl_context) return;
+    pack_buffer = g_gl_context->bound_pixel_pack_buffer;
     if (width < 0 || height < 0) { _gl_set_error(GL_INVALID_VALUE); return; }
-    if (!pixels) { _gl_set_error(GL_INVALID_OPERATION); return; }
+    if (!pixels && pack_buffer == 0) { _gl_set_error(GL_INVALID_OPERATION); return; }
     if (format != GL_RGBA || type != GL_UNSIGNED_BYTE) { _gl_set_error(GL_INVALID_ENUM); return; }
     if (_gl_CheckFramebufferStatus(GL_READ_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
         _gl_set_error(GL_INVALID_FRAMEBUFFER_OPERATION);
@@ -1551,12 +1558,40 @@ void _gl_ReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum form
     dst_row_pixels = (size_t)pack_row_length;
     dst_row_bytes = dst_row_pixels * 4u;
     dst_stride = ((dst_row_bytes + (size_t)pack_alignment - 1u) / (size_t)pack_alignment) * (size_t)pack_alignment;
-    dst_base = (uint8_t *)pixels + (size_t)pack_skip_rows * dst_stride + (size_t)pack_skip_pixels * 4u;
+    required_size = (uint64_t)pack_skip_rows * dst_stride +
+                    (uint64_t)pack_skip_pixels * 4u +
+                    (uint64_t)(height - 1) * dst_stride +
+                    (uint64_t)tight_row_bytes;
+    if (required_size > (uint64_t)PTRDIFF_MAX) {
+        gl_mem_free(GL_MEM_TYPE_MEM2, tight_pixels);
+        _gl_set_error(GL_INVALID_OPERATION);
+        return;
+    }
+    if (pack_buffer != 0) {
+        pack_buffer_offset = (GLintptr)(uintptr_t)pixels;
+        pack_byte_count = (GLsizeiptr)required_size;
+        if (gl_buffer_get_write_range(pack_buffer, pack_buffer_offset,
+                                      pack_byte_count,
+                                      &resolved_pixels) != GL_TRUE) {
+            gl_mem_free(GL_MEM_TYPE_MEM2, tight_pixels);
+            return;
+        }
+    }
+    dst_base = (uint8_t *)resolved_pixels +
+               (size_t)pack_skip_rows * dst_stride +
+               (size_t)pack_skip_pixels * 4u;
 
     for (GLsizei row = 0; row < height; ++row) {
         memcpy(dst_base + (size_t)row * dst_stride,
                tight_pixels + (size_t)row * tight_row_bytes,
                tight_row_bytes);
+    }
+
+    if (pack_buffer != 0 &&
+        gl_buffer_flush_range(pack_buffer, pack_buffer_offset,
+                              pack_byte_count) != GL_TRUE) {
+        gl_mem_free(GL_MEM_TYPE_MEM2, tight_pixels);
+        return;
     }
 
     gl_mem_free(GL_MEM_TYPE_MEM2, tight_pixels);

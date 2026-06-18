@@ -41,6 +41,12 @@ void gl_buffer_get_sub_data(GLenum target, GLintptr offset, GLsizeiptr size,
                             GLvoid *data);
 GLboolean gl_buffer_is_mapped(GLuint buffer);
 void *gl_buffer_get_data(GLuint buffer);
+GLboolean gl_buffer_get_read_range(GLuint buffer, GLintptr offset,
+                                   GLsizeiptr size, const GLvoid **data);
+GLboolean gl_buffer_get_write_range(GLuint buffer, GLintptr offset,
+                                    GLsizeiptr size, GLvoid **data);
+GLboolean gl_buffer_flush_range(GLuint buffer, GLintptr offset,
+                                GLsizeiptr size);
 void *gl_buffer_get_uniform_block_data(GLuint buffer, GLintptr offset,
                                        GLsizeiptr size);
 GLsizeiptr gl_buffer_get_size(GLuint buffer);

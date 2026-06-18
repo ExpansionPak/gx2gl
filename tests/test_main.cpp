@@ -1827,6 +1827,158 @@ int main(int argc, char **argv) {
     expect_error("glPixelStorei(GL_PACK_ALIGNMENT=3)", GL_INVALID_VALUE);
     glPixelStorei(GL_INVALID_ENUM, 4);
     expect_error("glPixelStorei(GL_INVALID_ENUM)", GL_INVALID_ENUM);
+
+    GLuint pbo_unpack = 0;
+    GLuint pbo_pack = 0;
+    GLuint pbo_texture = 0;
+    GLubyte pbo_upload[12] = {
+        0xA5, 0xA5, 0xA5, 0xA5,
+        12, 34, 56, 78,
+        90, 123, 210, 240
+    };
+    GLubyte pbo_texture_readback[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    GLubyte pbo_pack_seed[16];
+    GLubyte pbo_pack_readback[16];
+    memset(pbo_pack_seed, 0x5A, sizeof(pbo_pack_seed));
+    memset(pbo_pack_readback, 0, sizeof(pbo_pack_readback));
+    glGenBuffers(1, &pbo_unpack);
+    check_gl_error("glGenBuffers(pbo_unpack)");
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo_unpack);
+    check_gl_error("glBindBuffer(GL_PIXEL_UNPACK_BUFFER)");
+    glBufferData(GL_PIXEL_UNPACK_BUFFER, sizeof(pbo_upload), pbo_upload,
+                 GL_STREAM_DRAW);
+    check_gl_error("glBufferData(GL_PIXEL_UNPACK_BUFFER)");
+    glGenTextures(1, &pbo_texture);
+    check_gl_error("glGenTextures(pbo_texture)");
+    glBindTexture(GL_TEXTURE_2D, pbo_texture);
+    check_gl_error("glBindTexture(pbo_texture)");
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 1, 0, GL_RGBA,
+                 GL_UNSIGNED_BYTE, (const GLvoid *)4);
+    check_gl_error("glTexImage2D(PBO offset)");
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+    check_gl_error("glBindBuffer(GL_PIXEL_UNPACK_BUFFER restore)");
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                           pbo_texture, 0);
+    check_gl_error("glFramebufferTexture2D(pbo_texture)");
+    glReadBuffer(GL_COLOR_ATTACHMENT0);
+    check_gl_error("glReadBuffer(pbo_texture)");
+    glReadPixels(0, 0, 2, 1, GL_RGBA, GL_UNSIGNED_BYTE,
+                 pbo_texture_readback);
+    check_gl_error("glReadPixels(PBO upload verify)");
+    if (pbo_texture_readback[0] == 12 && pbo_texture_readback[1] == 34 &&
+        pbo_texture_readback[2] == 56 && pbo_texture_readback[3] == 78 &&
+        pbo_texture_readback[4] == 90 && pbo_texture_readback[5] == 123 &&
+        pbo_texture_readback[6] == 210 && pbo_texture_readback[7] == 240) {
+        OSReport("[PASS] GL_PIXEL_UNPACK_BUFFER texture upload used byte offset.\n");
+    } else {
+        OSReport("[FAIL] PBO texture upload returned {%u,%u,%u,%u,%u,%u,%u,%u}\n",
+                 pbo_texture_readback[0], pbo_texture_readback[1],
+                 pbo_texture_readback[2], pbo_texture_readback[3],
+                 pbo_texture_readback[4], pbo_texture_readback[5],
+                 pbo_texture_readback[6], pbo_texture_readback[7]);
+    }
+
+    glGenBuffers(1, &pbo_pack);
+    check_gl_error("glGenBuffers(pbo_pack)");
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo_pack);
+    check_gl_error("glBindBuffer(GL_PIXEL_PACK_BUFFER)");
+    glBufferData(GL_PIXEL_PACK_BUFFER, sizeof(pbo_pack_seed), pbo_pack_seed,
+                 GL_STREAM_READ);
+    check_gl_error("glBufferData(GL_PIXEL_PACK_BUFFER)");
+    glReadPixels(0, 0, 2, 1, GL_RGBA, GL_UNSIGNED_BYTE, (GLvoid *)4);
+    check_gl_error("glReadPixels(PBO offset)");
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    check_gl_error("glBindBuffer(GL_PIXEL_PACK_BUFFER restore)");
+    glBindBuffer(GL_COPY_READ_BUFFER, pbo_pack);
+    check_gl_error("glBindBuffer(GL_COPY_READ_BUFFER pbo_pack)");
+    glGetBufferSubData(GL_COPY_READ_BUFFER, 0, sizeof(pbo_pack_readback),
+                       pbo_pack_readback);
+    check_gl_error("glGetBufferSubData(PBO readback)");
+    if (pbo_pack_readback[0] == 0x5A && pbo_pack_readback[3] == 0x5A &&
+        pbo_pack_readback[4] == 12 && pbo_pack_readback[5] == 34 &&
+        pbo_pack_readback[6] == 56 && pbo_pack_readback[7] == 78 &&
+        pbo_pack_readback[8] == 90 && pbo_pack_readback[9] == 123 &&
+        pbo_pack_readback[10] == 210 && pbo_pack_readback[11] == 240 &&
+        pbo_pack_readback[12] == 0x5A && pbo_pack_readback[15] == 0x5A) {
+        OSReport("[PASS] GL_PIXEL_PACK_BUFFER readback used byte offset.\n");
+    } else {
+        OSReport("[FAIL] PBO readback returned {%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u}\n",
+                 pbo_pack_readback[0], pbo_pack_readback[1],
+                 pbo_pack_readback[2], pbo_pack_readback[3],
+                 pbo_pack_readback[4], pbo_pack_readback[5],
+                 pbo_pack_readback[6], pbo_pack_readback[7],
+                 pbo_pack_readback[8], pbo_pack_readback[9],
+                 pbo_pack_readback[10], pbo_pack_readback[11],
+                 pbo_pack_readback[12], pbo_pack_readback[13],
+                 pbo_pack_readback[14], pbo_pack_readback[15]);
+    }
+
+    memset(pbo_pack_seed, 0x3C, sizeof(pbo_pack_seed));
+    memset(pbo_pack_readback, 0, sizeof(pbo_pack_readback));
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo_pack);
+    check_gl_error("glBindBuffer(GL_PIXEL_PACK_BUFFER get_tex)");
+    glBufferData(GL_PIXEL_PACK_BUFFER, sizeof(pbo_pack_seed), pbo_pack_seed,
+                 GL_STREAM_READ);
+    check_gl_error("glBufferData(GL_PIXEL_PACK_BUFFER get_tex)");
+    glBindTexture(GL_TEXTURE_2D, pbo_texture);
+    check_gl_error("glBindTexture(pbo_texture get_tex)");
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, (GLvoid *)4);
+    check_gl_error("glGetTexImage(PBO offset)");
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    check_gl_error("glBindBuffer(GL_PIXEL_PACK_BUFFER get_tex restore)");
+    glGetBufferSubData(GL_COPY_READ_BUFFER, 0, sizeof(pbo_pack_readback),
+                       pbo_pack_readback);
+    check_gl_error("glGetBufferSubData(PBO get_tex readback)");
+    if (pbo_pack_readback[0] == 0x3C && pbo_pack_readback[3] == 0x3C &&
+        pbo_pack_readback[4] == 12 && pbo_pack_readback[5] == 34 &&
+        pbo_pack_readback[6] == 56 && pbo_pack_readback[7] == 78 &&
+        pbo_pack_readback[8] == 90 && pbo_pack_readback[9] == 123 &&
+        pbo_pack_readback[10] == 210 && pbo_pack_readback[11] == 240 &&
+        pbo_pack_readback[12] == 0x3C && pbo_pack_readback[15] == 0x3C) {
+        OSReport("[PASS] glGetTexImage packed into GL_PIXEL_PACK_BUFFER offset.\n");
+    } else {
+        OSReport("[FAIL] glGetTexImage PBO returned {%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u}\n",
+                 pbo_pack_readback[0], pbo_pack_readback[1],
+                 pbo_pack_readback[2], pbo_pack_readback[3],
+                 pbo_pack_readback[4], pbo_pack_readback[5],
+                 pbo_pack_readback[6], pbo_pack_readback[7],
+                 pbo_pack_readback[8], pbo_pack_readback[9],
+                 pbo_pack_readback[10], pbo_pack_readback[11],
+                 pbo_pack_readback[12], pbo_pack_readback[13],
+                 pbo_pack_readback[14], pbo_pack_readback[15]);
+    }
+
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo_unpack);
+    check_gl_error("glBindBuffer(GL_PIXEL_UNPACK_BUFFER mapped)");
+    glMapBuffer(GL_PIXEL_UNPACK_BUFFER, GL_READ_ONLY);
+    check_gl_error("glMapBuffer(GL_PIXEL_UNPACK_BUFFER)");
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 1, 1, GL_RGBA,
+                    GL_UNSIGNED_BYTE, (const GLvoid *)4);
+    expect_error("glTexSubImage2D(mapped unpack PBO)", GL_INVALID_OPERATION);
+    glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
+    check_gl_error("glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER)");
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+    check_gl_error("glBindBuffer(GL_PIXEL_UNPACK_BUFFER final)");
+
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo_pack);
+    check_gl_error("glBindBuffer(GL_PIXEL_PACK_BUFFER mapped)");
+    glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_WRITE_ONLY);
+    check_gl_error("glMapBuffer(GL_PIXEL_PACK_BUFFER)");
+    glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, (GLvoid *)4);
+    expect_error("glReadPixels(mapped pack PBO)", GL_INVALID_OPERATION);
+    glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+    check_gl_error("glUnmapBuffer(GL_PIXEL_PACK_BUFFER)");
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    check_gl_error("glBindBuffer(GL_PIXEL_PACK_BUFFER final)");
+    glBindBuffer(GL_COPY_READ_BUFFER, 0);
+    check_gl_error("glBindBuffer(GL_COPY_READ_BUFFER restore)");
+    glDeleteBuffers(1, &pbo_pack);
+    check_gl_error("glDeleteBuffers(pbo_pack)");
+    glDeleteBuffers(1, &pbo_unpack);
+    check_gl_error("glDeleteBuffers(pbo_unpack)");
+    glDeleteTextures(1, &pbo_texture);
+    check_gl_error("glDeleteTextures(pbo_texture)");
+
     GLuint es2_textures[3] = {0, 0, 0};
     glGenTextures(3, es2_textures);
     check_gl_error("glGenTextures(es2_formats)");

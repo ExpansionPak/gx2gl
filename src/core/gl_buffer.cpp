@@ -974,6 +974,65 @@ void *gl_buffer_get_data(GLuint id) {
   return buf->raw_buffer.buffer;
 }
 
+static GLboolean gl_buffer_get_shadow_range(GLuint id, GLintptr offset,
+                                            GLsizeiptr size,
+                                            GLvoid **data) {
+  GLBuffer *buf = get_buffer(id);
+
+  if (data) *data = NULL;
+  if (!data || !buf || offset < 0 || size < 0 ||
+      !range_in_buffer(offset, size, buf->size)) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return GL_FALSE;
+  }
+  if (buf->mapped_ptr) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return GL_FALSE;
+  }
+  if (size > 0 && !buf->shadow) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return GL_FALSE;
+  }
+
+  *data = size == 0 && !buf->shadow ? NULL : buf->shadow + offset;
+  return GL_TRUE;
+}
+
+GLboolean gl_buffer_get_read_range(GLuint buffer, GLintptr offset,
+                                   GLsizeiptr size, const GLvoid **data) {
+  GLvoid *mutable_data = NULL;
+  GLboolean ok = gl_buffer_get_shadow_range(buffer, offset, size,
+                                            &mutable_data);
+  if (data) *data = mutable_data;
+  return ok;
+}
+
+GLboolean gl_buffer_get_write_range(GLuint buffer, GLintptr offset,
+                                    GLsizeiptr size, GLvoid **data) {
+  return gl_buffer_get_shadow_range(buffer, offset, size, data);
+}
+
+GLboolean gl_buffer_flush_range(GLuint buffer, GLintptr offset,
+                                GLsizeiptr size) {
+  GLBuffer *buf = get_buffer(buffer);
+
+  if (!buf || offset < 0 || size < 0 ||
+      !range_in_buffer(offset, size, buf->size)) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return GL_FALSE;
+  }
+  if (buf->mapped_ptr) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return GL_FALSE;
+  }
+  if (size == 0) return GL_TRUE;
+  if (!sync_raw_range(buf, offset, size)) {
+    _gl_set_error(GL_OUT_OF_MEMORY);
+    return GL_FALSE;
+  }
+  return GL_TRUE;
+}
+
 void *gl_buffer_get_uniform_block_data(GLuint id, GLintptr offset,
                                        GLsizeiptr size) {
   GLBuffer *buf = get_buffer(id);

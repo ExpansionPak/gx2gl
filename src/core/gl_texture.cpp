@@ -1,4 +1,5 @@
 #include "gl_texture.h"
+#include "gl_buffer.h"
 #include "gl_context.h"
 #include "gl_framebuffer.h"
 #include "gl_shader.h"
@@ -1276,6 +1277,101 @@ static bool get_pack_layout(const TextureFormatInfo *info, GLsizei width,
   return true;
 }
 
+static bool calc_pixel_transfer_byte_count(uint32_t row_bytes,
+                                           uint32_t image_bytes,
+                                           size_t base_offset,
+                                           uint32_t texel_bytes,
+                                           GLsizei width,
+                                           GLsizei height,
+                                           GLsizei depth,
+                                           GLsizeiptr *byte_count) {
+  uint64_t total;
+
+  if (!byte_count || width < 0 || height < 0 || depth < 0) {
+    return false;
+  }
+  if (width == 0 || height == 0 || depth == 0) {
+    *byte_count = 0;
+    return true;
+  }
+
+  total = (uint64_t)base_offset +
+          (uint64_t)(depth - 1) * image_bytes +
+          (uint64_t)(height - 1) * row_bytes +
+          (uint64_t)width * texel_bytes;
+  if (total > (uint64_t)PTRDIFF_MAX) {
+    return false;
+  }
+  *byte_count = (GLsizeiptr)total;
+  return true;
+}
+
+static GLintptr pointer_as_buffer_offset(const GLvoid *pointer) {
+  return (GLintptr)(uintptr_t)pointer;
+}
+
+static bool resolve_unpack_pixels(const TextureFormatInfo *info,
+                                  GLsizei width, GLsizei height,
+                                  GLsizei depth, const GLvoid *pixels,
+                                  const GLvoid **resolved_pixels) {
+  uint32_t row_bytes;
+  uint32_t image_bytes;
+  size_t base_offset;
+  GLsizeiptr byte_count;
+
+  if (!resolved_pixels) return false;
+  *resolved_pixels = pixels;
+  if (!g_gl_context || g_gl_context->bound_pixel_unpack_buffer == 0) {
+    return true;
+  }
+
+  if (!get_unpack_layout(info, width, height, &row_bytes, &image_bytes,
+                         &base_offset) ||
+      !calc_pixel_transfer_byte_count(row_bytes, image_bytes, base_offset,
+                                      info->src_bytes_per_texel, width, height,
+                                      depth, &byte_count)) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return false;
+  }
+
+  return gl_buffer_get_read_range(g_gl_context->bound_pixel_unpack_buffer,
+                                  pointer_as_buffer_offset(pixels), byte_count,
+                                  resolved_pixels) == GL_TRUE;
+}
+
+static bool resolve_pack_pixels(const TextureFormatInfo *info,
+                                GLsizei width, GLsizei height,
+                                GLsizei depth, GLvoid *pixels,
+                                GLvoid **resolved_pixels,
+                                GLintptr *buffer_offset,
+                                GLsizeiptr *byte_count) {
+  uint32_t row_bytes;
+  uint32_t image_bytes;
+  size_t base_offset;
+
+  if (!resolved_pixels || !buffer_offset || !byte_count) return false;
+  *resolved_pixels = pixels;
+  *buffer_offset = 0;
+  *byte_count = 0;
+  if (!g_gl_context || g_gl_context->bound_pixel_pack_buffer == 0) {
+    return true;
+  }
+
+  if (!get_pack_layout(info, width, height, &row_bytes, &image_bytes,
+                       &base_offset) ||
+      !calc_pixel_transfer_byte_count(row_bytes, image_bytes, base_offset,
+                                      info->src_bytes_per_texel, width, height,
+                                      depth, byte_count)) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return false;
+  }
+
+  *buffer_offset = pointer_as_buffer_offset(pixels);
+  return gl_buffer_get_write_range(g_gl_context->bound_pixel_pack_buffer,
+                                   *buffer_offset, *byte_count,
+                                   resolved_pixels) == GL_TRUE;
+}
+
 static bool upload_texture_level(GLTexture *tex, GLint level, GLsizei width,
                                  GLsizei height, GLsizei depth,
                                  const TextureFormatInfo *info,
@@ -1288,6 +1384,9 @@ static bool upload_texture_level(GLTexture *tex, GLint level, GLsizei width,
   uint32_t dst_row_bytes;
   size_t src_base_offset;
 
+  if (width == 0 || height == 0 || depth == 0) {
+    return true;
+  }
   if (!pixels) {
     return true;
   }
@@ -1339,6 +1438,9 @@ static bool upload_texture_sub_region(GLTexture *tex, GLint level,
   uint32_t dst_row_bytes;
   size_t src_base_offset;
 
+  if (width == 0 || height == 0 || depth == 0) {
+    return true;
+  }
   if (!pixels) {
     return false;
   }
@@ -2033,6 +2135,8 @@ void _gl_TexImage2D(GLenum target, GLint level, GLint internalformat,
   GLsizei expected_height;
   GLenum bind_target;
   uint32_t face_index;
+  const GLvoid *upload_pixels = pixels;
+  bool has_unpack_pixels;
 
   if (!g_gl_context) {
     return;
@@ -2060,10 +2164,16 @@ void _gl_TexImage2D(GLenum target, GLint level, GLint internalformat,
     _gl_set_error(GL_INVALID_VALUE);
     return;
   }
-  if (!get_texture_format_info(internalformat, format, type, pixels != NULL,
-                               &info)) {
+  has_unpack_pixels = pixels != NULL ||
+                      g_gl_context->bound_pixel_unpack_buffer != 0;
+  if (!get_texture_format_info(internalformat, format, type,
+                               has_unpack_pixels, &info)) {
     log_texture_step("_gl_TexImage2D: format lookup failed");
     _gl_set_error(GL_INVALID_ENUM);
+    return;
+  }
+  if (!resolve_unpack_pixels(&info, width, height, 1, pixels,
+                             &upload_pixels)) {
     return;
   }
 
@@ -2137,11 +2247,12 @@ void _gl_TexImage2D(GLenum target, GLint level, GLint internalformat,
   }
 
   log_texture_step("_gl_TexImage2D: uploading level data");
-  if ((bind_target == GL_TEXTURE_CUBE_MAP && pixels &&
+  if ((bind_target == GL_TEXTURE_CUBE_MAP && upload_pixels &&
        !upload_texture_sub_region(tex, level, 0, 0, (GLint)face_index, width,
-                                  height, 1, &info, pixels)) ||
+                                  height, 1, &info, upload_pixels)) ||
       (bind_target != GL_TEXTURE_CUBE_MAP &&
-       !upload_texture_level(tex, level, width, height, 1, &info, pixels))) {
+       !upload_texture_level(tex, level, width, height, 1, &info,
+                             upload_pixels))) {
     log_texture_step("_gl_TexImage2D: upload failed");
     _gl_set_error(GL_INVALID_OPERATION);
     return;
@@ -2162,6 +2273,8 @@ void _gl_TexImage3D(GLenum target, GLint level, GLint internalformat,
   GLsizei expected_width;
   GLsizei expected_height;
   GLsizei expected_depth;
+  const GLvoid *upload_pixels = pixels;
+  bool has_unpack_pixels;
 
   if (!g_gl_context) {
     return;
@@ -2181,9 +2294,15 @@ void _gl_TexImage3D(GLenum target, GLint level, GLint internalformat,
     _gl_set_error(GL_INVALID_VALUE);
     return;
   }
-  if (!get_texture_format_info(internalformat, format, type, pixels != NULL,
-                               &info)) {
+  has_unpack_pixels = pixels != NULL ||
+                      g_gl_context->bound_pixel_unpack_buffer != 0;
+  if (!get_texture_format_info(internalformat, format, type,
+                               has_unpack_pixels, &info)) {
     _gl_set_error(GL_INVALID_ENUM);
+    return;
+  }
+  if (!resolve_unpack_pixels(&info, width, height, depth, pixels,
+                             &upload_pixels)) {
     return;
   }
 
@@ -2236,7 +2355,8 @@ void _gl_TexImage3D(GLenum target, GLint level, GLint internalformat,
     }
   }
 
-  if (!upload_texture_level(tex, level, width, height, depth, &info, pixels)) {
+  if (!upload_texture_level(tex, level, width, height, depth, &info,
+                            upload_pixels)) {
     _gl_set_error(GL_INVALID_OPERATION);
     return;
   }
@@ -2254,6 +2374,8 @@ void _gl_TexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
   TextureFormatInfo info;
   GLenum bind_target;
   uint32_t face_index;
+  const GLvoid *upload_pixels = pixels;
+  bool has_unpack_pixels;
 
   if (!g_gl_context) {
     return;
@@ -2288,15 +2410,21 @@ void _gl_TexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
     _gl_set_error(GL_INVALID_OPERATION);
     return;
   }
+  has_unpack_pixels = pixels != NULL ||
+                      g_gl_context->bound_pixel_unpack_buffer != 0;
   if (!get_texture_format_info(tex->internal_format, format, type,
-                               pixels != NULL, &info)) {
+                               has_unpack_pixels, &info)) {
     _gl_set_error(GL_INVALID_ENUM);
+    return;
+  }
+  if (!resolve_unpack_pixels(&info, width, height, 1, pixels,
+                             &upload_pixels)) {
     return;
   }
   if (!upload_texture_sub_region(tex, level, xoffset, yoffset,
                                  (GLint)face_index, width, height, 1, &info,
-                                 pixels)) {
-    _gl_set_error(pixels ? GL_INVALID_VALUE : GL_INVALID_OPERATION);
+                                 upload_pixels)) {
+    _gl_set_error(upload_pixels ? GL_INVALID_VALUE : GL_INVALID_OPERATION);
     return;
   }
 
@@ -2309,6 +2437,8 @@ void _gl_TexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
                        const GLvoid *pixels) {
   GLTexture *tex;
   TextureFormatInfo info;
+  const GLvoid *upload_pixels = pixels;
+  bool has_unpack_pixels;
 
   if (!g_gl_context) {
     return;
@@ -2341,14 +2471,20 @@ void _gl_TexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
     _gl_set_error(GL_INVALID_OPERATION);
     return;
   }
+  has_unpack_pixels = pixels != NULL ||
+                      g_gl_context->bound_pixel_unpack_buffer != 0;
   if (!get_texture_format_info(tex->internal_format, format, type,
-                               pixels != NULL, &info)) {
+                               has_unpack_pixels, &info)) {
     _gl_set_error(GL_INVALID_ENUM);
     return;
   }
+  if (!resolve_unpack_pixels(&info, width, height, depth, pixels,
+                             &upload_pixels)) {
+    return;
+  }
   if (!upload_texture_sub_region(tex, level, xoffset, yoffset, zoffset, width,
-                                 height, depth, &info, pixels)) {
-    _gl_set_error(pixels ? GL_INVALID_VALUE : GL_INVALID_OPERATION);
+                                 height, depth, &info, upload_pixels)) {
+    _gl_set_error(upload_pixels ? GL_INVALID_VALUE : GL_INVALID_OPERATION);
     return;
   }
 
@@ -3255,6 +3391,8 @@ void _gl_TexImage1D(GLenum target, GLint level, GLint internalformat,
   GLTexture *tex;
   TextureFormatInfo info;
   GLsizei expected_width;
+  const GLvoid *upload_pixels = pixels;
+  bool has_unpack_pixels;
 
   if (!g_gl_context) {
     return;
@@ -3272,9 +3410,15 @@ void _gl_TexImage1D(GLenum target, GLint level, GLint internalformat,
     _gl_set_error(GL_INVALID_VALUE);
     return;
   }
-  if (!get_texture_format_info(internalformat, format, type, pixels != NULL,
-                               &info)) {
+  has_unpack_pixels = pixels != NULL ||
+                      g_gl_context->bound_pixel_unpack_buffer != 0;
+  if (!get_texture_format_info(internalformat, format, type,
+                               has_unpack_pixels, &info)) {
     _gl_set_error(GL_INVALID_ENUM);
+    return;
+  }
+  if (!resolve_unpack_pixels(&info, width, 1, 1, pixels,
+                             &upload_pixels)) {
     return;
   }
 
@@ -3312,7 +3456,7 @@ void _gl_TexImage1D(GLenum target, GLint level, GLint internalformat,
     }
   }
 
-  if (!upload_texture_level(tex, level, width, 1, 1, &info, pixels)) {
+  if (!upload_texture_level(tex, level, width, 1, 1, &info, upload_pixels)) {
     _gl_set_error(GL_INVALID_OPERATION);
     return;
   }
@@ -3328,6 +3472,8 @@ void _gl_TexSubImage1D(GLenum target, GLint level, GLint xoffset,
                        const GLvoid *pixels) {
   GLTexture *tex;
   TextureFormatInfo info;
+  const GLvoid *upload_pixels = pixels;
+  bool has_unpack_pixels;
 
   if (!g_gl_context) {
     return;
@@ -3357,14 +3503,19 @@ void _gl_TexSubImage1D(GLenum target, GLint level, GLint xoffset,
     _gl_set_error(GL_INVALID_OPERATION);
     return;
   }
+  has_unpack_pixels = pixels != NULL ||
+                      g_gl_context->bound_pixel_unpack_buffer != 0;
   if (!get_texture_format_info(tex->internal_format, format, type,
-                               pixels != NULL, &info)) {
+                               has_unpack_pixels, &info)) {
     _gl_set_error(GL_INVALID_ENUM);
     return;
   }
+  if (!resolve_unpack_pixels(&info, width, 1, 1, pixels, &upload_pixels)) {
+    return;
+  }
   if (!upload_texture_sub_region(tex, level, xoffset, 0, 0, width, 1, 1,
-                                 &info, pixels)) {
-    _gl_set_error(pixels ? GL_INVALID_VALUE : GL_INVALID_OPERATION);
+                                 &info, upload_pixels)) {
+    _gl_set_error(upload_pixels ? GL_INVALID_VALUE : GL_INVALID_OPERATION);
     return;
   }
   g_gl_context->dirty_flags |= GL_DIRTY_TEXTURE_BINDINGS;
@@ -3779,6 +3930,9 @@ void _gl_GetTexImage(GLenum target, GLint level, GLenum format, GLenum type,
   TextureLevelLayout layout;
   uint8_t *src_level;
   uint8_t *dst_base;
+  GLvoid *resolved_pixels = pixels;
+  GLintptr pack_buffer_offset = 0;
+  GLsizeiptr pack_byte_count = 0;
   uint32_t dst_row_bytes;
   uint32_t dst_image_bytes;
   uint32_t src_row_bytes;
@@ -3790,7 +3944,7 @@ void _gl_GetTexImage(GLenum target, GLint level, GLenum format, GLenum type,
   if (!g_gl_context) {
     return;
   }
-  if (!pixels) {
+  if (!pixels && g_gl_context->bound_pixel_pack_buffer == 0) {
     _gl_set_error(GL_INVALID_OPERATION);
     return;
   }
@@ -3846,6 +4000,12 @@ void _gl_GetTexImage(GLenum target, GLint level, GLenum format, GLenum type,
     _gl_set_error(GL_INVALID_OPERATION);
     return;
   }
+  if (!resolve_pack_pixels(&info, layout.width, layout.height,
+                           target == GL_TEXTURE_3D ? layout.depth : 1,
+                           pixels, &resolved_pixels, &pack_buffer_offset,
+                           &pack_byte_count)) {
+    return;
+  }
 
   if (target == GL_TEXTURE_3D) {
     slice_count = (uint32_t)layout.depth;
@@ -3869,7 +4029,7 @@ void _gl_GetTexImage(GLenum target, GLint level, GLenum format, GLenum type,
   GX2DrawDone();
   DCInvalidateRange(src_level, layout.image_size);
 
-  dst_base = (uint8_t *)pixels + dst_base_offset;
+  dst_base = (uint8_t *)resolved_pixels + dst_base_offset;
   src_row_bytes = layout.pitch * info.dst_bytes_per_texel;
   for (uint32_t z = 0; z < slice_count; ++z) {
     const uint8_t *src_slice =
@@ -3880,6 +4040,12 @@ void _gl_GetTexImage(GLenum target, GLint level, GLenum format, GLenum type,
                        src_slice + (size_t)y * src_row_bytes,
                        (uint32_t)layout.width, &info);
     }
+  }
+
+  if (g_gl_context->bound_pixel_pack_buffer != 0 &&
+      gl_buffer_flush_range(g_gl_context->bound_pixel_pack_buffer,
+                            pack_buffer_offset, pack_byte_count) != GL_TRUE) {
+    return;
   }
 }
 
