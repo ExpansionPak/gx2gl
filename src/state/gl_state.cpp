@@ -413,8 +413,64 @@ static void write_rgba8_clear_pixel(GX2Surface *surface, GLint x, GLint y,
   memcpy(dst, &packed, sizeof(packed));
 }
 
+static bool get_color_buffer_cpu_view(const GX2ColorBuffer *color_buffer,
+                                      GX2Surface *view) {
+  const GX2Surface *source;
+  GX2Surface layout;
+  uint8_t *level_base;
+  uint32_t level;
+  uint32_t depth;
+  uint32_t slice_size;
+
+  if (!color_buffer || !view) return false;
+
+  source = &color_buffer->surface;
+  level = color_buffer->viewMip;
+  if (!source->image || level >= source->mipLevels) return false;
+
+  depth = source->depth ? source->depth : 1u;
+  if (source->dim == GX2_SURFACE_DIM_TEXTURE_3D) {
+    depth >>= level;
+    if (depth == 0) depth = 1;
+  }
+  if (color_buffer->viewFirstSlice >= depth) return false;
+
+  level_base = level == 0
+                   ? (uint8_t *)source->image
+                   : (source->mipmaps
+                          ? (uint8_t *)source->mipmaps +
+                                source->mipLevelOffset[level - 1]
+                          : NULL);
+  if (!level_base) return false;
+
+  memset(&layout, 0, sizeof(layout));
+  layout.dim = source->dim;
+  layout.width = source->width >> level;
+  layout.height = source->height >> level;
+  layout.depth = depth;
+  if (layout.width == 0) layout.width = 1;
+  if (layout.height == 0) layout.height = 1;
+  layout.mipLevels = 1;
+  layout.format = source->format;
+  layout.aa = source->aa;
+  layout.use = source->use;
+  layout.tileMode = source->tileMode;
+  GX2CalcSurfaceSizeAndAlignment(&layout);
+
+  slice_size = layout.imageSize / depth;
+  *view = layout;
+  view->depth = 1;
+  view->image = level_base +
+                (size_t)color_buffer->viewFirstSlice * (size_t)slice_size;
+  view->imageSize = slice_size;
+  view->mipmaps = NULL;
+  view->mipmapSize = 0;
+  return true;
+}
+
 static bool cpu_clear_draw_color_buffer(GLuint index, const GLfloat *clear_color) {
   GX2ColorBuffer *cb;
+  GX2Surface view;
   GX2Surface *surface;
   GLRect rect;
   uint8_t clear[4];
@@ -431,7 +487,10 @@ static bool cpu_clear_draw_color_buffer(GLuint index, const GLfloat *clear_color
     return false;
   }
 
-  surface = &cb->surface;
+  if (!get_color_buffer_cpu_view(cb, &view)) {
+    return false;
+  }
+  surface = &view;
   if (surface->tileMode != GX2_TILE_MODE_LINEAR_ALIGNED) {
     return false;
   }

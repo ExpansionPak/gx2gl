@@ -231,17 +231,31 @@ static GLuint compile_shader(GLenum type, const char *source, const char *label)
 static GLuint build_scene_program(void) {
     static const char *kVertexSource =
         "#version 330 core\n"
+#ifdef GX2GL_COMPARE_WIIU
+        "#extension GL_ARB_separate_shader_objects : require\n"
+#endif
         "layout(location = 0) in vec2 aPosition;\n"
         "layout(location = 1) in vec2 aTexCoord;\n"
+#ifdef GX2GL_COMPARE_WIIU
+        "layout(location = 0) out vec2 vTexCoord;\n"
+#else
         "out vec2 vTexCoord;\n"
+#endif
         "void main() {\n"
         "  vTexCoord = aTexCoord;\n"
         "  gl_Position = vec4(aPosition, 0.0, 1.0);\n"
         "}\n";
     static const char *kFragmentSource =
         "#version 330 core\n"
+#ifdef GX2GL_COMPARE_WIIU
+        "#extension GL_ARB_separate_shader_objects : require\n"
+        "#extension GL_ARB_shading_language_420pack : require\n"
+        "layout(location = 0) in vec2 vTexCoord;\n"
+        "layout(binding = 0) uniform sampler2D uTexture;\n"
+#else
         "in vec2 vTexCoord;\n"
         "uniform sampler2D uTexture;\n"
+#endif
         "layout(location = 0) out vec4 FragColor;\n"
         "void main() {\n"
         "  FragColor = texture(uTexture, vTexCoord);\n"
@@ -428,11 +442,18 @@ static bool render_complex_scene_to_window_and_file(const char *reference_ppm_pa
 static GLuint build_reflect_program(void) {
     static const char *kVertexSource =
         "#version 330 core\n"
+#ifdef GX2GL_COMPARE_WIIU
+        "#extension GL_ARB_separate_shader_objects : require\n"
+#endif
         "layout(location = 0) in vec3 aPosition;\n"
         "layout(location = 1) in vec2 aTexCoord;\n"
         "uniform mat4 uModelView;\n"
         "uniform ivec2 uViewportSize;\n"
+#ifdef GX2GL_COMPARE_WIIU
+        "layout(location = 0) out vec2 vTexCoord;\n"
+#else
         "out vec2 vTexCoord;\n"
+#endif
         "void main() {\n"
         "  vTexCoord = aTexCoord;\n"
         "  vec2 viewportScale = vec2(max(uViewportSize.x, 1), max(uViewportSize.y, 1));\n"
@@ -440,11 +461,21 @@ static GLuint build_reflect_program(void) {
         "}\n";
     static const char *kFragmentSource =
         "#version 330 core\n"
+#ifdef GX2GL_COMPARE_WIIU
+        "#extension GL_ARB_separate_shader_objects : require\n"
+        "#extension GL_ARB_shading_language_420pack : require\n"
+        "layout(location = 0) in vec2 vTexCoord;\n"
+#else
         "in vec2 vTexCoord;\n"
+#endif
         "uniform vec4 uTint;\n"
         "uniform ivec3 uLightMask;\n"
         "uniform ivec4 uMask;\n"
+#ifdef GX2GL_COMPARE_WIIU
+        "layout(binding = 0) uniform sampler2D uTexture;\n"
+#else
         "uniform sampler2D uTexture;\n"
+#endif
         "layout(location = 0) out vec4 FragColor;\n"
         "void main() {\n"
         "  vec4 texel = texture(uTexture, vTexCoord);\n"

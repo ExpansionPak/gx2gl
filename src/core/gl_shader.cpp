@@ -850,6 +850,9 @@ static bool initialize_program_direct_uniform_shadows(GLProgram *prog, GX2Vertex
     }
   }
 
+  vertex_shadow_size = (vertex_shadow_size + 15u) & ~15u;
+  pixel_shadow_size = (pixel_shadow_size + 15u) & ~15u;
+
   if (vertex_shadow_size > 0) {
     prog->vs_direct_uniform_shadow = (uint8_t *)calloc(1u, vertex_shadow_size);
     if (!prog->vs_direct_uniform_shadow) {
@@ -1519,17 +1522,27 @@ static bool update_uniform_words(GLint location, const uint32_t *data, GLsizei c
     uint32_t shadow_offset = offset * sizeof(uint32_t);
     uint8_t *shadow = is_pixel ? prog->ps_direct_uniform_shadow : prog->vs_direct_uniform_shadow;
     uint32_t shadow_size = is_pixel ? prog->ps_direct_uniform_shadow_size : prog->vs_direct_uniform_shadow_size;
+    uint32_t upload_offset = offset & ~3u;
+    uint32_t upload_end = (offset + (uint32_t)count_words + 3u) & ~3u;
+    uint32_t upload_words = upload_end - upload_offset;
+    uint32_t upload_bytes = upload_words * sizeof(uint32_t);
     uint32_t swapped_stack[16];
-    uint32_t *swapped = count_words <= (GLsizei)(sizeof(swapped_stack) / sizeof(swapped_stack[0]))
+    uint32_t *swapped = upload_words <= (uint32_t)(sizeof(swapped_stack) / sizeof(swapped_stack[0]))
                             ? swapped_stack
-                            : (uint32_t *)malloc(byte_count);
-    if (!swapped) return false;
-    if (shadow && shadow_offset + byte_count <= shadow_size) {
-      memcpy(shadow + shadow_offset, data, byte_count);
+                            : (uint32_t *)malloc(upload_bytes);
+    if (!swapped || !shadow || shadow_offset + byte_count > shadow_size ||
+        upload_offset * sizeof(uint32_t) + upload_bytes > shadow_size) {
+      if (swapped && swapped != swapped_stack) free(swapped);
+      return false;
     }
-    for (GLsizei i = 0; i < count_words; ++i) swapped[i] = CPU_TO_GPU_32(data[i]);
-    if (is_pixel) GX2SetPixelUniformReg(offset, (uint32_t)count_words, swapped);
-    else GX2SetVertexUniformReg(offset, (uint32_t)count_words, swapped);
+    memcpy(shadow + shadow_offset, data, byte_count);
+    for (uint32_t i = 0; i < upload_words; ++i) {
+      uint32_t word;
+      memcpy(&word, shadow + (upload_offset + i) * sizeof(uint32_t), sizeof(word));
+      swapped[i] = CPU_TO_GPU_32(word);
+    }
+    if (is_pixel) GX2SetPixelUniformReg(upload_offset, upload_words, swapped);
+    else GX2SetVertexUniformReg(upload_offset, upload_words, swapped);
     if (swapped != swapped_stack) free(swapped);
     return true;
   }
