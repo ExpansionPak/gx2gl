@@ -3600,6 +3600,62 @@ int main(int argc, char **argv) {
                  renderbuffer_readback[2], renderbuffer_readback[3]);
     }
     check_gl_error("glReadPixels(renderbuffer_fbo)");
+
+    GLuint blit_renderbuffers[2] = {0, 0};
+    GLuint blit_fbo = 0;
+    glGenRenderbuffers(2, blit_renderbuffers);
+    check_gl_error("glGenRenderbuffers(blit destination)");
+    glBindRenderbuffer(GL_RENDERBUFFER, blit_renderbuffers[0]);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, 2, 2);
+    check_gl_error("glRenderbufferStorage(blit color)");
+    glBindRenderbuffer(GL_RENDERBUFFER, blit_renderbuffers[1]);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, 2, 2);
+    check_gl_error("glRenderbufferStorage(blit depth stencil)");
+    glGenFramebuffers(1, &blit_fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, blit_fbo);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                              GL_RENDERBUFFER, blit_renderbuffers[0]);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
+                              GL_RENDERBUFFER, blit_renderbuffers[1]);
+    glDrawBuffer(GL_COLOR_ATTACHMENT0);
+    glReadBuffer(GL_COLOR_ATTACHMENT0);
+    check_gl_error("configure blit destination");
+    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+    check_gl_error("glClear(blit destination)");
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, renderbuffer_fbo);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, blit_fbo);
+    check_gl_error("glBindFramebuffer(split blit)");
+    glBlitFramebuffer(0, 0, 4, 4, 2, 0, 0, 2,
+                      GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT |
+                          GL_STENCIL_BUFFER_BIT,
+                      GL_NEAREST);
+    check_gl_error("glBlitFramebuffer(color depth stencil)");
+    glBlitFramebuffer(0, 0, 4, 4, 0, 0, 2, 2,
+                      GL_DEPTH_BUFFER_BIT, GL_LINEAR);
+    expect_error("glBlitFramebuffer(linear depth)", GL_INVALID_OPERATION);
+    glBlitFramebuffer(0, 0, 4, 4, 0, 0, 2, 2,
+                      0x80000000u, GL_NEAREST);
+    expect_error("glBlitFramebuffer(invalid mask)", GL_INVALID_VALUE);
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, blit_fbo);
+    GLubyte blit_readback[4] = {0, 0, 0, 0};
+    glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, blit_readback);
+    check_gl_error("glReadPixels(blit destination)");
+    if (blit_readback[0] == 77 && blit_readback[1] == 26 &&
+        blit_readback[2] == 128 && blit_readback[3] == 255) {
+        OSReport("[PASS] glBlitFramebuffer copied scaled/flipped color while accepting depth-stencil aspects.\n");
+    } else {
+        OSReport("[FAIL] glBlitFramebuffer destination returned {%u, %u, %u, %u}\n",
+                 blit_readback[0], blit_readback[1], blit_readback[2],
+                 blit_readback[3]);
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &blit_fbo);
+    glDeleteRenderbuffers(2, blit_renderbuffers);
+    check_gl_error("cleanup blit framebuffer");
+
     glCheckFramebufferStatus(GL_INVALID_ENUM);
     expect_error("glCheckFramebufferStatus(GL_INVALID_ENUM)", GL_INVALID_ENUM);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);

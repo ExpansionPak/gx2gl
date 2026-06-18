@@ -18,8 +18,6 @@ wut: https://github.com/devkitPro/wut/
 
 This project is not production ready yet. The goal is OpenGL 3.3 core behavior on Wii U, but gx2gl will not advertise a Khronos GL version until mandatory systems are actually implemented.
 
-Right now the runtime shader path follows CafeGLSL: vertex and fragment shaders only, separable shaders, explicit bindings, and uniform data through uniform buffers. Geometry shaders and transform feedback are still real conformance blockers, not papered-over features.
-
 ## Performance
 
 This has only really been tested with Sonic 3 A.I.R. so far, which is kind of a worst-case stress test and not the best performance benchmark.
