@@ -1,12 +1,16 @@
 #include "gx2gl_shader_compat.h"
 
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include <string>
+#include <vector>
 
 namespace {
+
+static const int kMaxShaderInterfaceLocations = 16;
 
 struct LayoutInfo {
   bool present;
@@ -29,6 +33,12 @@ struct InterfaceDecl {
   std::string type;
   std::string name;
   int array_size;
+};
+
+struct CollectedInterfaceDecl {
+  InterfaceDecl decl;
+  uint32_t line_number;
+  int location_span;
 };
 
 static void write_info_log(char *info_log_out, int info_log_max_length,
@@ -142,7 +152,11 @@ static bool read_layout_integer(const std::string &layout, const char *key,
     *value = 0;
     while (cursor < layout.size() && layout[cursor] >= '0' &&
            layout[cursor] <= '9') {
-      *value = (*value * 10) + (layout[cursor] - '0');
+      int digit = layout[cursor] - '0';
+      if (*value > (INT_MAX - digit) / 10) {
+        return false;
+      }
+      *value = (*value * 10) + digit;
       ++cursor;
     }
     return true;
@@ -303,7 +317,11 @@ static bool parse_interface_declaration(const std::string &line,
       if (line[i] < '0' || line[i] > '9') {
         return false;
       }
-      size = (size * 10) + (line[i] - '0');
+      int digit = line[i] - '0';
+      if (size > (INT_MAX - digit) / 10) {
+        return false;
+      }
+      size = (size * 10) + digit;
     }
     if (size <= 0) {
       return false;
@@ -365,6 +383,31 @@ static bool shader_output_type_info(const std::string &type, GLenum *gl_type,
   }
 
   return false;
+}
+
+static int shader_type_location_span(const std::string &type) {
+  struct TypeSpan {
+    const char *name;
+    int span;
+  };
+  static const TypeSpan kSpans[] = {
+      {"float", 1}, {"vec2", 1}, {"vec3", 1}, {"vec4", 1},
+      {"int", 1},   {"ivec2", 1}, {"ivec3", 1}, {"ivec4", 1},
+      {"uint", 1},  {"uvec2", 1}, {"uvec3", 1}, {"uvec4", 1},
+      {"bool", 1},  {"bvec2", 1}, {"bvec3", 1}, {"bvec4", 1},
+      {"mat2", 2},  {"mat3", 3},  {"mat4", 4},
+      {"mat2x3", 2}, {"mat2x4", 2},
+      {"mat3x2", 3}, {"mat3x4", 3},
+      {"mat4x2", 4}, {"mat4x3", 4},
+  };
+
+  for (size_t i = 0; i < sizeof(kSpans) / sizeof(kSpans[0]); ++i) {
+    if (type == kSpans[i].name) {
+      return kSpans[i].span;
+    }
+  }
+
+  return 0;
 }
 
 static const char *shader_stage_name(GLenum shader_type) {
@@ -442,6 +485,108 @@ static bool validate_cafeglsl_contract(const char *source, GLenum shader_type,
   return true;
 }
 
+static bool collect_interface_declarations(
+    const char *source, GLenum shader_type, const char *storage,
+    std::vector<CollectedInterfaceDecl> *decls, char *info_log_out,
+    int info_log_max_length) {
+  const char *line_start = source;
+  uint32_t line_number = 1;
+
+  if (!source || !storage || !decls) {
+    write_info_log(info_log_out, info_log_max_length,
+                   "Missing shader source for interface validation.");
+    return false;
+  }
+
+  while (*line_start) {
+    const char *line_end = strchr(line_start, '\n');
+    size_t line_length = line_end ? (size_t)(line_end - line_start)
+                                  : strlen(line_start);
+    std::string line = strip_line_comment(std::string(line_start, line_length));
+    size_t first = skip_whitespace(line, 0);
+    InterfaceDecl decl;
+
+    if (first < line.size() && line[first] != '#' &&
+        parse_interface_declaration(line, &decl) &&
+        decl.storage == storage && !is_builtin_name(decl.name)) {
+      int span = shader_type_location_span(decl.type);
+      CollectedInterfaceDecl collected;
+
+      if (!decl.layout.has_location) {
+        char message[256];
+        snprintf(message, sizeof(message),
+                 "CafeGLSL requires layout(location = N) on %s shader %s "
+                 "'%s' at line %u.",
+                 shader_stage_name(shader_type), decl.storage.c_str(),
+                 decl.name.c_str(), line_number);
+        write_info_log(info_log_out, info_log_max_length, message);
+        return false;
+      }
+      if (span <= 0) {
+        char message[256];
+        snprintf(message, sizeof(message),
+                 "Unsupported %s shader interface type '%s' for '%s' at line %u.",
+                 shader_stage_name(shader_type), decl.type.c_str(),
+                 decl.name.c_str(), line_number);
+        write_info_log(info_log_out, info_log_max_length, message);
+        return false;
+      }
+      if (decl.layout.location < 0 ||
+          decl.array_size > kMaxShaderInterfaceLocations / span ||
+          decl.layout.location >
+              kMaxShaderInterfaceLocations - (span * decl.array_size)) {
+        char message[256];
+        snprintf(message, sizeof(message),
+                 "%s shader %s '%s' exceeds the supported interface location "
+                 "range at line %u.",
+                 shader_stage_name(shader_type), decl.storage.c_str(),
+                 decl.name.c_str(), line_number);
+        write_info_log(info_log_out, info_log_max_length, message);
+        return false;
+      }
+
+      collected.decl = decl;
+      collected.line_number = line_number;
+      collected.location_span = span * decl.array_size;
+      decls->push_back(collected);
+    }
+
+    if (!line_end) {
+      break;
+    }
+    line_start = line_end + 1;
+    ++line_number;
+  }
+
+  return true;
+}
+
+static bool validate_interface_location_ranges(
+    const std::vector<CollectedInterfaceDecl> &decls, GLenum shader_type,
+    const char *storage, char *info_log_out, int info_log_max_length) {
+  for (size_t i = 0; i < decls.size(); ++i) {
+    int a_start = decls[i].decl.layout.location;
+    int a_end = a_start + decls[i].location_span;
+
+    for (size_t j = i + 1; j < decls.size(); ++j) {
+      int b_start = decls[j].decl.layout.location;
+      int b_end = b_start + decls[j].location_span;
+      if (a_start < b_end && b_start < a_end) {
+        char message[256];
+        snprintf(message, sizeof(message),
+                 "%s shader %s variables '%s' and '%s' overlap location %d.",
+                 shader_stage_name(shader_type), storage,
+                 decls[i].decl.name.c_str(), decls[j].decl.name.c_str(),
+                 b_start > a_start ? b_start : a_start);
+        write_info_log(info_log_out, info_log_max_length, message);
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
 static char *copy_source(const char *source) {
   size_t length = strlen(source);
   char *copy = (char *)malloc(length + 1u);
@@ -475,6 +620,74 @@ char *gx2gl_prepare_shader_source_for_cafeglsl_ex(const char *source,
   }
 
   return copy_source(source);
+}
+
+bool gx2gl_validate_program_shader_interfaces(const char *vertex_source,
+                                              const char *fragment_source,
+                                              char *info_log_out,
+                                              int info_log_max_length) {
+  std::vector<CollectedInterfaceDecl> vertex_outputs;
+  std::vector<CollectedInterfaceDecl> fragment_inputs;
+
+  if (!collect_interface_declarations(vertex_source, GL_VERTEX_SHADER, "out",
+                                      &vertex_outputs, info_log_out,
+                                      info_log_max_length) ||
+      !collect_interface_declarations(fragment_source, GL_FRAGMENT_SHADER, "in",
+                                      &fragment_inputs, info_log_out,
+                                      info_log_max_length)) {
+    return false;
+  }
+
+  if (!validate_interface_location_ranges(vertex_outputs, GL_VERTEX_SHADER,
+                                          "out", info_log_out,
+                                          info_log_max_length) ||
+      !validate_interface_location_ranges(fragment_inputs, GL_FRAGMENT_SHADER,
+                                          "in", info_log_out,
+                                          info_log_max_length)) {
+    return false;
+  }
+
+  for (size_t i = 0; i < fragment_inputs.size(); ++i) {
+    const CollectedInterfaceDecl *match = NULL;
+
+    for (size_t j = 0; j < vertex_outputs.size(); ++j) {
+      if (vertex_outputs[j].decl.layout.location ==
+          fragment_inputs[i].decl.layout.location) {
+        match = &vertex_outputs[j];
+        break;
+      }
+    }
+
+    if (!match) {
+      char message[256];
+      snprintf(message, sizeof(message),
+               "Fragment shader input '%s' at location %d has no matching "
+               "vertex shader output.",
+               fragment_inputs[i].decl.name.c_str(),
+               fragment_inputs[i].decl.layout.location);
+      write_info_log(info_log_out, info_log_max_length, message);
+      return false;
+    }
+
+    if (match->decl.type != fragment_inputs[i].decl.type ||
+        match->decl.array_size != fragment_inputs[i].decl.array_size ||
+        match->location_span != fragment_inputs[i].location_span) {
+      char message[256];
+      snprintf(message, sizeof(message),
+               "Shader interface location %d type mismatch: vertex output "
+               "'%s' is %s[%d], fragment input '%s' is %s[%d].",
+               fragment_inputs[i].decl.layout.location,
+               match->decl.name.c_str(), match->decl.type.c_str(),
+               match->decl.array_size, fragment_inputs[i].decl.name.c_str(),
+               fragment_inputs[i].decl.type.c_str(),
+               fragment_inputs[i].decl.array_size);
+      write_info_log(info_log_out, info_log_max_length, message);
+      return false;
+    }
+  }
+
+  write_info_log(info_log_out, info_log_max_length, "");
+  return true;
 }
 
 bool gx2gl_find_shader_output_info(const char *source, const char *name,

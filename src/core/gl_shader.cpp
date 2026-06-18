@@ -2247,6 +2247,7 @@ void _gl_LinkProgram(GLuint p) {
   GLProgram *prog;
   GLShader *vertex_shader;
   GLShader *pixel_shader;
+  char interface_error[512];
   char transform_feedback_error[512];
 
   if (!is_valid_program(p)) {
@@ -2283,6 +2284,20 @@ void _gl_LinkProgram(GLuint p) {
       !pixel_shader->compile_succeeded || !pixel_shader->compiled_pixel_shader) {
     replace_owned_string(&prog->info_log,
                          "All attached shaders must compile successfully before linking.");
+    clear_program_runtime_state(prog);
+    return;
+  }
+
+  interface_error[0] = '\0';
+  if (!gx2gl_validate_program_shader_interfaces(vertex_shader->source,
+                                                pixel_shader->source,
+                                                interface_error,
+                                                sizeof(interface_error))) {
+    replace_owned_string(
+        &prog->info_log,
+        interface_error[0]
+            ? interface_error
+            : "Shader interface validation failed for this program.");
     clear_program_runtime_state(prog);
     return;
   }

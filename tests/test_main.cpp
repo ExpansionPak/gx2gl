@@ -20,6 +20,7 @@ extern "C" {
 
 #include "gl/gl.h"
 #include "core/gx2gl_cafeglsl.h"
+#include "core/gx2gl_shader_compat.h"
 #include "core/gl_context.h"
 #include "core/gl_texture.h"
 #include "mem/gl_mem.h"
@@ -2258,6 +2259,90 @@ int main(int argc, char **argv) {
     expect_error("glBindSampler(out_of_range)", GL_INVALID_VALUE);
 
     OSReport("-> Testing Shaders & Programs (Phase 6)...\n");
+    const char *interface_vs =
+        "#version 330 core\n"
+        "layout(location = 0) out vec3 vertexColor;\n"
+        "void main() { vertexColor = vec3(1.0); gl_Position = vec4(0.0); }\n";
+    const char *interface_fs =
+        "#version 330 core\n"
+        "layout(location = 0) in vec3 fragmentColor;\n"
+        "layout(location = 0) out vec4 color;\n"
+        "void main() { color = vec4(fragmentColor, 1.0); }\n";
+    char interface_log[256];
+    memset(interface_log, 0, sizeof(interface_log));
+    if (gx2gl_validate_program_shader_interfaces(
+            interface_vs, interface_fs, interface_log,
+            (int)sizeof(interface_log))) {
+        OSReport("[PASS] Shader interface validation matched varyings by location.\n");
+    } else {
+        OSReport("[FAIL] Valid shader interface was rejected: %s\n",
+                 interface_log);
+    }
+
+    const char *missing_interface_fs =
+        "#version 330 core\n"
+        "layout(location = 1) in vec3 missingColor;\n"
+        "layout(location = 0) out vec4 color;\n"
+        "void main() { color = vec4(missingColor, 1.0); }\n";
+    memset(interface_log, 0, sizeof(interface_log));
+    if (!gx2gl_validate_program_shader_interfaces(
+            interface_vs, missing_interface_fs, interface_log,
+            (int)sizeof(interface_log)) &&
+        strstr(interface_log, "no matching vertex shader output") != NULL) {
+        OSReport("[PASS] Shader interface validation rejected a missing producer.\n");
+    } else {
+        OSReport("[FAIL] Missing shader producer validation returned: %s\n",
+                 interface_log);
+    }
+
+    const char *mismatched_interface_fs =
+        "#version 330 core\n"
+        "layout(location = 0) in vec4 fragmentColor;\n"
+        "layout(location = 0) out vec4 color;\n"
+        "void main() { color = fragmentColor; }\n";
+    memset(interface_log, 0, sizeof(interface_log));
+    if (!gx2gl_validate_program_shader_interfaces(
+            interface_vs, mismatched_interface_fs, interface_log,
+            (int)sizeof(interface_log)) &&
+        strstr(interface_log, "type mismatch") != NULL) {
+        OSReport("[PASS] Shader interface validation rejected a type mismatch.\n");
+    } else {
+        OSReport("[FAIL] Shader type mismatch validation returned: %s\n",
+                 interface_log);
+    }
+
+    const char *overlapping_interface_vs =
+        "#version 330 core\n"
+        "layout(location = 0) out mat3 transformBasis;\n"
+        "layout(location = 2) out vec2 overlappingValue;\n"
+        "void main() { gl_Position = vec4(0.0); }\n";
+    memset(interface_log, 0, sizeof(interface_log));
+    if (!gx2gl_validate_program_shader_interfaces(
+            overlapping_interface_vs, interface_fs, interface_log,
+            (int)sizeof(interface_log)) &&
+        strstr(interface_log, "overlap location") != NULL) {
+        OSReport("[PASS] Shader interface validation rejected overlapping locations.\n");
+    } else {
+        OSReport("[FAIL] Shader location overlap validation returned: %s\n",
+                 interface_log);
+    }
+
+    const char *out_of_range_interface_vs =
+        "#version 330 core\n"
+        "layout(location = 15) out mat2 lateMatrix;\n"
+        "void main() { gl_Position = vec4(0.0); }\n";
+    memset(interface_log, 0, sizeof(interface_log));
+    if (!gx2gl_validate_program_shader_interfaces(
+            out_of_range_interface_vs, interface_fs, interface_log,
+            (int)sizeof(interface_log)) &&
+        strstr(interface_log, "exceeds the supported interface location") !=
+            NULL) {
+        OSReport("[PASS] Shader interface validation rejected an out-of-range matrix.\n");
+    } else {
+        OSReport("[FAIL] Shader interface range validation returned: %s\n",
+                 interface_log);
+    }
+
     GLuint vshader = glCreateShader(GL_VERTEX_SHADER);
     check_gl_error("glCreateShader(GL_VERTEX_SHADER)");
     if (glIsShader(vshader) == GL_TRUE) {
@@ -2346,6 +2431,15 @@ int main(int argc, char **argv) {
 
     glCompileShader(pshader);
     check_gl_error("glCompileShader(fragment)");
+    if (source_shader_compiler_available) {
+        glReleaseShaderCompiler();
+        check_gl_error("glReleaseShaderCompiler(compiled objects alive)");
+        if (gx2gl_cafeglsl_is_available()) {
+            OSReport("[PASS] Shader compiler release deferred while compiled objects are alive.\n");
+        } else {
+            OSReport("[FAIL] Shader compiler unloaded with compiled objects still alive.\n");
+        }
+    }
 
     GLuint prog = glCreateProgram();
     check_gl_error("glCreateProgram");

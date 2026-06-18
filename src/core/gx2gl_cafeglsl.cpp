@@ -1,5 +1,6 @@
 #include "gx2gl_cafeglsl.h"
 
+#include <stdint.h>
 #include <stdio.h>
 
 extern "C" {
@@ -22,11 +23,32 @@ typedef struct {
     gx2gl_cafeglsl_free_vs_fn free_vertex_shader;
     gx2gl_cafeglsl_free_ps_fn free_pixel_shader;
     gx2gl_cafeglsl_destroy_fn destroy;
+    uint32_t vertex_shader_count;
+    uint32_t pixel_shader_count;
+    bool release_requested;
     bool available;
 } GX2GLCafeGLSLState;
 
 static GX2GLCafeGLSLState g_cafeglsl_state = {0};
 static char g_cafeglsl_last_error[256] = {0};
+
+static void gx2gl_cafeglsl_unload(void) {
+    if (!g_cafeglsl_state.available) {
+        return;
+    }
+
+    g_cafeglsl_state.destroy();
+    OSDynLoad_Release(g_cafeglsl_state.module);
+    g_cafeglsl_state = (GX2GLCafeGLSLState){0};
+}
+
+static void gx2gl_cafeglsl_finish_deferred_release(void) {
+    if (g_cafeglsl_state.release_requested &&
+        g_cafeglsl_state.vertex_shader_count == 0 &&
+        g_cafeglsl_state.pixel_shader_count == 0) {
+        gx2gl_cafeglsl_unload();
+    }
+}
 
 static bool gx2gl_cafeglsl_load_exports(OSDynLoad_Module module) {
     if (OSDynLoad_FindExport(module, OS_DYNLOAD_EXPORT_FUNC, "InitGLSLCompiler",
@@ -64,6 +86,7 @@ bool gx2gl_cafeglsl_init(void) {
     };
 
     if (g_cafeglsl_state.available) {
+        g_cafeglsl_state.release_requested = false;
         return true;
     }
     snprintf(g_cafeglsl_last_error, sizeof(g_cafeglsl_last_error),
@@ -100,9 +123,8 @@ void gx2gl_cafeglsl_shutdown(void) {
         return;
     }
 
-    g_cafeglsl_state.destroy();
-    OSDynLoad_Release(g_cafeglsl_state.module);
-    g_cafeglsl_state = (GX2GLCafeGLSLState){0};
+    g_cafeglsl_state.release_requested = true;
+    gx2gl_cafeglsl_finish_deferred_release();
 }
 
 bool gx2gl_cafeglsl_is_available(void) {
@@ -122,8 +144,13 @@ GX2VertexShader *gx2gl_cafeglsl_compile_vertex_shader(const char *shader_source,
         return NULL;
     }
 
-    return g_cafeglsl_state.compile_vertex_shader(shader_source, info_log_out,
-                                                  info_log_max_length, flags);
+    GX2VertexShader *shader =
+        g_cafeglsl_state.compile_vertex_shader(shader_source, info_log_out,
+                                               info_log_max_length, flags);
+    if (shader) {
+        ++g_cafeglsl_state.vertex_shader_count;
+    }
+    return shader;
 }
 
 GX2PixelShader *gx2gl_cafeglsl_compile_pixel_shader(const char *shader_source,
@@ -139,18 +166,31 @@ GX2PixelShader *gx2gl_cafeglsl_compile_pixel_shader(const char *shader_source,
         return NULL;
     }
 
-    return g_cafeglsl_state.compile_pixel_shader(shader_source, info_log_out,
-                                                 info_log_max_length, flags);
+    GX2PixelShader *shader =
+        g_cafeglsl_state.compile_pixel_shader(shader_source, info_log_out,
+                                              info_log_max_length, flags);
+    if (shader) {
+        ++g_cafeglsl_state.pixel_shader_count;
+    }
+    return shader;
 }
 
 void gx2gl_cafeglsl_free_vertex_shader(GX2VertexShader *shader) {
     if (g_cafeglsl_state.available && shader) {
         g_cafeglsl_state.free_vertex_shader(shader);
+        if (g_cafeglsl_state.vertex_shader_count > 0) {
+            --g_cafeglsl_state.vertex_shader_count;
+        }
+        gx2gl_cafeglsl_finish_deferred_release();
     }
 }
 
 void gx2gl_cafeglsl_free_pixel_shader(GX2PixelShader *shader) {
     if (g_cafeglsl_state.available && shader) {
         g_cafeglsl_state.free_pixel_shader(shader);
+        if (g_cafeglsl_state.pixel_shader_count > 0) {
+            --g_cafeglsl_state.pixel_shader_count;
+        }
+        gx2gl_cafeglsl_finish_deferred_release();
     }
 }
