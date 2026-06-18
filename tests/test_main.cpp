@@ -3240,7 +3240,7 @@ int main(int argc, char **argv) {
     glGetVertexAttribfv(1, GL_CURRENT_VERTEX_ATTRIB, current_attrib);
     check_gl_error("glGetVertexAttribfv(GL_CURRENT_VERTEX_ATTRIB packed)");
     if (nearly_equal_float(current_attrib[0], -1.0f, 0.0001f) &&
-        nearly_equal_float(current_attrib[1], 1.0f / 1023.0f, 0.0001f) &&
+        nearly_equal_float(current_attrib[1], 0.0f, 0.0001f) &&
         nearly_equal_float(current_attrib[2], 1.0f, 0.0001f) &&
         nearly_equal_float(current_attrib[3], 1.0f, 0.0001f)) {
         OSReport("[PASS] glVertexAttribP4ui followed packed signed normalized conversion.\n");

@@ -2204,6 +2204,16 @@ static GLfloat normalize_signed_vertex_value(GLint value, uint32_t bits) {
     return (GLfloat)((((double)value * 2.0) + 1.0) / max_encoded);
 }
 
+static GLfloat normalize_signed_packed_value(GLint value, uint32_t bits) {
+    const GLint minimum = -(GLint)((uint32_t)1u << (bits - 1u));
+    const GLint maximum = (GLint)(((uint32_t)1u << (bits - 1u)) - 1u);
+
+    if (value <= minimum) {
+        return -1.0f;
+    }
+    return (GLfloat)((double)value / (double)maximum);
+}
+
 static GLfloat normalize_unsigned_vertex_value(GLuint value, uint32_t bits) {
     const double max_encoded = (double)(((uint64_t)1 << bits) - 1u);
     return (GLfloat)((double)value / max_encoded);
@@ -2216,7 +2226,7 @@ static GLfloat unpack_signed_component(GLuint value, uint32_t bits, GLboolean no
         return (GLfloat)signed_value;
     }
 
-    return normalize_signed_vertex_value(signed_value, bits);
+    return normalize_signed_packed_value(signed_value, bits);
 }
 
 static GLfloat unpack_unsigned_component(GLuint value, uint32_t bits, GLboolean normalized) {

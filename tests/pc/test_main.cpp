@@ -233,15 +233,15 @@ static GLuint build_scene_program(void) {
         "#version 330 core\n"
         "layout(location = 0) in vec2 aPosition;\n"
         "layout(location = 1) in vec2 aTexCoord;\n"
-        "layout(location = 0) out vec2 vTexCoord;\n"
+        "out vec2 vTexCoord;\n"
         "void main() {\n"
         "  vTexCoord = aTexCoord;\n"
         "  gl_Position = vec4(aPosition, 0.0, 1.0);\n"
         "}\n";
     static const char *kFragmentSource =
         "#version 330 core\n"
-        "layout(location = 0) in vec2 vTexCoord;\n"
-        "layout(binding = 0) uniform sampler2D uTexture;\n"
+        "in vec2 vTexCoord;\n"
+        "uniform sampler2D uTexture;\n"
         "layout(location = 0) out vec4 FragColor;\n"
         "void main() {\n"
         "  FragColor = texture(uTexture, vTexCoord);\n"
@@ -432,7 +432,7 @@ static GLuint build_reflect_program(void) {
         "layout(location = 1) in vec2 aTexCoord;\n"
         "uniform mat4 uModelView;\n"
         "uniform ivec2 uViewportSize;\n"
-        "layout(location = 0) out vec2 vTexCoord;\n"
+        "out vec2 vTexCoord;\n"
         "void main() {\n"
         "  vTexCoord = aTexCoord;\n"
         "  vec2 viewportScale = vec2(max(uViewportSize.x, 1), max(uViewportSize.y, 1));\n"
@@ -440,11 +440,11 @@ static GLuint build_reflect_program(void) {
         "}\n";
     static const char *kFragmentSource =
         "#version 330 core\n"
-        "layout(location = 0) in vec2 vTexCoord;\n"
+        "in vec2 vTexCoord;\n"
         "uniform vec4 uTint;\n"
         "uniform ivec3 uLightMask;\n"
         "uniform ivec4 uMask;\n"
-        "layout(binding = 0) uniform sampler2D uTexture;\n"
+        "uniform sampler2D uTexture;\n"
         "layout(location = 0) out vec4 FragColor;\n"
         "void main() {\n"
         "  vec4 texel = texture(uTexture, vTexCoord);\n"
@@ -821,12 +821,17 @@ static int run_compare_suite(const char *reference_ppm_path) {
     glGetVertexAttribfv(1, GL_CURRENT_VERTEX_ATTRIB, current_attrib);
     check_gl_error("glGetVertexAttribfv(GL_CURRENT_VERTEX_ATTRIB packed)");
     if (approx_equalf(current_attrib[0], -1.0f, 0.0001f) &&
-        approx_equalf(current_attrib[1], 1.0f / 1023.0f, 0.0001f) &&
+        approx_equalf(current_attrib[1], 0.0f, 0.0001f) &&
         approx_equalf(current_attrib[2], 1.0f, 0.0001f) &&
         approx_equalf(current_attrib[3], 1.0f, 0.0001f)) {
         pass("glVertexAttribP4ui followed packed signed normalized conversion.");
     } else {
-        fail("glVertexAttribP4ui returned unexpected values.");
+        char buffer[256];
+        std::snprintf(buffer, sizeof(buffer),
+                      "glVertexAttribP4ui returned {%f, %f, %f, %f}.",
+                      current_attrib[0], current_attrib[1],
+                      current_attrib[2], current_attrib[3]);
+        fail(buffer);
     }
 
     glEnablei(GL_SCISSOR_TEST, 0);
@@ -879,6 +884,55 @@ static int run_compare_suite(const char *reference_ppm_path) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
     check_gl_error("texture allocation");
+
+    GLuint compressed_texture = 0;
+    GLubyte dxt1_image[32];
+    GLubyte dxt1_expected[32];
+    GLubyte dxt1_readback[32] = {0};
+    const GLubyte dxt1_subimage[8] = {
+        0x00, 0xF8, 0xE0, 0x07, 0x1B, 0x1B, 0x1B, 0x1B
+    };
+    for (size_t i = 0; i < sizeof(dxt1_image); ++i) {
+        dxt1_image[i] = (GLubyte)(i * 7u + 3u);
+    }
+    std::memcpy(dxt1_expected, dxt1_image, sizeof(dxt1_image));
+    glGenTextures(1, &compressed_texture);
+    glBindTexture(GL_TEXTURE_2D, compressed_texture);
+    glCompressedTexImage2D(GL_TEXTURE_2D, 0,
+                           GL_COMPRESSED_RGBA_S3TC_DXT1_EXT,
+                           8, 8, 0, sizeof(dxt1_image), dxt1_image);
+    check_gl_error("DXT1 texture upload");
+    GLint texture_compressed = GL_FALSE;
+    GLint compressed_image_size = 0;
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_COMPRESSED,
+                             &texture_compressed);
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0,
+                             GL_TEXTURE_COMPRESSED_IMAGE_SIZE,
+                             &compressed_image_size);
+    check_gl_error("DXT1 texture level queries");
+    glGetCompressedTexImage(GL_TEXTURE_2D, 0, dxt1_readback);
+    check_gl_error("DXT1 texture readback");
+    if (texture_compressed == GL_TRUE && compressed_image_size == 32 &&
+        std::memcmp(dxt1_readback, dxt1_expected,
+                    sizeof(dxt1_readback)) == 0) {
+        pass("DXT1 storage and readback preserved the compressed byte stream.");
+    } else {
+        fail("DXT1 storage or level queries did not match the reference.");
+    }
+    glCompressedTexSubImage2D(GL_TEXTURE_2D, 0, 4, 0, 4, 4,
+                              GL_COMPRESSED_RGBA_S3TC_DXT1_EXT,
+                              sizeof(dxt1_subimage), dxt1_subimage);
+    check_gl_error("DXT1 aligned subimage");
+    std::memcpy(dxt1_expected + 8, dxt1_subimage, sizeof(dxt1_subimage));
+    std::memset(dxt1_readback, 0, sizeof(dxt1_readback));
+    glGetCompressedTexImage(GL_TEXTURE_2D, 0, dxt1_readback);
+    check_gl_error("DXT1 subimage readback");
+    if (std::memcmp(dxt1_readback, dxt1_expected,
+                    sizeof(dxt1_readback)) == 0) {
+        pass("DXT1 subimage preserved every untouched block.");
+    } else {
+        fail("DXT1 subimage modified bytes outside its destination block.");
+    }
 
     glGenSamplers(1, &sampler);
     glSamplerParameteri(sampler, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
@@ -1201,6 +1255,7 @@ static int run_compare_suite(const char *reference_ppm_path) {
     glDeleteFramebuffers(1, &fbo);
     glDeleteRenderbuffers(1, &renderbuffer);
     glDeleteSamplers(1, &sampler);
+    glDeleteTextures(1, &compressed_texture);
     glDeleteTextures(2, textures);
     glDeleteVertexArrays(1, &vao);
     glDeleteBuffers(2, buffers);

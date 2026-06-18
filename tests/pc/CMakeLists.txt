@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 project(gx2gl_pc_runner C CXX)
 
+include(CTest)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -43,4 +45,9 @@ target_link_libraries(gx2gl_pc_runner PRIVATE
     opengl32
     user32
     gdi32
+)
+
+add_test(NAME gx2gl_reference COMMAND gx2gl_pc_runner)
+set_tests_properties(gx2gl_reference PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
 )

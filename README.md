@@ -18,6 +18,20 @@ wut: https://github.com/devkitPro/wut/
 
 This project is not production ready yet. The goal is OpenGL 3.3 core behavior on Wii U, but gx2gl will not advertise a Khronos GL version until mandatory systems are actually implemented.
 
+## Testing
+
+Build and run the desktop OpenGL 3.3 reference suite with:
+
+```powershell
+cmake -S tests/pc -B build_pc -G Ninja
+cmake --build build_pc
+ctest --test-dir build_pc --output-on-failure
+```
+
+The `gl33_compare` Wii U target runs the same cases through gx2gl. It writes
+`gx2gl_results.txt`, `gx2gl_done.flag`, and the diagnostic framebuffer image
+to the SD card root.
+
 ## Performance
 
 This has only really been tested with Sonic 3 A.I.R. so far, which is kind of a worst-case stress test and not the best performance benchmark.
