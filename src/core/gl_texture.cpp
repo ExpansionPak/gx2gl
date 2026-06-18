@@ -101,6 +101,8 @@ typedef struct {
   uint8_t dst_bytes_per_texel;
   bool packed_u32;
   bool mipmap_supported;
+  bool compressed;
+  uint8_t block_bytes;
 } TextureFormatInfo;
 
 typedef struct {
@@ -829,9 +831,75 @@ static bool get_texture_format_info(GLint internalformat, GLenum format,
       return false;
     }
     return true;
+  case GL_COMPRESSED_RGB_S3TC_DXT1_EXT:
+  case GL_COMPRESSED_RGBA_S3TC_DXT1_EXT:
+    info->gx2_format = GX2_SURFACE_FORMAT_UNORM_BC1;
+    info->surface_use = GX2_SURFACE_USE_TEXTURE;
+    info->comp_map = GX2_COMP_MAP(
+        GX2_SQ_SEL_R, GX2_SQ_SEL_G, GX2_SQ_SEL_B,
+        internalformat == GL_COMPRESSED_RGB_S3TC_DXT1_EXT ? GX2_SQ_SEL_1
+                                                          : GX2_SQ_SEL_A);
+    info->src_components =
+        internalformat == GL_COMPRESSED_RGB_S3TC_DXT1_EXT ? 3 : 4;
+    info->dst_components = info->src_components;
+    info->block_bytes = 8;
+    info->compressed = true;
+    return !validate_upload;
+  case GL_COMPRESSED_RGBA_S3TC_DXT3_EXT:
+    info->gx2_format = GX2_SURFACE_FORMAT_UNORM_BC2;
+    info->surface_use = GX2_SURFACE_USE_TEXTURE;
+    info->comp_map = GX2_COMP_MAP(GX2_SQ_SEL_R, GX2_SQ_SEL_G,
+                                  GX2_SQ_SEL_B, GX2_SQ_SEL_A);
+    info->src_components = 4;
+    info->dst_components = 4;
+    info->block_bytes = 16;
+    info->compressed = true;
+    return !validate_upload;
+  case GL_COMPRESSED_RGBA_S3TC_DXT5_EXT:
+    info->gx2_format = GX2_SURFACE_FORMAT_UNORM_BC3;
+    info->surface_use = GX2_SURFACE_USE_TEXTURE;
+    info->comp_map = GX2_COMP_MAP(GX2_SQ_SEL_R, GX2_SQ_SEL_G,
+                                  GX2_SQ_SEL_B, GX2_SQ_SEL_A);
+    info->src_components = 4;
+    info->dst_components = 4;
+    info->block_bytes = 16;
+    info->compressed = true;
+    return !validate_upload;
   default:
     return false;
   }
+}
+
+static bool get_compressed_format_info(GLenum format,
+                                       TextureFormatInfo *info) {
+  return get_texture_format_info((GLint)format, GL_RGBA, GL_UNSIGNED_BYTE,
+                                 false, info) &&
+         info->compressed;
+}
+
+static bool compressed_image_size(GLsizei width, GLsizei height,
+                                  uint32_t block_bytes,
+                                  GLsizei *image_size) {
+  uint64_t blocks_w;
+  uint64_t blocks_h;
+  uint64_t size;
+
+  if (!image_size || width < 0 || height < 0 || block_bytes == 0) {
+    return false;
+  }
+  if (width == 0 || height == 0) {
+    *image_size = 0;
+    return true;
+  }
+
+  blocks_w = ((uint64_t)(uint32_t)width + 3u) / 4u;
+  blocks_h = ((uint64_t)(uint32_t)height + 3u) / 4u;
+  size = blocks_w * blocks_h * block_bytes;
+  if (size > (uint64_t)INT32_MAX) {
+    return false;
+  }
+  *image_size = (GLsizei)size;
+  return true;
 }
 
 static bool calc_level_layout(GLenum target, GX2SurfaceFormat format,
@@ -1372,6 +1440,38 @@ static bool resolve_pack_pixels(const TextureFormatInfo *info,
                                    resolved_pixels) == GL_TRUE;
 }
 
+static bool resolve_compressed_unpack_data(const GLvoid *data,
+                                           GLsizei image_size,
+                                           const GLvoid **resolved_data) {
+  if (!resolved_data || image_size < 0) {
+    return false;
+  }
+  *resolved_data = data;
+  if (!g_gl_context || g_gl_context->bound_pixel_unpack_buffer == 0) {
+    return true;
+  }
+  return gl_buffer_get_read_range(g_gl_context->bound_pixel_unpack_buffer,
+                                  pointer_as_buffer_offset(data), image_size,
+                                  resolved_data) == GL_TRUE;
+}
+
+static bool resolve_compressed_pack_data(GLvoid *data, GLsizei image_size,
+                                         GLvoid **resolved_data,
+                                         GLintptr *buffer_offset) {
+  if (!resolved_data || !buffer_offset || image_size < 0) {
+    return false;
+  }
+  *resolved_data = data;
+  *buffer_offset = 0;
+  if (!g_gl_context || g_gl_context->bound_pixel_pack_buffer == 0) {
+    return true;
+  }
+  *buffer_offset = pointer_as_buffer_offset(data);
+  return gl_buffer_get_write_range(g_gl_context->bound_pixel_pack_buffer,
+                                   *buffer_offset, image_size,
+                                   resolved_data) == GL_TRUE;
+}
+
 static bool upload_texture_level(GLTexture *tex, GLint level, GLsizei width,
                                  GLsizei height, GLsizei depth,
                                  const TextureFormatInfo *info,
@@ -1481,6 +1581,98 @@ static bool upload_texture_sub_region(GLTexture *tex, GLint level,
 
   DCFlushRange(dst, layout.image_size);
   GX2Invalidate(GX2_INVALIDATE_MODE_CPU_TEXTURE, dst, layout.image_size);
+  return true;
+}
+
+static bool upload_compressed_texture_region(
+    GLTexture *tex, GLint level, GLint xoffset, GLint yoffset, GLint slice,
+    GLsizei width, GLsizei height, const TextureFormatInfo *info,
+    const GLvoid *data) {
+  TextureLevelLayout layout;
+  uint8_t *dst_level;
+  uint32_t src_blocks_w;
+  uint32_t src_blocks_h;
+  uint32_t src_row_bytes;
+  uint32_t dst_row_bytes;
+
+  if (!tex || !info || !info->compressed || width < 0 || height < 0 ||
+      xoffset < 0 || yoffset < 0 || slice < 0) {
+    return false;
+  }
+  if (width == 0 || height == 0) {
+    return true;
+  }
+  if (!data || !calc_level_layout(tex->target,
+                                  tex->gx2_texture.surface.format,
+                                  tex->width, tex->height, tex->depth,
+                                  (uint32_t)level, &layout) ||
+      (uint64_t)(uint32_t)xoffset + (uint32_t)width >
+          (uint32_t)layout.width ||
+      (uint64_t)(uint32_t)yoffset + (uint32_t)height >
+          (uint32_t)layout.height ||
+      (uint32_t)slice >= (uint32_t)layout.depth) {
+    return false;
+  }
+
+  dst_level = get_texture_level_ptr(tex, (uint32_t)level);
+  if (!dst_level) {
+    return false;
+  }
+
+  src_blocks_w = ((uint32_t)width + 3u) / 4u;
+  src_blocks_h = ((uint32_t)height + 3u) / 4u;
+  src_row_bytes = src_blocks_w * info->block_bytes;
+  dst_row_bytes = layout.pitch * info->block_bytes;
+
+  /* S3TC is a byte-defined little-endian block stream. Keep the block bytes
+   * intact on the big-endian CPU; GX2 consumes the same stream directly. */
+  for (uint32_t row = 0; row < src_blocks_h; ++row) {
+    uint8_t *dst = dst_level + (uint32_t)slice * layout.slice_size +
+                   ((uint32_t)yoffset / 4u + row) * dst_row_bytes +
+                   ((uint32_t)xoffset / 4u) * info->block_bytes;
+    const uint8_t *src = (const uint8_t *)data + row * src_row_bytes;
+    memcpy(dst, src, src_row_bytes);
+  }
+
+  DCFlushRange(dst_level, layout.image_size);
+  GX2Invalidate(GX2_INVALIDATE_MODE_CPU_TEXTURE, dst_level,
+                layout.image_size);
+  return true;
+}
+
+static bool read_compressed_texture_image(const GLTexture *tex, GLint level,
+                                          GLint slice,
+                                          const TextureFormatInfo *info,
+                                          GLvoid *data) {
+  TextureLevelLayout layout;
+  const uint8_t *src_level;
+  uint32_t blocks_w;
+  uint32_t blocks_h;
+  uint32_t src_row_bytes;
+  uint32_t dst_row_bytes;
+
+  if (!tex || !info || !info->compressed || !data || slice < 0 ||
+      !calc_level_layout(tex->target, tex->gx2_texture.surface.format,
+                         tex->width, tex->height, tex->depth,
+                         (uint32_t)level, &layout) ||
+      (uint32_t)slice >= (uint32_t)layout.depth) {
+    return false;
+  }
+
+  src_level = get_texture_level_ptr(tex, (uint32_t)level);
+  if (!src_level) {
+    return false;
+  }
+
+  blocks_w = ((uint32_t)layout.width + 3u) / 4u;
+  blocks_h = ((uint32_t)layout.height + 3u) / 4u;
+  src_row_bytes = layout.pitch * info->block_bytes;
+  dst_row_bytes = blocks_w * info->block_bytes;
+  src_level += (uint32_t)slice * layout.slice_size;
+  for (uint32_t row = 0; row < blocks_h; ++row) {
+    memcpy((uint8_t *)data + row * dst_row_bytes,
+           src_level + row * src_row_bytes, dst_row_bytes);
+  }
   return true;
 }
 
@@ -1804,6 +1996,24 @@ static void texture_component_sizes(GLint internalformat, GLint *red,
     *red = 5;
     *green = 6;
     *blue = 5;
+    break;
+  case GL_COMPRESSED_RGB_S3TC_DXT1_EXT:
+    *red = 5;
+    *green = 6;
+    *blue = 5;
+    break;
+  case GL_COMPRESSED_RGBA_S3TC_DXT1_EXT:
+    *red = 5;
+    *green = 6;
+    *blue = 5;
+    *alpha = 1;
+    break;
+  case GL_COMPRESSED_RGBA_S3TC_DXT3_EXT:
+  case GL_COMPRESSED_RGBA_S3TC_DXT5_EXT:
+    *red = 5;
+    *green = 6;
+    *blue = 5;
+    *alpha = 8;
     break;
   case GL_RGBA16F:
     *red = *green = *blue = *alpha = 16;
@@ -2685,8 +2895,12 @@ void _gl_CopyTexSubImage2D(GLenum target, GLint level, GLint xoffset,
 void _gl_CompressedTexImage2D(GLenum target, GLint level, GLenum internalformat,
                               GLsizei width, GLsizei height, GLint border,
                               GLsizei imageSize, const GLvoid *data) {
-  (void)internalformat;
-  (void)data;
+  GLTexture *tex;
+  TextureFormatInfo info;
+  GLenum bind_target;
+  uint32_t face_index;
+  GLsizei expected_size;
+  const GLvoid *upload_data = data;
 
   if (!g_gl_context) {
     return;
@@ -2695,26 +2909,111 @@ void _gl_CompressedTexImage2D(GLenum target, GLint level, GLenum internalformat,
     _gl_set_error(GL_INVALID_ENUM);
     return;
   }
-  if (!level_index_valid(level) || width < 0 || height < 0 || border != 0 ||
-      imageSize < 0 ||
+  if (!level_index_valid(level) || width < 0 || height < 0 || border < 0 ||
+      border > 1 || imageSize < 0 || width > 8192 || height > 8192 ||
       (is_cube_map_face_target(target) && width != height)) {
     _gl_set_error(GL_INVALID_VALUE);
     return;
   }
-  if (!get_bound_texture(target == GL_TEXTURE_2D ? GL_TEXTURE_2D
-                                                 : GL_TEXTURE_CUBE_MAP)) {
+  if (!get_compressed_format_info(internalformat, &info)) {
+    _gl_set_error(GL_INVALID_ENUM);
+    return;
+  }
+  if (border != 0) {
     _gl_set_error(GL_INVALID_OPERATION);
     return;
   }
-  _gl_set_error(GL_INVALID_ENUM);
+  if (!compressed_image_size(width, height, info.block_bytes,
+                             &expected_size) || imageSize != expected_size) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+
+  bind_target = target == GL_TEXTURE_2D ? GL_TEXTURE_2D : GL_TEXTURE_CUBE_MAP;
+  face_index = is_cube_map_face_target(target) ? cube_map_face_index(target) : 0;
+  tex = get_bound_texture(bind_target);
+  if (!tex) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
+  if (!resolve_compressed_unpack_data(data, imageSize, &upload_data)) {
+    return;
+  }
+
+  if (level == 0) {
+    if (bind_target == GL_TEXTURE_CUBE_MAP) {
+      if ((!tex->storage_allocated || tex->internal_format != internalformat ||
+           tex->width != width || tex->height != height || tex->depth != 6) &&
+          !rebuild_texture_storage(tex, width, height, 6, internalformat, 1,
+                                   false)) {
+        _gl_set_error(GL_OUT_OF_MEMORY);
+        return;
+      }
+    } else if (!rebuild_texture_storage(tex, width, height, 1,
+                                        internalformat, 1, false)) {
+      _gl_set_error(GL_OUT_OF_MEMORY);
+      return;
+    }
+  } else {
+    if (!tex->storage_allocated) {
+      uint64_t base_width = (uint64_t)(uint32_t)width << (uint32_t)level;
+      uint64_t base_height = (uint64_t)(uint32_t)height << (uint32_t)level;
+      if (base_width > 8192u || base_height > 8192u ||
+          !rebuild_texture_storage(
+              tex, (GLsizei)base_width, (GLsizei)base_height,
+              bind_target == GL_TEXTURE_CUBE_MAP ? 6 : 1, internalformat,
+              (uint32_t)(level + 1), false)) {
+        _gl_set_error(base_width > 8192u || base_height > 8192u
+                          ? GL_INVALID_VALUE
+                          : GL_OUT_OF_MEMORY);
+        return;
+      }
+    } else if (tex->internal_format != internalformat) {
+      _gl_set_error(GL_INVALID_OPERATION);
+      return;
+    }
+
+    GLsizei expected_width = tex->width >> level;
+    GLsizei expected_height = tex->height >> level;
+    if (expected_width < 1) expected_width = 1;
+    if (expected_height < 1) expected_height = 1;
+    if (width != expected_width || height != expected_height) {
+      _gl_set_error(GL_INVALID_VALUE);
+      return;
+    }
+    if ((uint32_t)(level + 1) > tex->gx2_texture.surface.mipLevels &&
+        !rebuild_texture_storage(tex, tex->width, tex->height, tex->depth,
+                                 tex->internal_format,
+                                 (uint32_t)(level + 1), true)) {
+      _gl_set_error(GL_OUT_OF_MEMORY);
+      return;
+    }
+  }
+
+  if (imageSize > 0 && upload_data &&
+      !upload_compressed_texture_region(tex, level, 0, 0, (GLint)face_index,
+                                        width, height, &info, upload_data)) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
+
+  mark_texture_level_defined(tex, (uint32_t)level, face_index);
+  update_texture_view(tex);
+  tex->complete = true;
+  g_gl_context->dirty_flags |= GL_DIRTY_TEXTURE_BINDINGS;
 }
 
 void _gl_CompressedTexSubImage2D(GLenum target, GLint level, GLint xoffset,
                                  GLint yoffset, GLsizei width, GLsizei height,
                                  GLenum format, GLsizei imageSize,
                                  const GLvoid *data) {
-  (void)format;
-  (void)data;
+  GLTexture *tex;
+  TextureFormatInfo info;
+  TextureLevelLayout layout;
+  GLenum bind_target;
+  uint32_t face_index;
+  GLsizei expected_size;
+  const GLvoid *upload_data = data;
 
   if (!g_gl_context) {
     return;
@@ -2728,12 +3027,69 @@ void _gl_CompressedTexSubImage2D(GLenum target, GLint level, GLint xoffset,
     _gl_set_error(GL_INVALID_VALUE);
     return;
   }
-  if (!get_bound_texture(target == GL_TEXTURE_2D ? GL_TEXTURE_2D
-                                                 : GL_TEXTURE_CUBE_MAP)) {
+  if (!get_compressed_format_info(format, &info)) {
+    _gl_set_error(GL_INVALID_ENUM);
+    return;
+  }
+
+  bind_target = target == GL_TEXTURE_2D ? GL_TEXTURE_2D : GL_TEXTURE_CUBE_MAP;
+  face_index = is_cube_map_face_target(target) ? cube_map_face_index(target) : 0;
+  tex = get_bound_texture(bind_target);
+  if (!tex || !tex->storage_allocated) {
     _gl_set_error(GL_INVALID_OPERATION);
     return;
   }
-  _gl_set_error(GL_INVALID_ENUM);
+  if ((uint32_t)level >= tex->gx2_texture.surface.mipLevels) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+  if (!texture_face_level_defined(tex, (uint32_t)level, face_index) ||
+      !get_compressed_format_info((GLenum)tex->internal_format, &info)) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
+  if ((GLenum)tex->internal_format != format) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
+  if (!calc_level_layout(tex->target, tex->gx2_texture.surface.format,
+                         tex->width, tex->height, tex->depth,
+                         (uint32_t)level, &layout) ||
+      (uint64_t)(uint32_t)xoffset + (uint32_t)width >
+          (uint32_t)layout.width ||
+      (uint64_t)(uint32_t)yoffset + (uint32_t)height >
+          (uint32_t)layout.height) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+  if ((xoffset & 3) != 0 || (yoffset & 3) != 0 ||
+      ((width & 3) != 0 &&
+       (uint64_t)(uint32_t)xoffset + (uint32_t)width !=
+           (uint32_t)layout.width) ||
+      ((height & 3) != 0 &&
+       (uint64_t)(uint32_t)yoffset + (uint32_t)height !=
+           (uint32_t)layout.height)) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
+  if (!compressed_image_size(width, height, info.block_bytes,
+                             &expected_size) || imageSize != expected_size) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+  if (width == 0 || height == 0) {
+    return;
+  }
+  if (!resolve_compressed_unpack_data(data, imageSize, &upload_data)) {
+    return;
+  }
+  if (!upload_data || !upload_compressed_texture_region(
+                          tex, level, xoffset, yoffset, (GLint)face_index,
+                          width, height, &info, upload_data)) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
+  g_gl_context->dirty_flags |= GL_DIRTY_TEXTURE_BINDINGS;
 }
 
 static bool apply_sampler_integer_parameter(GLenum pname, GLint param,
@@ -3899,9 +4255,23 @@ void _gl_GetTexLevelParameteriv(GLenum target, GLint level, GLenum pname,
     *params = stencil_bits;
     break;
   case GL_TEXTURE_SHARED_SIZE:
-  case GL_TEXTURE_COMPRESSED_IMAGE_SIZE:
     *params = 0;
     break;
+  case GL_TEXTURE_COMPRESSED_IMAGE_SIZE: {
+    TextureFormatInfo info;
+    GLsizei image_size = 0;
+    if (!get_compressed_format_info((GLenum)tex->internal_format, &info)) {
+      _gl_set_error(GL_INVALID_OPERATION);
+      return;
+    }
+    if (!compressed_image_size(layout.width, layout.height, info.block_bytes,
+                               &image_size)) {
+      _gl_set_error(GL_INVALID_OPERATION);
+      return;
+    }
+    *params = image_size;
+    break;
+  }
   case GL_TEXTURE_RED_TYPE:
   case GL_TEXTURE_GREEN_TYPE:
   case GL_TEXTURE_BLUE_TYPE:
@@ -3910,7 +4280,13 @@ void _gl_GetTexLevelParameteriv(GLenum target, GLint level, GLenum pname,
     *params = (GLint)texture_component_type(tex->internal_format);
     break;
   case GL_TEXTURE_COMPRESSED:
-    *params = GL_FALSE;
+    {
+      TextureFormatInfo info;
+      *params = get_compressed_format_info((GLenum)tex->internal_format,
+                                           &info)
+                    ? GL_TRUE
+                    : GL_FALSE;
+    }
     break;
   default:
     break;
@@ -4045,6 +4421,85 @@ void _gl_GetTexImage(GLenum target, GLint level, GLenum format, GLenum type,
   if (g_gl_context->bound_pixel_pack_buffer != 0 &&
       gl_buffer_flush_range(g_gl_context->bound_pixel_pack_buffer,
                             pack_buffer_offset, pack_byte_count) != GL_TRUE) {
+    return;
+  }
+}
+
+void _gl_GetCompressedTexImage(GLenum target, GLint level, GLvoid *pixels) {
+  GLTexture *tex;
+  TextureFormatInfo info;
+  TextureLevelLayout layout;
+  GLvoid *resolved_pixels = pixels;
+  GLintptr pack_buffer_offset = 0;
+  GLsizei image_size;
+  uint32_t face_index = 0;
+  GLuint texture_name;
+
+  if (!g_gl_context) {
+    return;
+  }
+  if (target == GL_TEXTURE_1D || target == GL_TEXTURE_2D ||
+      target == GL_TEXTURE_3D) {
+    texture_name = get_bound_tex(target);
+    tex = get_bound_texture(target);
+  } else if (is_cube_map_face_target(target)) {
+    texture_name = get_bound_tex(GL_TEXTURE_CUBE_MAP);
+    tex = get_bound_texture(GL_TEXTURE_CUBE_MAP);
+    face_index = cube_map_face_index(target);
+  } else {
+    _gl_set_error(GL_INVALID_ENUM);
+    return;
+  }
+  if (!level_index_valid(level)) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+  if (!tex || !tex->storage_allocated ||
+      (uint32_t)level >= tex->gx2_texture.surface.mipLevels ||
+      !(is_cube_map_face_target(target)
+            ? texture_face_level_defined(tex, (uint32_t)level, face_index)
+            : texture_level_defined(tex, (uint32_t)level)) ||
+      !get_compressed_format_info((GLenum)tex->internal_format, &info)) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
+  if (!calc_level_layout(tex->target, tex->gx2_texture.surface.format,
+                         tex->width, tex->height, tex->depth,
+                         (uint32_t)level, &layout) ||
+      !compressed_image_size(layout.width, layout.height, info.block_bytes,
+                             &image_size)) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
+  if (image_size > 0 && !pixels &&
+      g_gl_context->bound_pixel_pack_buffer == 0) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
+  if (!resolve_compressed_pack_data(pixels, image_size, &resolved_pixels,
+                                    &pack_buffer_offset)) {
+    return;
+  }
+
+  if (texture_name != 0) {
+    gl_framebuffer_sync_texture_for_sampling(texture_name);
+  }
+  GX2DrawDone();
+  uint8_t *level_ptr = get_texture_level_ptr(tex, (uint32_t)level);
+  if (!level_ptr) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
+  DCInvalidateRange(level_ptr, layout.image_size);
+  if (image_size > 0 &&
+      !read_compressed_texture_image(tex, level, (GLint)face_index, &info,
+                                     resolved_pixels)) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
+  if (g_gl_context->bound_pixel_pack_buffer != 0 &&
+      gl_buffer_flush_range(g_gl_context->bound_pixel_pack_buffer,
+                            pack_buffer_offset, image_size) != GL_TRUE) {
     return;
   }
 }

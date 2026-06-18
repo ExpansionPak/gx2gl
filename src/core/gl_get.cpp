@@ -214,6 +214,7 @@ static const char *const g_extensions[] = {
     "GL_ARB_framebuffer_object",
     "GL_ARB_uniform_buffer_object",
     "GL_ARB_instanced_arrays",
+    "GL_EXT_texture_compression_s3tc",
 };
 
 static const uint32_t g_extension_count =
@@ -400,11 +401,19 @@ static bool get_context_value(GLenum pname, GetValue *value) {
   case GL_SHADER_COMPILER:
     return set_bool1(value, GL_TRUE);
   case GL_NUM_SHADER_BINARY_FORMATS:
-  case GL_NUM_COMPRESSED_TEXTURE_FORMATS:
     return set_int1(value, 0);
+  case GL_NUM_COMPRESSED_TEXTURE_FORMATS:
+    return set_int1(value, 4);
   case GL_SHADER_BINARY_FORMATS:
-  case GL_COMPRESSED_TEXTURE_FORMATS:
     return set_int0(value);
+  case GL_COMPRESSED_TEXTURE_FORMATS:
+    value->type = GET_VALUE_INT;
+    value->count = 4;
+    value->data.i[0] = GL_COMPRESSED_RGB_S3TC_DXT1_EXT;
+    value->data.i[1] = GL_COMPRESSED_RGBA_S3TC_DXT1_EXT;
+    value->data.i[2] = GL_COMPRESSED_RGBA_S3TC_DXT3_EXT;
+    value->data.i[3] = GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
+    return true;
   case GL_IMPLEMENTATION_COLOR_READ_FORMAT:
     return set_int1(value, GL_RGBA);
   case GL_IMPLEMENTATION_COLOR_READ_TYPE:

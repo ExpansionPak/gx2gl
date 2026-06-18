@@ -2364,19 +2364,7 @@ void glGetBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, GLvoid 
     gl_buffer_get_sub_data(target, offset, size, data);
 }
 void glGetCompressedTexImage(GLenum target, GLint level, GLvoid *img) {
-    (void)img;
-    if (target != GL_TEXTURE_1D &&
-        target != GL_TEXTURE_2D &&
-        target != GL_TEXTURE_3D &&
-        !is_cube_map_face_wrapper_target(target)) {
-        _gl_set_error(GL_INVALID_ENUM);
-        return;
-    }
-    if (level < 0) {
-        _gl_set_error(GL_INVALID_VALUE);
-        return;
-    }
-    _gl_set_error(GL_INVALID_OPERATION);
+    _gl_GetCompressedTexImage(target, level, img);
 }
 void glGetPointerv(GLenum pname, GLvoid **params) {
     (void)pname;

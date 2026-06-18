@@ -969,10 +969,17 @@ int main(int argc, char **argv) {
     GLint es_compressed_formats = -1;
     glGetIntegerv(GL_NUM_COMPRESSED_TEXTURE_FORMATS, &es_compressed_formats);
     check_gl_error("glGetIntegerv(GL_NUM_COMPRESSED_TEXTURE_FORMATS)");
-    if (es_compressed_formats == 0) {
-        OSReport("[PASS] glGetIntegerv(GL_NUM_COMPRESSED_TEXTURE_FORMATS) returned 0.\n");
+    GLint compressed_formats[4] = {0, 0, 0, 0};
+    glGetIntegerv(GL_COMPRESSED_TEXTURE_FORMATS, compressed_formats);
+    check_gl_error("glGetIntegerv(GL_COMPRESSED_TEXTURE_FORMATS)");
+    if (es_compressed_formats == 4 &&
+        compressed_formats[0] == GL_COMPRESSED_RGB_S3TC_DXT1_EXT &&
+        compressed_formats[1] == GL_COMPRESSED_RGBA_S3TC_DXT1_EXT &&
+        compressed_formats[2] == GL_COMPRESSED_RGBA_S3TC_DXT3_EXT &&
+        compressed_formats[3] == GL_COMPRESSED_RGBA_S3TC_DXT5_EXT) {
+        OSReport("[PASS] S3TC compressed texture formats are reported.\n");
     } else {
-        OSReport("[FAIL] glGetIntegerv(GL_NUM_COMPRESSED_TEXTURE_FORMATS) returned %d\n",
+        OSReport("[FAIL] Compressed texture format count returned %d.\n",
                  es_compressed_formats);
     }
     GLint es_read_format = 0;
@@ -1710,6 +1717,71 @@ int main(int argc, char **argv) {
     expect_error("glCompressedTexImage2D(unsupported)", GL_INVALID_ENUM);
     glCompressedTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 4, 4, GL_RGBA, 64, pixels);
     expect_error("glCompressedTexSubImage2D(unsupported)", GL_INVALID_ENUM);
+
+    GLuint compressed_tex = 0;
+    GLubyte dxt1_image[32];
+    GLubyte dxt1_expected[32];
+    GLubyte dxt1_readback[32];
+    GLubyte dxt1_subimage[8] = {0x00, 0xF8, 0xE0, 0x07,
+                                0x1B, 0x1B, 0x1B, 0x1B};
+    for (unsigned i = 0; i < sizeof(dxt1_image); ++i) {
+        dxt1_image[i] = (GLubyte)(i * 7u + 3u);
+    }
+    memcpy(dxt1_expected, dxt1_image, sizeof(dxt1_image));
+    glGenTextures(1, &compressed_tex);
+    check_gl_error("glGenTextures(S3TC)");
+    glBindTexture(GL_TEXTURE_2D, compressed_tex);
+    check_gl_error("glBindTexture(S3TC)");
+    glCompressedTexImage2D(GL_TEXTURE_2D, 0,
+                           GL_COMPRESSED_RGBA_S3TC_DXT1_EXT,
+                           8, 8, 0, sizeof(dxt1_image), dxt1_image);
+    check_gl_error("glCompressedTexImage2D(DXT1)");
+
+    GLint compressed = GL_FALSE;
+    GLint compressed_size = 0;
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_COMPRESSED,
+                             &compressed);
+    check_gl_error("glGetTexLevelParameteriv(GL_TEXTURE_COMPRESSED)");
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0,
+                             GL_TEXTURE_COMPRESSED_IMAGE_SIZE,
+                             &compressed_size);
+    check_gl_error("glGetTexLevelParameteriv(compressed size)");
+    memset(dxt1_readback, 0, sizeof(dxt1_readback));
+    glGetCompressedTexImage(GL_TEXTURE_2D, 0, dxt1_readback);
+    check_gl_error("glGetCompressedTexImage(DXT1)");
+    if (compressed == GL_TRUE && compressed_size == 32 &&
+        memcmp(dxt1_readback, dxt1_expected, sizeof(dxt1_readback)) == 0) {
+        OSReport("[PASS] DXT1 storage, query, and readback round-tripped.\n");
+    } else {
+        OSReport("[FAIL] DXT1 query/readback returned compressed=%d size=%d.\n",
+                 compressed, compressed_size);
+    }
+
+    glCompressedTexSubImage2D(GL_TEXTURE_2D, 0, 4, 0, 4, 4,
+                              GL_COMPRESSED_RGBA_S3TC_DXT1_EXT,
+                              sizeof(dxt1_subimage), dxt1_subimage);
+    check_gl_error("glCompressedTexSubImage2D(DXT1 aligned)");
+    memcpy(dxt1_expected + 8, dxt1_subimage, sizeof(dxt1_subimage));
+    glGetCompressedTexImage(GL_TEXTURE_2D, 0, dxt1_readback);
+    check_gl_error("glGetCompressedTexImage(DXT1 subimage)");
+    if (memcmp(dxt1_readback, dxt1_expected, sizeof(dxt1_readback)) == 0) {
+        OSReport("[PASS] DXT1 block-aligned subimage preserved other blocks.\n");
+    } else {
+        OSReport("[FAIL] DXT1 subimage changed unrelated blocks.\n");
+    }
+    glCompressedTexSubImage2D(GL_TEXTURE_2D, 0, 4, 0, 4, 4,
+                              GL_COMPRESSED_RGBA_S3TC_DXT1_EXT,
+                              7, dxt1_subimage);
+    expect_error("glCompressedTexSubImage2D(bad image size)", GL_INVALID_VALUE);
+    glCompressedTexSubImage2D(GL_TEXTURE_2D, 0, 2, 0, 4, 4,
+                              GL_COMPRESSED_RGBA_S3TC_DXT1_EXT,
+                              sizeof(dxt1_subimage), dxt1_subimage);
+    expect_error("glCompressedTexSubImage2D(unaligned offset)",
+                 GL_INVALID_OPERATION);
+    glDeleteTextures(1, &compressed_tex);
+    check_gl_error("glDeleteTextures(S3TC)");
+    glBindTexture(GL_TEXTURE_2D, tex[0]);
+    check_gl_error("glBindTexture(restore after S3TC)");
 
     glGenerateMipmap(GL_TEXTURE_2D);
     check_gl_error("glGenerateMipmap");

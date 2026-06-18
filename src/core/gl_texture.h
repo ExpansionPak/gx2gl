@@ -57,6 +57,7 @@ void _gl_CompressedTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLin
 void _gl_GetTexLevelParameteriv(GLenum target, GLint level, GLenum pname, GLint *params);
 void _gl_GetTexLevelParameterfv(GLenum target, GLint level, GLenum pname, GLfloat *params);
 void _gl_GetTexImage(GLenum target, GLint level, GLenum format, GLenum type, GLvoid *pixels);
+void _gl_GetCompressedTexImage(GLenum target, GLint level, GLvoid *pixels);
 
 void gl_bind_textures(void);
 
