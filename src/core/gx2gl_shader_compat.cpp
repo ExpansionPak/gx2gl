@@ -233,6 +233,31 @@ static std::string strip_line_comment(const std::string &line) {
   return line.substr(0, comment);
 }
 
+static std::string leading_whitespace(const std::string &line) {
+  size_t count = 0;
+  while (count < line.size() &&
+         (line[count] == ' ' || line[count] == '\t')) {
+    ++count;
+  }
+  return line.substr(0, count);
+}
+
+static int vector_component_count(const std::string &type) {
+  if (type == "vec2" || type == "ivec2" || type == "uvec2" ||
+      type == "bvec2") {
+    return 2;
+  }
+  if (type == "vec3" || type == "ivec3" || type == "uvec3" ||
+      type == "bvec3") {
+    return 3;
+  }
+  if (type == "vec4" || type == "ivec4" || type == "uvec4" ||
+      type == "bvec4") {
+    return 4;
+  }
+  return 1;
+}
+
 static bool parse_uniform_declaration(const std::string &line,
                                       UniformDecl *decl) {
   size_t cursor = 0;
@@ -597,6 +622,116 @@ static char *copy_source(const char *source) {
   return copy;
 }
 
+static void collect_fragment_vec4_outputs(
+    const std::string &source, std::vector<std::string> *outputs) {
+  size_t line_start = 0;
+
+  if (!outputs) return;
+  while (line_start < source.size()) {
+    size_t line_end = source.find('\n', line_start);
+    size_t line_length =
+        line_end == std::string::npos ? source.size() - line_start
+                                     : line_end - line_start;
+    InterfaceDecl decl;
+    std::string line =
+        strip_line_comment(source.substr(line_start, line_length));
+
+    if (parse_interface_declaration(line, &decl) && decl.storage == "out" &&
+        vector_component_count(decl.type) == 4) {
+      outputs->push_back(decl.name);
+    }
+
+    if (line_end == std::string::npos) break;
+    line_start = line_end + 1u;
+  }
+}
+
+static size_t find_main_closing_brace(const std::string &source) {
+  size_t main_pos = source.find("void main");
+  size_t open_brace;
+  int depth = 0;
+  bool line_comment = false;
+  bool block_comment = false;
+
+  if (main_pos == std::string::npos) return std::string::npos;
+  open_brace = source.find('{', main_pos);
+  if (open_brace == std::string::npos) return std::string::npos;
+
+  for (size_t i = open_brace; i < source.size(); ++i) {
+    char c = source[i];
+    char next = i + 1u < source.size() ? source[i + 1u] : '\0';
+
+    if (line_comment) {
+      if (c == '\n') line_comment = false;
+      continue;
+    }
+    if (block_comment) {
+      if (c == '*' && next == '/') {
+        block_comment = false;
+        ++i;
+      }
+      continue;
+    }
+    if (c == '/' && next == '/') {
+      line_comment = true;
+      ++i;
+      continue;
+    }
+    if (c == '/' && next == '*') {
+      block_comment = true;
+      ++i;
+      continue;
+    }
+    if (c == '{') {
+      ++depth;
+    } else if (c == '}') {
+      --depth;
+      if (depth == 0) return i;
+    }
+  }
+
+  return std::string::npos;
+}
+
+static std::string normalize_fragment_output_channels(
+    const std::string &source) {
+  std::vector<std::string> outputs;
+  size_t closing_brace;
+  size_t line_start;
+  std::string indent;
+  std::string assignments;
+
+  collect_fragment_vec4_outputs(source, &outputs);
+  if (outputs.empty()) return source;
+
+  closing_brace = find_main_closing_brace(source);
+  if (closing_brace == std::string::npos) return source;
+
+  line_start = source.rfind('\n', closing_brace);
+  line_start = line_start == std::string::npos ? 0 : line_start + 1u;
+  indent = leading_whitespace(source.substr(line_start,
+                                             closing_brace - line_start));
+
+  // CafeGLSL emits runtime pixel-export lanes in wzyx order.
+  for (size_t i = 0; i < outputs.size(); ++i) {
+    assignments += indent + "    " + outputs[i] + " = " + outputs[i] +
+                   ".wzyx;\n";
+  }
+
+  return source.substr(0, closing_brace) + assignments +
+         source.substr(closing_brace);
+}
+
+static char *lower_source_for_cafeglsl(const char *source,
+                                       GLenum shader_type) {
+  std::string lowered_source(source);
+
+  if (shader_type == GL_FRAGMENT_SHADER) {
+    lowered_source = normalize_fragment_output_channels(lowered_source);
+  }
+  return copy_source(lowered_source.c_str());
+}
+
 } // namespace
 
 char *gx2gl_prepare_shader_source_for_cafeglsl(const char *source,
@@ -619,7 +754,7 @@ char *gx2gl_prepare_shader_source_for_cafeglsl_ex(const char *source,
     return NULL;
   }
 
-  return copy_source(source);
+  return lower_source_for_cafeglsl(source, shader_type);
 }
 
 bool gx2gl_validate_program_shader_interfaces(const char *vertex_source,

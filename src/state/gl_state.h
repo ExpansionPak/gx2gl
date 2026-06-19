@@ -8,6 +8,8 @@ extern "C" {
 #endif
 
 void gl_flush_state(void);
+GLboolean gl_get_multisample_position(GLsizei samples, GLuint index,
+                                      GLfloat *position);
 
 void _gl_ClearColor(GLclampf red, GLclampf green, GLclampf blue, GLclampf alpha);
 void _gl_ClearDepth(GLclampd depth);

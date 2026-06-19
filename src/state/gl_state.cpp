@@ -14,6 +14,13 @@ extern "C" {
 #include <gx2/mem.h>
 #include <gx2/registers.h>
 #include <gx2/state.h>
+
+typedef struct {
+  int8_t x[8];
+  int8_t y[8];
+} GX2GLAASampleLoc;
+
+void GX2SetAAModeEx(GX2GLAASampleLoc *sampleLoc, GX2AAMode aa);
 #ifdef __cplusplus
 }
 #endif
@@ -40,6 +47,42 @@ typedef struct {
   GLint width;
   GLint height;
 } GLRect;
+
+static const int8_t kSampleOffsets1X[8][2] = {
+    {0, 0}, {0, 0}, {0, 0}, {0, 0},
+    {0, 0}, {0, 0}, {0, 0}, {0, 0},
+};
+static const int8_t kSampleOffsets2X[8][2] = {
+    {-4, -4}, {4, 4}, {0, 0}, {0, 0},
+    {0, 0}, {0, 0}, {0, 0}, {0, 0},
+};
+static const int8_t kSampleOffsets4X[8][2] = {
+    {-2, -6}, {6, -2}, {-6, 2}, {2, 6},
+    {0, 0}, {0, 0}, {0, 0}, {0, 0},
+};
+static const int8_t kSampleOffsets8X[8][2] = {
+    {1, -3}, {-1, 3}, {5, 1}, {-3, -5},
+    {-5, 5}, {-7, -1}, {3, 7}, {7, -7},
+};
+
+static const int8_t (*sample_offsets(GLsizei samples))[2] {
+  switch (samples) {
+  case 1: return kSampleOffsets1X;
+  case 2: return kSampleOffsets2X;
+  case 4: return kSampleOffsets4X;
+  case 8: return kSampleOffsets8X;
+  default: return NULL;
+  }
+}
+
+GLboolean gl_get_multisample_position(GLsizei samples, GLuint index,
+                                      GLfloat *position) {
+  const int8_t (*offsets)[2] = sample_offsets(samples);
+  if (!position || !offsets || index >= (GLuint)samples) return GL_FALSE;
+  position[0] = 0.5f + (GLfloat)offsets[index][0] / 16.0f;
+  position[1] = 0.5f + (GLfloat)offsets[index][1] / 16.0f;
+  return GL_TRUE;
+}
 
 static GLboolean gl_bool(GLboolean value) {
   return value ? GL_TRUE : GL_FALSE;
@@ -279,8 +322,10 @@ static uint32_t dirty_for_cap(GLenum cap) {
   case GL_SCISSOR_TEST:
     return GL_DIRTY_SCISSOR;
   case GL_SAMPLE_ALPHA_TO_COVERAGE:
-    return GL_DIRTY_MULTISAMPLE;
+  case GL_SAMPLE_ALPHA_TO_ONE:
   case GL_SAMPLE_COVERAGE:
+  case GL_SAMPLE_MASK:
+  case GL_MULTISAMPLE:
     return GL_DIRTY_MULTISAMPLE;
   case GL_PRIMITIVE_RESTART:
     return GL_DIRTY_PRIMITIVE_RESTART;
@@ -313,8 +358,14 @@ static GLboolean *cap_storage(GLenum cap) {
     return &g_gl_context->scissor_test_enabled;
   case GL_SAMPLE_ALPHA_TO_COVERAGE:
     return &g_gl_context->sample_alpha_to_coverage_enabled;
+  case GL_SAMPLE_ALPHA_TO_ONE:
+    return &g_gl_context->sample_alpha_to_one_enabled;
   case GL_SAMPLE_COVERAGE:
     return &g_gl_context->sample_coverage_enabled;
+  case GL_SAMPLE_MASK:
+    return &g_gl_context->sample_mask_enabled;
+  case GL_MULTISAMPLE:
+    return &g_gl_context->multisample_enabled;
   case GL_PRIMITIVE_RESTART:
     return &g_gl_context->primitive_restart_enabled;
   case GL_RASTERIZER_DISCARD:
@@ -984,6 +1035,53 @@ static void emit_alpha_state(void) {
                     GX2_ALPHA_TO_MASK_MODE_NON_DITHERED);
 }
 
+static void emit_multisample_state(void) {
+  GLsizei samples = gl_get_draw_sample_count();
+  GLsizei programmed_samples = samples > 0 ? samples : 1;
+  const int8_t (*offsets)[2] = sample_offsets(programmed_samples);
+  GX2GLAASampleLoc locations;
+  GX2AAMode aa_mode = GX2_AA_MODE1X;
+  uint32_t active_mask;
+  uint32_t mask;
+
+  memset(&locations, 0, sizeof(locations));
+  if (programmed_samples == 2) aa_mode = GX2_AA_MODE2X;
+  else if (programmed_samples == 4) aa_mode = GX2_AA_MODE4X;
+  else if (programmed_samples == 8) aa_mode = GX2_AA_MODE8X;
+  if (offsets) {
+    for (GLsizei i = 0; i < programmed_samples; ++i) {
+      locations.x[i] = offsets[i][0];
+      locations.y[i] = offsets[i][1];
+    }
+  }
+  GX2SetAAModeEx(&locations, aa_mode);
+
+  if (samples <= 0) {
+    GX2SetAAMask(0xFF, 0xFF, 0xFF, 0xFF);
+    return;
+  }
+
+  active_mask = samples >= 8 ? 0xFFu : ((1u << (uint32_t)samples) - 1u);
+  mask = active_mask;
+  if (g_gl_context->sample_coverage_enabled) {
+    uint32_t covered = (uint32_t)(g_gl_context->sample_coverage_value *
+                                  (GLfloat)samples + 0.5f);
+    uint32_t coverage_mask;
+    if (covered > (uint32_t)samples) covered = (uint32_t)samples;
+    coverage_mask = covered == 0 ? 0u : ((1u << covered) - 1u);
+    if (g_gl_context->sample_coverage_invert) {
+      coverage_mask = (~coverage_mask) & active_mask;
+    }
+    mask &= coverage_mask;
+  }
+  if (g_gl_context->sample_mask_enabled) {
+    mask &= g_gl_context->sample_mask_value;
+  }
+
+  GX2SetAAMask((uint8_t)mask, (uint8_t)mask,
+               (uint8_t)mask, (uint8_t)mask);
+}
+
 static void emit_viewport_state(void) {
   GLRect target = draw_target_rect();
   GLfloat flipped_y = (GLfloat)target.height -
@@ -1160,6 +1258,9 @@ void gl_flush_state(void) {
   }
   if (dirty & GL_DIRTY_RASTERIZER_DISCARD) {
     emit_rasterizer_discard_state();
+  }
+  if (dirty & (GL_DIRTY_MULTISAMPLE | GL_DIRTY_FRAMEBUFFER)) {
+    emit_multisample_state();
   }
 
   gl_bind_shaders();

@@ -191,6 +191,8 @@ typedef struct {
   GLint pixel_sampler_units[MAX_PROGRAM_SAMPLERS];
   GLint vertex_sampler_bindings[MAX_PROGRAM_SAMPLERS];
   GLint pixel_sampler_bindings[MAX_PROGRAM_SAMPLERS];
+  GLenum vertex_sampler_targets[MAX_PROGRAM_SAMPLERS];
+  GLenum pixel_sampler_targets[MAX_PROGRAM_SAMPLERS];
   uint8_t *vs_direct_uniform_shadow;
   uint32_t vs_direct_uniform_shadow_size;
   uint8_t *ps_direct_uniform_shadow;
@@ -219,10 +221,13 @@ static GLProgram g_programs[MAX_PROGRAMS];
 
 static bool is_valid_shader(GLuint s) { return s > 0 && s < MAX_SHADERS && g_shaders[s].in_use; }
 static bool is_valid_program(GLuint p) { return p > 0 && p < MAX_PROGRAMS && g_programs[p].in_use; }
+static GLint make_sampler_location(bool pixel_stage, uint32_t location);
 static GLint make_direct_uniform_location(bool pixel_stage, uint32_t offset);
 static bool location_is_sampler(GLint l);
 static bool location_is_pixel(GLint l);
 static bool location_is_direct(GLint l);
+static bool stage_uses_virtual_uniform_block(const GLProgram *prog,
+                                             bool pixel_stage);
 static void free_program_uniform_blocks(GLProgram *prog);
 static void free_program_attrib_reflection(GLProgram *prog);
 static void free_program_transform_feedback_pending(GLProgram *prog);
@@ -313,7 +318,32 @@ static GLenum sampler_var_type_to_gl_enum(GX2SamplerVarType type) {
   case GX2_SAMPLER_VAR_TYPE_SAMPLER_2D: return GL_SAMPLER_2D;
   case GX2_SAMPLER_VAR_TYPE_SAMPLER_3D: return GL_SAMPLER_3D;
   case GX2_SAMPLER_VAR_TYPE_SAMPLER_CUBE: return GL_SAMPLER_CUBE;
+  case (GX2SamplerVarType)17: return GL_SAMPLER_2D_MULTISAMPLE;
+  case (GX2SamplerVarType)18: return GL_SAMPLER_2D_MULTISAMPLE_ARRAY;
+  case (GX2SamplerVarType)30: return GL_INT_SAMPLER_2D_MULTISAMPLE;
+  case (GX2SamplerVarType)31: return GL_INT_SAMPLER_2D_MULTISAMPLE_ARRAY;
+  case (GX2SamplerVarType)43: return GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE;
+  case (GX2SamplerVarType)44: return GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE_ARRAY;
   default: return 0;
+  }
+}
+
+static GLenum sampler_var_type_to_texture_target(GX2SamplerVarType type) {
+  switch ((uint32_t)type) {
+  case 0: return GL_TEXTURE_1D;
+  case 1: return GL_TEXTURE_2D;
+  case 3: return GL_TEXTURE_3D;
+  case 4: return GL_TEXTURE_CUBE_MAP;
+  case 17:
+  case 30:
+  case 43:
+    return GL_TEXTURE_2D_MULTISAMPLE;
+  case 18:
+  case 31:
+  case 44:
+    return GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
+  default:
+    return GL_TEXTURE_2D;
   }
 }
 
@@ -358,12 +388,17 @@ static uint32_t shader_var_type_word_count(GX2ShaderVarType type) {
   }
 }
 
+static uint32_t shader_var_element_count(uint32_t count) {
+  return count > 0 ? count : 1u;
+}
+
 typedef struct {
   const char *name;
   GLint size;
   GLenum type;
   GLint block_index;
   GLint offset;
+  GLint location;
   bool is_sampler;
 } ActiveUniformInfo;
 
@@ -449,7 +484,7 @@ static bool get_active_uniform_info(GLProgram *prog, GLuint index, ActiveUniform
     for (uint32_t i = 0; i < vs->uniformVarCount; ++i, ++cursor) {
       if (cursor != index) continue;
       info->name = vs->uniformVars[i].name;
-      info->size = (GLint)vs->uniformVars[i].count;
+      info->size = (GLint)shader_var_element_count(vs->uniformVars[i].count);
       info->type = shader_var_type_to_gl_enum(vs->uniformVars[i].type);
       info->block_index =
           (vs->uniformVars[i].block >= 0 &&
@@ -458,6 +493,10 @@ static bool get_active_uniform_info(GLProgram *prog, GLuint index, ActiveUniform
               ? -1
               : vs->uniformVars[i].block;
       info->offset = (GLint)vs->uniformVars[i].offset;
+      info->location = vs->uniformVars[i].block < 0
+                           ? make_direct_uniform_location(false, (uint32_t)vs->uniformVars[i].offset)
+                           : (GLint)(((uint32_t)vs->uniformVars[i].block << 16) |
+                                     ((uint32_t)vs->uniformVars[i].offset & 0xFFFFu));
       return info->type != 0;
     }
   }
@@ -465,7 +504,7 @@ static bool get_active_uniform_info(GLProgram *prog, GLuint index, ActiveUniform
     for (uint32_t i = 0; i < ps->uniformVarCount; ++i, ++cursor) {
       if (cursor != index) continue;
       info->name = ps->uniformVars[i].name;
-      info->size = (GLint)ps->uniformVars[i].count;
+      info->size = (GLint)shader_var_element_count(ps->uniformVars[i].count);
       info->type = shader_var_type_to_gl_enum(ps->uniformVars[i].type);
       info->block_index =
           (ps->uniformVars[i].block >= 0 &&
@@ -474,6 +513,11 @@ static bool get_active_uniform_info(GLProgram *prog, GLuint index, ActiveUniform
               ? -1
               : ps->uniformVars[i].block;
       info->offset = (GLint)ps->uniformVars[i].offset;
+      info->location = ps->uniformVars[i].block < 0
+                           ? make_direct_uniform_location(true, (uint32_t)ps->uniformVars[i].offset)
+                           : (GLint)(GL_LOCATION_STAGE_PIXEL |
+                                     ((uint32_t)ps->uniformVars[i].block << 16) |
+                                     ((uint32_t)ps->uniformVars[i].offset & 0xFFFFu));
       return info->type != 0;
     }
   }
@@ -483,6 +527,7 @@ static bool get_active_uniform_info(GLProgram *prog, GLuint index, ActiveUniform
       info->name = vs->samplerVars[i].name;
       info->size = 1;
       info->type = sampler_var_type_to_gl_enum(vs->samplerVars[i].type);
+      info->location = make_sampler_location(false, (uint32_t)vs->samplerVars[i].location);
       info->is_sampler = true;
       return info->type != 0;
     }
@@ -493,12 +538,32 @@ static bool get_active_uniform_info(GLProgram *prog, GLuint index, ActiveUniform
       info->name = ps->samplerVars[i].name;
       info->size = 1;
       info->type = sampler_var_type_to_gl_enum(ps->samplerVars[i].type);
+      info->location = make_sampler_location(true, (uint32_t)ps->samplerVars[i].location);
       info->is_sampler = true;
       return info->type != 0;
     }
   }
 
   return false;
+}
+
+static GLint resolve_uniform_location(GLProgram *prog, GLint location) {
+  uint32_t count;
+  ActiveUniformInfo info;
+
+  if (!prog || location <= 0) {
+    return location;
+  }
+
+  count = get_active_uniform_count(prog);
+  if ((uint32_t)location > count) {
+    return location;
+  }
+
+  if (!get_active_uniform_info(prog, (GLuint)(location - 1), &info)) {
+    return location;
+  }
+  return info.location;
 }
 
 static GLint get_sampler_uniform_binding(GLProgram *prog, GLint location) {
@@ -544,7 +609,10 @@ static bool get_uniform_var_by_location(GLProgram *prog, GLint location,
       if (type) *type = vs->uniformVars[i].type;
       if (block_index) *block_index = vs->uniformVars[i].block >= 0 ? (uint32_t)vs->uniformVars[i].block : 0u;
       if (offset) *offset = (uint32_t)vs->uniformVars[i].offset;
-      if (word_count) *word_count = shader_var_type_word_count(vs->uniformVars[i].type) * vs->uniformVars[i].count;
+      if (word_count) {
+        *word_count = shader_var_type_word_count(vs->uniformVars[i].type) *
+                      shader_var_element_count(vs->uniformVars[i].count);
+      }
       return true;
     }
   }
@@ -561,7 +629,10 @@ static bool get_uniform_var_by_location(GLProgram *prog, GLint location,
       if (type) *type = ps->uniformVars[i].type;
       if (block_index) *block_index = ps->uniformVars[i].block >= 0 ? (uint32_t)ps->uniformVars[i].block : 0u;
       if (offset) *offset = (uint32_t)ps->uniformVars[i].offset;
-      if (word_count) *word_count = shader_var_type_word_count(ps->uniformVars[i].type) * ps->uniformVars[i].count;
+      if (word_count) {
+        *word_count = shader_var_type_word_count(ps->uniformVars[i].type) *
+                      shader_var_element_count(ps->uniformVars[i].count);
+      }
       return true;
     }
   }
@@ -594,7 +665,9 @@ static bool read_uniform_words(GLProgram *prog, GLint location, uint32_t *words,
   }
 
   if (location_is_direct(location)) {
-    uint32_t shadow_offset = offset * sizeof(uint32_t);
+    bool virtual_block = stage_uses_virtual_uniform_block(prog, pixel_stage);
+    uint32_t shadow_offset =
+        virtual_block ? offset : offset * sizeof(uint32_t);
     direct_shadow = pixel_stage ? prog->ps_direct_uniform_shadow : prog->vs_direct_uniform_shadow;
     direct_shadow_size = pixel_stage ? prog->ps_direct_uniform_shadow_size : prog->vs_direct_uniform_shadow_size;
     if (!direct_shadow || shadow_offset + word_count * sizeof(uint32_t) > direct_shadow_size) {
@@ -602,7 +675,9 @@ static bool read_uniform_words(GLProgram *prog, GLint location, uint32_t *words,
     }
     src = direct_shadow + shadow_offset;
     for (uint32_t i = 0; i < word_count; ++i) {
-      memcpy(&words[i], src + i * sizeof(uint32_t), sizeof(uint32_t));
+      uint32_t word;
+      memcpy(&word, src + i * sizeof(uint32_t), sizeof(uint32_t));
+      words[i] = virtual_block ? GPU_TO_CPU_32(word) : word;
     }
     if (actual_words) *actual_words = word_count;
     if (type) *type = var_type;
@@ -740,11 +815,11 @@ static void free_program_direct_uniform_shadows(GLProgram *prog) {
   if (!prog) return;
 
   if (prog->vs_direct_uniform_shadow) {
-    free(prog->vs_direct_uniform_shadow);
+    gl_mem_free(GL_MEM_TYPE_MEM2, prog->vs_direct_uniform_shadow);
     prog->vs_direct_uniform_shadow = NULL;
   }
   if (prog->ps_direct_uniform_shadow) {
-    free(prog->ps_direct_uniform_shadow);
+    gl_mem_free(GL_MEM_TYPE_MEM2, prog->ps_direct_uniform_shadow);
     prog->ps_direct_uniform_shadow = NULL;
   }
   prog->vs_direct_uniform_shadow_size = 0;
@@ -832,20 +907,38 @@ static bool initialize_program_direct_uniform_shadows(GLProgram *prog, GX2Vertex
   if (vs) {
     for (uint32_t i = 0; i < vs->uniformVarCount; ++i) {
       uint32_t size_bytes;
+      uint32_t end_offset;
       if (vs->uniformVars[i].block >= 0) continue;
-      size_bytes = shader_var_type_word_count(vs->uniformVars[i].type) * vs->uniformVars[i].count * sizeof(uint32_t);
-      if ((uint32_t)vs->uniformVars[i].offset * sizeof(uint32_t) + size_bytes > vertex_shadow_size) {
-        vertex_shadow_size = (uint32_t)vs->uniformVars[i].offset * sizeof(uint32_t) + size_bytes;
+      size_bytes = shader_var_type_word_count(vs->uniformVars[i].type) *
+                   shader_var_element_count(vs->uniformVars[i].count) *
+                   sizeof(uint32_t);
+      // CafeGLSL exposes loose-uniform offsets as bytes in its virtual block.
+      end_offset = vs->mode == GX2_SHADER_MODE_UNIFORM_BLOCK
+                       ? (uint32_t)vs->uniformVars[i].offset + size_bytes
+                       : (uint32_t)vs->uniformVars[i].offset *
+                                 sizeof(uint32_t) +
+                             size_bytes;
+      if (end_offset > vertex_shadow_size) {
+        vertex_shadow_size = end_offset;
       }
     }
   }
   if (ps) {
     for (uint32_t i = 0; i < ps->uniformVarCount; ++i) {
       uint32_t size_bytes;
+      uint32_t end_offset;
       if (ps->uniformVars[i].block >= 0) continue;
-      size_bytes = shader_var_type_word_count(ps->uniformVars[i].type) * ps->uniformVars[i].count * sizeof(uint32_t);
-      if ((uint32_t)ps->uniformVars[i].offset * sizeof(uint32_t) + size_bytes > pixel_shadow_size) {
-        pixel_shadow_size = (uint32_t)ps->uniformVars[i].offset * sizeof(uint32_t) + size_bytes;
+      size_bytes = shader_var_type_word_count(ps->uniformVars[i].type) *
+                   shader_var_element_count(ps->uniformVars[i].count) *
+                   sizeof(uint32_t);
+      // CafeGLSL exposes loose-uniform offsets as bytes in its virtual block.
+      end_offset = ps->mode == GX2_SHADER_MODE_UNIFORM_BLOCK
+                       ? (uint32_t)ps->uniformVars[i].offset + size_bytes
+                       : (uint32_t)ps->uniformVars[i].offset *
+                                 sizeof(uint32_t) +
+                             size_bytes;
+      if (end_offset > pixel_shadow_size) {
+        pixel_shadow_size = end_offset;
       }
     }
   }
@@ -854,20 +947,26 @@ static bool initialize_program_direct_uniform_shadows(GLProgram *prog, GX2Vertex
   pixel_shadow_size = (pixel_shadow_size + 15u) & ~15u;
 
   if (vertex_shadow_size > 0) {
-    prog->vs_direct_uniform_shadow = (uint8_t *)calloc(1u, vertex_shadow_size);
+    prog->vs_direct_uniform_shadow = (uint8_t *)gl_mem_alloc(
+        GL_MEM_TYPE_MEM2, vertex_shadow_size, 256);
     if (!prog->vs_direct_uniform_shadow) {
       free_program_direct_uniform_shadows(prog);
       return false;
     }
+    memset(prog->vs_direct_uniform_shadow, 0, vertex_shadow_size);
+    DCFlushRange(prog->vs_direct_uniform_shadow, vertex_shadow_size);
     prog->vs_direct_uniform_shadow_size = vertex_shadow_size;
   }
 
   if (pixel_shadow_size > 0) {
-    prog->ps_direct_uniform_shadow = (uint8_t *)calloc(1u, pixel_shadow_size);
+    prog->ps_direct_uniform_shadow = (uint8_t *)gl_mem_alloc(
+        GL_MEM_TYPE_MEM2, pixel_shadow_size, 256);
     if (!prog->ps_direct_uniform_shadow) {
       free_program_direct_uniform_shadows(prog);
       return false;
     }
+    memset(prog->ps_direct_uniform_shadow, 0, pixel_shadow_size);
+    DCFlushRange(prog->ps_direct_uniform_shadow, pixel_shadow_size);
     prog->ps_direct_uniform_shadow_size = pixel_shadow_size;
   }
 
@@ -1404,6 +1503,10 @@ static void initialize_program_sampler_tables(GLProgram *prog, GX2VertexShader *
   memset(prog->pixel_sampler_units, -1, sizeof(prog->pixel_sampler_units));
   memset(prog->vertex_sampler_bindings, 0, sizeof(prog->vertex_sampler_bindings));
   memset(prog->pixel_sampler_bindings, 0, sizeof(prog->pixel_sampler_bindings));
+  for (uint32_t i = 0; i < MAX_PROGRAM_SAMPLERS; ++i) {
+    prog->vertex_sampler_targets[i] = GL_TEXTURE_2D;
+    prog->pixel_sampler_targets[i] = GL_TEXTURE_2D;
+  }
 
   if (vs) {
     for (uint32_t i = 0; i < vs->samplerVarCount && i < MAX_PROGRAM_SAMPLERS; ++i) {
@@ -1411,7 +1514,9 @@ static void initialize_program_sampler_tables(GLProgram *prog, GX2VertexShader *
       if (location < MAX_PROGRAM_SAMPLERS) {
         prog->vertex_sampler_units[location] = (GLint)i;
       }
-      prog->vertex_sampler_bindings[i] = (GLint)location;
+      prog->vertex_sampler_bindings[i] = 0;
+      prog->vertex_sampler_targets[i] =
+          sampler_var_type_to_texture_target(vs->samplerVars[i].type);
     }
   }
   if (ps) {
@@ -1420,7 +1525,9 @@ static void initialize_program_sampler_tables(GLProgram *prog, GX2VertexShader *
       if (location < MAX_PROGRAM_SAMPLERS) {
         prog->pixel_sampler_units[location] = (GLint)i;
       }
-      prog->pixel_sampler_bindings[i] = (GLint)location;
+      prog->pixel_sampler_bindings[i] = 0;
+      prog->pixel_sampler_targets[i] =
+          sampler_var_type_to_texture_target(ps->samplerVars[i].type);
     }
   }
 }
@@ -1504,9 +1611,21 @@ static bool location_is_sampler(GLint l) { return (((uint32_t)l & GL_LOCATION_KI
 static bool location_is_pixel(GLint l) { return (((uint32_t)l & GL_LOCATION_STAGE_PIXEL) != 0u); }
 static bool location_is_direct(GLint l) { return (((uint32_t)l & GL_LOCATION_KIND_DIRECT) != 0u); }
 
+static bool stage_uses_virtual_uniform_block(const GLProgram *prog,
+                                             bool pixel_stage) {
+  const GX2VertexShader *vs;
+  const GX2PixelShader *ps;
+
+  if (!prog || !prog->group) return false;
+  vs = prog->group->vertexShader;
+  ps = prog->group->pixelShader;
+  return pixel_stage
+             ? ps && ps->mode == GX2_SHADER_MODE_UNIFORM_BLOCK
+             : vs && vs->mode == GX2_SHADER_MODE_UNIFORM_BLOCK;
+}
+
 static bool update_uniform_words(GLint location, const uint32_t *data, GLsizei count_words, uint32_t extra_offset_bytes) {
   if (location == -1 || count_words <= 0 || !data) return true;
-  if (location_is_sampler(location)) return false;
   if (!g_gl_context) return false;
   GLuint prog_id = g_gl_context->bound_program;
   if (!is_valid_program(prog_id)) {
@@ -1514,14 +1633,30 @@ static bool update_uniform_words(GLint location, const uint32_t *data, GLsizei c
     return false;
   }
   GLProgram *prog = &g_programs[prog_id];
+  location = resolve_uniform_location(prog, location);
+  if (location_is_sampler(location)) return false;
   bool is_pixel = location_is_pixel(location);
   uint32_t offset = ((uint32_t)location & 0xFFFFu) + extra_offset_bytes;
   uint32_t byte_count = (uint32_t)count_words * 4;
   set_program_uniform_value_shadow(prog, location, data, (uint32_t)count_words);
   if (location_is_direct(location)) {
-    uint32_t shadow_offset = offset * sizeof(uint32_t);
     uint8_t *shadow = is_pixel ? prog->ps_direct_uniform_shadow : prog->vs_direct_uniform_shadow;
     uint32_t shadow_size = is_pixel ? prog->ps_direct_uniform_shadow_size : prog->vs_direct_uniform_shadow_size;
+    if (stage_uses_virtual_uniform_block(prog, is_pixel)) {
+      uint32_t shadow_offset = offset;
+      if (!shadow || shadow_offset + byte_count > shadow_size) {
+        return false;
+      }
+      for (GLsizei i = 0; i < count_words; ++i) {
+        uint32_t swapped = CPU_TO_GPU_32(data[i]);
+        memcpy(shadow + shadow_offset + (uint32_t)i * sizeof(uint32_t),
+               &swapped, sizeof(swapped));
+      }
+      DCFlushRange(shadow + shadow_offset, byte_count);
+      return true;
+    }
+
+    uint32_t shadow_offset = offset * sizeof(uint32_t);
     uint32_t upload_offset = offset & ~3u;
     uint32_t upload_end = (offset + (uint32_t)count_words + 3u) & ~3u;
     uint32_t upload_words = upload_end - upload_offset;
@@ -1557,7 +1692,7 @@ static bool update_uniform_words(GLint location, const uint32_t *data, GLsizei c
 
 static bool update_sampler_bindings(GLint location, GLsizei count, const GLint *values) {
   if (location == -1 || count <= 0 || !values) return true;
-  if (!g_gl_context || !location_is_sampler(location)) return false;
+  if (!g_gl_context) return false;
 
   GLuint prog_id = g_gl_context->bound_program;
   if (!is_valid_program(prog_id)) {
@@ -1566,6 +1701,8 @@ static bool update_sampler_bindings(GLint location, GLsizei count, const GLint *
   }
 
   GLProgram *prog = &g_programs[prog_id];
+  location = resolve_uniform_location(prog, location);
+  if (!location_is_sampler(location)) return false;
   GLint *sampler_units = location_is_pixel(location) ? prog->pixel_sampler_units : prog->vertex_sampler_units;
   GLint *sampler_bindings =
       location_is_pixel(location) ? prog->pixel_sampler_bindings : prog->vertex_sampler_bindings;
@@ -1594,19 +1731,25 @@ static GLint make_direct_uniform_location(bool pixel_stage, uint32_t offset) {
   return (GLint)((pixel_stage ? GL_LOCATION_STAGE_PIXEL : 0u) | GL_LOCATION_KIND_DIRECT | (offset & 0xFFFFu));
 }
 
-static GLuint get_bound_texture_for_unit(GLuint unit) {
-  GLuint tex_id;
-
+static GLuint get_bound_texture_for_unit(GLuint unit, GLenum target) {
   if (!g_gl_context || unit >= 32) return 0;
-
-  tex_id = g_gl_context->bound_texture_2d[unit];
-  if (tex_id == 0) tex_id = g_gl_context->bound_texture_cube[unit];
-  if (tex_id == 0) tex_id = g_gl_context->bound_texture_3d[unit];
-  if (tex_id == 0) tex_id = g_gl_context->bound_texture_1d[unit];
-  return tex_id;
+  switch (target) {
+  case GL_TEXTURE_1D: return g_gl_context->bound_texture_1d[unit];
+  case GL_TEXTURE_2D: return g_gl_context->bound_texture_2d[unit];
+  case GL_TEXTURE_3D: return g_gl_context->bound_texture_3d[unit];
+  case GL_TEXTURE_CUBE_MAP: return g_gl_context->bound_texture_cube[unit];
+  case GL_TEXTURE_2D_MULTISAMPLE:
+    return g_gl_context->bound_texture_2d_multisample[unit];
+  case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
+    return g_gl_context->bound_texture_2d_multisample_array[unit];
+  default: return 0;
+  }
 }
 
-static void bind_stage_samplers(const GLint *sampler_units, const GLint *sampler_bindings, bool pixel_stage) {
+static void bind_stage_samplers(const GLint *sampler_units,
+                                const GLint *sampler_bindings,
+                                const GLenum *sampler_targets,
+                                bool pixel_stage) {
   for (uint32_t location = 0; location < MAX_PROGRAM_SAMPLERS; ++location) {
     GLint shader_slot = sampler_units[location];
     GLint texture_unit;
@@ -1620,7 +1763,8 @@ static void bind_stage_samplers(const GLint *sampler_units, const GLint *sampler
     texture_unit = sampler_bindings[shader_slot];
     if (texture_unit < 0 || texture_unit >= 32) continue;
 
-    tex_id = get_bound_texture_for_unit((GLuint)texture_unit);
+    tex_id = get_bound_texture_for_unit((GLuint)texture_unit,
+                                        sampler_targets[shader_slot]);
     if (!tex_id) continue;
 
     gl_framebuffer_sync_texture_for_sampling(tex_id);
@@ -1708,6 +1852,27 @@ static void bind_program_uniform_blocks(GLProgram *prog) {
                                 prog->ps_blocks[block->pixel_block_index].buffer);
       }
     }
+  }
+
+  if (stage_uses_virtual_uniform_block(prog, false) &&
+      prog->vs_direct_uniform_shadow &&
+      prog->vs_direct_uniform_shadow_size > 0) {
+    GX2Invalidate(GX2_INVALIDATE_MODE_UNIFORM_BLOCK,
+                  prog->vs_direct_uniform_shadow,
+                  prog->vs_direct_uniform_shadow_size);
+    GX2SetVertexUniformBlock(GX2GL_CAFEGLSL_VIRTUAL_UNIFORM_BLOCK_LOCATION,
+                             prog->vs_direct_uniform_shadow_size,
+                             prog->vs_direct_uniform_shadow);
+  }
+  if (stage_uses_virtual_uniform_block(prog, true) &&
+      prog->ps_direct_uniform_shadow &&
+      prog->ps_direct_uniform_shadow_size > 0) {
+    GX2Invalidate(GX2_INVALIDATE_MODE_UNIFORM_BLOCK,
+                  prog->ps_direct_uniform_shadow,
+                  prog->ps_direct_uniform_shadow_size);
+    GX2SetPixelUniformBlock(GX2GL_CAFEGLSL_VIRTUAL_UNIFORM_BLOCK_LOCATION,
+                            prog->ps_direct_uniform_shadow_size,
+                            prog->ps_direct_uniform_shadow);
   }
 }
 
@@ -2151,7 +2316,6 @@ void _gl_CompileShader(GLuint s) {
     replace_owned_string(&shader->info_log, info_log_buffer);
     return;
   }
-
   new_binary = create_compiled_shader(shader->type, shader->source);
   if (!new_binary) {
     replace_owned_string(&shader->info_log,
@@ -2569,6 +2733,11 @@ void _gl_GetUniformfv(GLuint p, GLint l, GLfloat *v) {
   uint32_t actual_words = 0;
 
   if (!is_valid_program(p) || !v) return;
+  if (l == -1) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
+  l = resolve_uniform_location(&g_programs[p], l);
   if (location_is_sampler(l)) {
     *v = (GLfloat)get_sampler_uniform_binding(&g_programs[p], l);
     return;
@@ -2597,6 +2766,11 @@ void _gl_GetUniformiv(GLuint p, GLint l, GLint *v) {
   uint32_t actual_words = 0;
 
   if (!is_valid_program(p) || !v) return;
+  if (l == -1) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
+  l = resolve_uniform_location(&g_programs[p], l);
   if (location_is_sampler(l)) {
     *v = get_sampler_uniform_binding(&g_programs[p], l);
     return;
@@ -2625,6 +2799,11 @@ void _gl_GetUniformuiv(GLuint program, GLint location, GLuint *params) {
   uint32_t actual_words = 0;
 
   if (!is_valid_program(program) || !params) return;
+  if (location == -1) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
+  location = resolve_uniform_location(&g_programs[program], location);
   if (location_is_sampler(location)) {
     *params = (GLuint)get_sampler_uniform_binding(&g_programs[program], location);
     return;
@@ -2710,31 +2889,27 @@ void _gl_WiiULoadShaderGroupGFD(GLuint p, GLuint idx, const void *d) {
 }
 
 GLint _gl_GetUniformLocation(GLuint p, const GLchar *name) {
+  uint32_t count;
+
   if (!is_valid_program(p) || !name) return -1;
   GLProgram *prog = &g_programs[p];
   if (!prog->group) return -1;
-  GX2VertexShader *vs = prog->group->vertexShader;
-  GX2PixelShader  *ps = prog->group->pixelShader;
-  if (vs) for (uint32_t i = 0; i < vs->samplerVarCount; i++) {
-    if (vs->samplerVars[i].name && strcmp(vs->samplerVars[i].name, name) == 0) {
-      return make_sampler_location(false, (uint32_t)vs->samplerVars[i].location);
+
+  count = get_active_uniform_count(prog);
+  for (uint32_t i = 0; i < count; ++i) {
+    ActiveUniformInfo info;
+    if (!get_active_uniform_info(prog, i, &info) || !info.name) {
+      continue;
     }
-  }
-  if (ps) for (uint32_t i = 0; i < ps->samplerVarCount; i++) {
-    if (ps->samplerVars[i].name && strcmp(ps->samplerVars[i].name, name) == 0) {
-      return make_sampler_location(true, (uint32_t)ps->samplerVars[i].location);
+    if (strcmp(info.name, name) == 0) {
+      return (GLint)i + 1;
     }
-  }
-  if (vs) for (uint32_t i = 0; i < vs->uniformVarCount; i++) {
-    if (vs->uniformVars[i].name && strcmp(vs->uniformVars[i].name, name) == 0) {
-      if (vs->uniformVars[i].block < 0) return make_direct_uniform_location(false, (uint32_t)vs->uniformVars[i].offset);
-      return (GLint)(((uint32_t)vs->uniformVars[i].block << 16) | (vs->uniformVars[i].offset & 0xFFFFu));
-    }
-  }
-  if (ps) for (uint32_t i = 0; i < ps->uniformVarCount; i++) {
-    if (ps->uniformVars[i].name && strcmp(ps->uniformVars[i].name, name) == 0) {
-      if (ps->uniformVars[i].block < 0) return make_direct_uniform_location(true, (uint32_t)ps->uniformVars[i].offset);
-      return (GLint)(GL_LOCATION_STAGE_PIXEL | ((uint32_t)ps->uniformVars[i].block << 16) | (ps->uniformVars[i].offset & 0xFFFFu));
+    size_t info_name_length = strlen(info.name);
+    size_t query_name_length = strlen(name);
+    if (query_name_length == info_name_length + 3u &&
+        strncmp(info.name, name, info_name_length) == 0 &&
+        strcmp(name + info_name_length, "[0]") == 0) {
+      return (GLint)i + 1;
     }
   }
   return -1;
@@ -3072,8 +3247,10 @@ void gl_bind_program_textures(void) {
   prog = &g_programs[prog_id];
   if (!prog->group || !prog->linked) return;
 
-  bind_stage_samplers(prog->pixel_sampler_units, prog->pixel_sampler_bindings, true);
-  bind_stage_samplers(prog->vertex_sampler_units, prog->vertex_sampler_bindings, false);
+  bind_stage_samplers(prog->pixel_sampler_units, prog->pixel_sampler_bindings,
+                      prog->pixel_sampler_targets, true);
+  bind_stage_samplers(prog->vertex_sampler_units, prog->vertex_sampler_bindings,
+                      prog->vertex_sampler_targets, false);
 }
 
 #ifdef __cplusplus

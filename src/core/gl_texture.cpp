@@ -69,6 +69,8 @@ typedef struct {
   GLenum target;
   GLint internal_format;
   GLsizei width, height, depth;
+  GLsizei samples;
+  GLboolean fixed_sample_locations;
   GLint base_level, max_level;
   GLfloat min_lod, max_lod, lod_bias;
   GLfloat border_color[4];
@@ -120,6 +122,21 @@ static GLTexture g_default_texture_1d;
 static GLTexture g_default_texture_2d;
 static GLTexture g_default_texture_3d;
 static GLTexture g_default_texture_cube;
+static GLTexture g_default_texture_2d_multisample;
+static GLTexture g_default_texture_2d_multisample_array;
+
+typedef struct {
+  GLsizei width;
+  GLsizei height;
+  GLsizei depth;
+  GLsizei samples;
+  GLint internal_format;
+  GLboolean fixed_sample_locations;
+  bool defined;
+} GLProxyMultisampleImage;
+
+static GLProxyMultisampleImage g_proxy_multisample_2d;
+static GLProxyMultisampleImage g_proxy_multisample_array;
 
 typedef struct {
   GX2Sampler gx2_sampler;
@@ -184,6 +201,10 @@ static GLTexture *default_texture_for_target(GLenum target) {
     return &g_default_texture_3d;
   case GL_TEXTURE_CUBE_MAP:
     return &g_default_texture_cube;
+  case GL_TEXTURE_2D_MULTISAMPLE:
+    return &g_default_texture_2d_multisample;
+  case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
+    return &g_default_texture_2d_multisample_array;
   default:
     return NULL;
   }
@@ -197,6 +218,8 @@ static void init_texture_object(GLTexture *tex, GLenum target, bool reserved) {
   memset(tex, 0, sizeof(*tex));
   tex->target = target;
   tex->internal_format = GL_RGBA;
+  tex->samples = 0;
+  tex->fixed_sample_locations = GL_TRUE;
   tex->base_level = 0;
   tex->max_level = 1000;
   tex->min_lod = -1000.0f;
@@ -379,6 +402,12 @@ static bool map_dim(GLenum target, GX2SurfaceDim *dim) {
   case GL_TEXTURE_CUBE_MAP:
     *dim = GX2_SURFACE_DIM_TEXTURE_CUBE;
     return true;
+  case GL_TEXTURE_2D_MULTISAMPLE:
+    *dim = GX2_SURFACE_DIM_TEXTURE_2D_MSAA;
+    return true;
+  case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
+    *dim = GX2_SURFACE_DIM_TEXTURE_2D_MSAA_ARRAY;
+    return true;
   default:
     *dim = GX2_SURFACE_DIM_TEXTURE_2D;
     return false;
@@ -388,6 +417,32 @@ static bool map_dim(GLenum target, GX2SurfaceDim *dim) {
 static bool is_valid_texture_target(GLenum target) {
   return target == GL_TEXTURE_1D || target == GL_TEXTURE_2D ||
          target == GL_TEXTURE_3D || target == GL_TEXTURE_CUBE_MAP;
+}
+
+static bool is_multisample_texture_target(GLenum target) {
+  return target == GL_TEXTURE_2D_MULTISAMPLE ||
+         target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
+}
+
+static bool map_sample_count(GLsizei requested, GX2AAMode *mode,
+                             GLsizei *actual) {
+  if (!mode || !actual || requested <= 0 || requested > GL33_MAX_SAMPLES) {
+    return false;
+  }
+  if (requested == 1) {
+    *mode = GX2_AA_MODE1X;
+    *actual = 1;
+  } else if (requested == 2) {
+    *mode = GX2_AA_MODE2X;
+    *actual = 2;
+  } else if (requested <= 4) {
+    *mode = GX2_AA_MODE4X;
+    *actual = 4;
+  } else {
+    *mode = GX2_AA_MODE8X;
+    *actual = 8;
+  }
+  return true;
 }
 
 static bool is_cube_map_face_target(GLenum target) {
@@ -1140,6 +1195,103 @@ static bool rebuild_texture_storage(GLTexture *tex, GLsizei width,
   return true;
 }
 
+static bool multisample_format_is_integer(GX2SurfaceFormat format) {
+  uint32_t numeric_type = ((uint32_t)format >> 8) & 0x7u;
+  return numeric_type == 1u || numeric_type == 3u;
+}
+
+static bool rebuild_multisample_texture_storage(
+    GLTexture *tex, GLsizei width, GLsizei height, GLsizei depth,
+    GLenum internalformat, GLsizei requested_samples,
+    GLboolean fixed_sample_locations) {
+  TextureFormatInfo info;
+  GX2Texture new_texture;
+  GX2SurfaceDim dim;
+  GX2AAMode aa_mode;
+  GLsizei actual_samples;
+
+  if (!tex || !is_multisample_texture_target(tex->target) ||
+      !get_texture_format_info((GLint)internalformat, GL_RGBA,
+                               GL_UNSIGNED_BYTE, false, &info) ||
+      !map_dim(tex->target, &dim) ||
+      !map_sample_count(requested_samples, &aa_mode, &actual_samples)) {
+    return false;
+  }
+  if ((info.surface_use &
+       (GX2_SURFACE_USE_COLOR_BUFFER | GX2_SURFACE_USE_DEPTH_BUFFER)) == 0) {
+    return false;
+  }
+  if (actual_samples > 1 && multisample_format_is_integer(info.gx2_format)) {
+    return false;
+  }
+
+  if (width == 0 || height == 0 || depth == 0) {
+    free_texture_storage(tex);
+    tex->internal_format = (GLint)internalformat;
+    tex->width = width;
+    tex->height = height;
+    tex->depth = depth;
+    tex->samples = actual_samples;
+    tex->fixed_sample_locations =
+        fixed_sample_locations ? GL_TRUE : GL_FALSE;
+    tex->complete = true;
+    clear_texture_level_state(tex);
+    mark_texture_level_defined(tex, 0, 0);
+    if (texture_ptr_is_named(tex)) {
+      gl_framebuffer_mark_texture_dirty(texture_name_from_ptr(tex));
+    }
+    return true;
+  }
+
+  memset(&new_texture, 0, sizeof(new_texture));
+  new_texture.surface.dim = dim;
+  new_texture.surface.width = (uint32_t)width;
+  new_texture.surface.height = (uint32_t)height;
+  new_texture.surface.depth = (uint32_t)depth;
+  new_texture.surface.mipLevels = 1;
+  new_texture.surface.format = info.gx2_format;
+  new_texture.surface.aa = aa_mode;
+  new_texture.surface.use = (GX2SurfaceUse)(
+      info.surface_use | GX2_SURFACE_USE_TEXTURE);
+  new_texture.surface.tileMode = GX2_TILE_MODE_DEFAULT;
+  new_texture.viewFirstMip = 0;
+  new_texture.viewNumMips = 1;
+  new_texture.viewFirstSlice = 0;
+  new_texture.viewNumSlices =
+      tex->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY ? (uint32_t)depth : 1u;
+  new_texture.compMap = info.comp_map;
+
+  GX2CalcSurfaceSizeAndAlignment(&new_texture.surface);
+  if (new_texture.surface.imageSize > 0) {
+    new_texture.surface.image =
+        gl_mem_alloc(GL_MEM_TYPE_MEM2, new_texture.surface.imageSize,
+                     new_texture.surface.alignment);
+    if (!new_texture.surface.image) {
+      return false;
+    }
+    memset(new_texture.surface.image, 0, new_texture.surface.imageSize);
+  }
+
+  free_texture_storage(tex);
+  tex->gx2_texture = new_texture;
+  tex->storage_allocated = new_texture.surface.image != NULL;
+  tex->complete = true;
+  tex->internal_format = (GLint)internalformat;
+  tex->width = width;
+  tex->height = height;
+  tex->depth = depth;
+  tex->samples = actual_samples;
+  tex->fixed_sample_locations = fixed_sample_locations ? GL_TRUE : GL_FALSE;
+  clear_texture_level_state(tex);
+  mark_texture_level_defined(tex, 0, 0);
+
+  GX2InitTextureRegs(&tex->gx2_texture);
+  if (texture_ptr_is_named(tex)) {
+    gl_framebuffer_mark_texture_dirty(texture_name_from_ptr(tex));
+  }
+  return true;
+}
+
 static uint16_t load_unaligned_u16(const uint8_t *ptr) {
   uint16_t value;
   memcpy(&value, ptr, sizeof(value));
@@ -1728,8 +1880,11 @@ static bool generate_mipmap_level(GLTexture *tex, uint32_t dst_level,
 
   for (GLsizei z = 0; z < dst_layout.depth; ++z) {
     uint8_t *dst_slice = dst_base + (uint32_t)z * dst_layout.slice_size;
-    uint32_t src_z0 = (uint32_t)z * 2u;
-    uint32_t src_z_count = src_layout.depth > 1 ? 2u : 1u;
+    uint32_t src_z0 =
+        tex->target == GL_TEXTURE_CUBE_MAP ? (uint32_t)z : (uint32_t)z * 2u;
+    uint32_t src_z_count =
+        tex->target == GL_TEXTURE_CUBE_MAP ? 1u
+                                           : (src_layout.depth > 1 ? 2u : 1u);
 
     if (src_z0 + src_z_count > (uint32_t)src_layout.depth) {
       src_z_count = (uint32_t)src_layout.depth - src_z0;
@@ -1838,6 +1993,10 @@ static GLuint get_bound_tex(GLenum target) {
     return g_gl_context->bound_texture_3d[unit];
   case GL_TEXTURE_CUBE_MAP:
     return g_gl_context->bound_texture_cube[unit];
+  case GL_TEXTURE_2D_MULTISAMPLE:
+    return g_gl_context->bound_texture_2d_multisample[unit];
+  case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
+    return g_gl_context->bound_texture_2d_multisample_array[unit];
   default:
     return 0;
   }
@@ -1875,6 +2034,12 @@ static void set_bound_tex(GLenum target, GLuint texture) {
     break;
   case GL_TEXTURE_CUBE_MAP:
     g_gl_context->bound_texture_cube[unit] = texture;
+    break;
+  case GL_TEXTURE_2D_MULTISAMPLE:
+    g_gl_context->bound_texture_2d_multisample[unit] = texture;
+    break;
+  case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
+    g_gl_context->bound_texture_2d_multisample_array[unit] = texture;
     break;
   default:
     break;
@@ -2133,14 +2298,22 @@ static uint8_t *build_copy_upload_pixels(GLint x, GLint y, GLsizei width,
 void gl_texture_init(void) {
   memset(g_textures, 0, sizeof(g_textures));
   memset(g_samplers, 0, sizeof(g_samplers));
+  memset(&g_proxy_multisample_2d, 0, sizeof(g_proxy_multisample_2d));
+  memset(&g_proxy_multisample_array, 0, sizeof(g_proxy_multisample_array));
   init_texture_object(&g_default_texture_1d, GL_TEXTURE_1D, false);
   init_texture_object(&g_default_texture_2d, GL_TEXTURE_2D, false);
   init_texture_object(&g_default_texture_3d, GL_TEXTURE_3D, false);
   init_texture_object(&g_default_texture_cube, GL_TEXTURE_CUBE_MAP, false);
+  init_texture_object(&g_default_texture_2d_multisample,
+                      GL_TEXTURE_2D_MULTISAMPLE, false);
+  init_texture_object(&g_default_texture_2d_multisample_array,
+                      GL_TEXTURE_2D_MULTISAMPLE_ARRAY, false);
   init_texture_sampler(&g_default_texture_1d);
   init_texture_sampler(&g_default_texture_2d);
   init_texture_sampler(&g_default_texture_3d);
   init_texture_sampler(&g_default_texture_cube);
+  init_texture_sampler(&g_default_texture_2d_multisample);
+  init_texture_sampler(&g_default_texture_2d_multisample_array);
 }
 
 void _gl_GenTextures(GLsizei n, GLuint *textures) {
@@ -2199,6 +2372,12 @@ void _gl_DeleteTextures(GLsizei n, const GLuint *textures) {
         }
         if (g_gl_context->bound_texture_cube[u] == id) {
           g_gl_context->bound_texture_cube[u] = 0;
+        }
+        if (g_gl_context->bound_texture_2d_multisample[u] == id) {
+          g_gl_context->bound_texture_2d_multisample[u] = 0;
+        }
+        if (g_gl_context->bound_texture_2d_multisample_array[u] == id) {
+          g_gl_context->bound_texture_2d_multisample_array[u] = 0;
         }
       }
       free_texture_storage(&g_textures[id]);
@@ -2286,7 +2465,8 @@ void _gl_BindTexture(GLenum target, GLuint texture) {
   if (!g_gl_context) {
     return;
   }
-  if (!is_valid_texture_target(target)) {
+  if (!is_valid_texture_target(target) &&
+      !is_multisample_texture_target(target)) {
     _gl_set_error(GL_INVALID_ENUM);
     return;
   }
@@ -2334,6 +2514,109 @@ void _gl_ActiveTexture(GLenum texture) {
     return;
   }
   g_gl_context->active_texture = texture - GL_TEXTURE0;
+}
+
+static void set_proxy_multisample_image(GLProxyMultisampleImage *proxy,
+                                        GLsizei width, GLsizei height,
+                                        GLsizei depth, GLsizei samples,
+                                        GLenum internalformat,
+                                        GLboolean fixed_sample_locations,
+                                        bool supported) {
+  memset(proxy, 0, sizeof(*proxy));
+  if (!supported) {
+    return;
+  }
+  proxy->width = width;
+  proxy->height = height;
+  proxy->depth = depth;
+  proxy->samples = samples;
+  proxy->internal_format = (GLint)internalformat;
+  proxy->fixed_sample_locations = fixed_sample_locations ? GL_TRUE : GL_FALSE;
+  proxy->defined = true;
+}
+
+static void define_multisample_texture(GLenum target, GLsizei samples,
+                                       GLenum internalformat, GLsizei width,
+                                       GLsizei height, GLsizei depth,
+                                       GLboolean fixed_sample_locations) {
+  TextureFormatInfo info;
+  GX2AAMode aa_mode;
+  GLsizei actual_samples;
+  bool is_proxy = target == GL_PROXY_TEXTURE_2D_MULTISAMPLE ||
+                  target == GL_PROXY_TEXTURE_2D_MULTISAMPLE_ARRAY;
+  bool is_array = target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY ||
+                  target == GL_PROXY_TEXTURE_2D_MULTISAMPLE_ARRAY;
+  GLProxyMultisampleImage *proxy =
+      is_array ? &g_proxy_multisample_array : &g_proxy_multisample_2d;
+
+  if (samples <= 0 || samples > GL33_MAX_SAMPLES || width < 0 || height < 0 ||
+      depth < 0 || width > 8192 || height > 8192 || depth > 2048) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+  if (!get_texture_format_info((GLint)internalformat, GL_RGBA,
+                               GL_UNSIGNED_BYTE, false, &info)) {
+    _gl_set_error(GL_INVALID_ENUM);
+    return;
+  }
+  if ((info.surface_use &
+       (GX2_SURFACE_USE_COLOR_BUFFER | GX2_SURFACE_USE_DEPTH_BUFFER)) == 0) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
+  if (!map_sample_count(samples, &aa_mode, &actual_samples)) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+  if (actual_samples > 1 && multisample_format_is_integer(info.gx2_format)) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
+
+  if (is_proxy) {
+    set_proxy_multisample_image(proxy, width, height, depth, actual_samples,
+                                internalformat, fixed_sample_locations, true);
+    return;
+  }
+
+  GLTexture *tex = get_bound_texture(target);
+  if (!tex) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
+  if (!rebuild_multisample_texture_storage(
+          tex, width, height, depth, internalformat, samples,
+          fixed_sample_locations)) {
+    _gl_set_error(GL_OUT_OF_MEMORY);
+  }
+}
+
+void _gl_TexImage2DMultisample(GLenum target, GLsizei samples,
+                               GLenum internalformat, GLsizei width,
+                               GLsizei height,
+                               GLboolean fixedsamplelocations) {
+  if (!g_gl_context) return;
+  if (target != GL_TEXTURE_2D_MULTISAMPLE &&
+      target != GL_PROXY_TEXTURE_2D_MULTISAMPLE) {
+    _gl_set_error(GL_INVALID_ENUM);
+    return;
+  }
+  define_multisample_texture(target, samples, internalformat, width, height, 1,
+                             fixedsamplelocations);
+}
+
+void _gl_TexImage3DMultisample(GLenum target, GLsizei samples,
+                               GLenum internalformat, GLsizei width,
+                               GLsizei height, GLsizei depth,
+                               GLboolean fixedsamplelocations) {
+  if (!g_gl_context) return;
+  if (target != GL_TEXTURE_2D_MULTISAMPLE_ARRAY &&
+      target != GL_PROXY_TEXTURE_2D_MULTISAMPLE_ARRAY) {
+    _gl_set_error(GL_INVALID_ENUM);
+    return;
+  }
+  define_multisample_texture(target, samples, internalformat, width, height,
+                             depth, fixedsamplelocations);
 }
 
 void _gl_TexImage2D(GLenum target, GLint level, GLint internalformat,
@@ -4155,8 +4438,10 @@ void _gl_CompressedTexSubImage3D(GLenum target, GLint level, GLint xoffset,
 void _gl_GetTexLevelParameteriv(GLenum target, GLint level, GLenum pname,
                                 GLint *params) {
   GLTexture *tex;
+  GLProxyMultisampleImage *proxy = NULL;
   uint32_t face = 0;
   bool defined;
+  bool multisample_target = false;
   TextureLevelLayout layout;
   GLint red_bits, green_bits, blue_bits, alpha_bits, depth_bits, stencil_bits;
 
@@ -4168,7 +4453,18 @@ void _gl_GetTexLevelParameteriv(GLenum target, GLint level, GLenum pname,
     return;
   }
 
-  if (is_cube_map_face_target(target)) {
+  if (target == GL_PROXY_TEXTURE_2D_MULTISAMPLE) {
+    proxy = &g_proxy_multisample_2d;
+    tex = NULL;
+    multisample_target = true;
+  } else if (target == GL_PROXY_TEXTURE_2D_MULTISAMPLE_ARRAY) {
+    proxy = &g_proxy_multisample_array;
+    tex = NULL;
+    multisample_target = true;
+  } else if (is_multisample_texture_target(target)) {
+    tex = get_bound_texture(target);
+    multisample_target = true;
+  } else if (is_cube_map_face_target(target)) {
     face = cube_map_face_index(target);
     tex = get_bound_texture(GL_TEXTURE_CUBE_MAP);
   } else if (is_valid_texture_target(target)) {
@@ -4177,7 +4473,7 @@ void _gl_GetTexLevelParameteriv(GLenum target, GLint level, GLenum pname,
     _gl_set_error(GL_INVALID_ENUM);
     return;
   }
-  if (!tex) {
+  if (!tex && !proxy) {
     _gl_set_error(GL_INVALID_OPERATION);
     return;
   }
@@ -4202,8 +4498,67 @@ void _gl_GetTexLevelParameteriv(GLenum target, GLint level, GLenum pname,
   case GL_TEXTURE_COMPRESSED:
   case GL_TEXTURE_COMPRESSED_IMAGE_SIZE:
     break;
+  case GL_TEXTURE_SAMPLES:
+  case GL_TEXTURE_FIXED_SAMPLE_LOCATIONS:
+    if (!multisample_target) {
+      _gl_set_error(GL_INVALID_ENUM);
+      return;
+    }
+    break;
   default:
     _gl_set_error(GL_INVALID_ENUM);
+    return;
+  }
+
+  if (multisample_target) {
+    if (level != 0) {
+      *params = 0;
+      return;
+    }
+
+    GLsizei width = proxy ? proxy->width : tex->width;
+    GLsizei height = proxy ? proxy->height : tex->height;
+    GLsizei depth = proxy ? proxy->depth : tex->depth;
+    GLsizei samples = proxy ? proxy->samples : tex->samples;
+    GLint internal_format = proxy ? proxy->internal_format : tex->internal_format;
+    GLboolean fixed = proxy ? proxy->fixed_sample_locations
+                            : tex->fixed_sample_locations;
+    defined = proxy ? proxy->defined : texture_level_defined(tex, 0);
+    if (!defined) {
+      *params = 0;
+      return;
+    }
+
+    texture_component_sizes(internal_format, &red_bits, &green_bits,
+                            &blue_bits, &alpha_bits, &depth_bits,
+                            &stencil_bits);
+    switch (pname) {
+    case GL_TEXTURE_WIDTH: *params = width; break;
+    case GL_TEXTURE_HEIGHT: *params = height; break;
+    case GL_TEXTURE_DEPTH: *params = depth; break;
+    case GL_TEXTURE_INTERNAL_FORMAT: *params = internal_format; break;
+    case GL_TEXTURE_RED_SIZE: *params = red_bits; break;
+    case GL_TEXTURE_GREEN_SIZE: *params = green_bits; break;
+    case GL_TEXTURE_BLUE_SIZE: *params = blue_bits; break;
+    case GL_TEXTURE_ALPHA_SIZE: *params = alpha_bits; break;
+    case GL_TEXTURE_DEPTH_SIZE: *params = depth_bits; break;
+    case GL_TEXTURE_STENCIL_SIZE: *params = stencil_bits; break;
+    case GL_TEXTURE_SHARED_SIZE: *params = 0; break;
+    case GL_TEXTURE_RED_TYPE:
+    case GL_TEXTURE_GREEN_TYPE:
+    case GL_TEXTURE_BLUE_TYPE:
+    case GL_TEXTURE_ALPHA_TYPE:
+    case GL_TEXTURE_DEPTH_TYPE:
+      *params = (GLint)texture_component_type(internal_format);
+      break;
+    case GL_TEXTURE_COMPRESSED: *params = GL_FALSE; break;
+    case GL_TEXTURE_SAMPLES: *params = samples; break;
+    case GL_TEXTURE_FIXED_SAMPLE_LOCATIONS: *params = fixed; break;
+    case GL_TEXTURE_COMPRESSED_IMAGE_SIZE:
+      _gl_set_error(GL_INVALID_OPERATION);
+      break;
+    default: break;
+    }
     return;
   }
 
@@ -4592,6 +4947,20 @@ GLenum gl_get_texture_target(GLuint id) {
     return g_textures[id].target;
   }
   return 0;
+}
+
+GLsizei gl_get_texture_samples(GLuint id) {
+  if (id > 0 && id < MAX_TEXTURES && g_textures[id].in_use) {
+    return g_textures[id].samples;
+  }
+  return 0;
+}
+
+GLboolean gl_get_texture_fixed_sample_locations(GLuint id) {
+  if (id > 0 && id < MAX_TEXTURES && g_textures[id].in_use) {
+    return g_textures[id].fixed_sample_locations;
+  }
+  return GL_TRUE;
 }
 
 

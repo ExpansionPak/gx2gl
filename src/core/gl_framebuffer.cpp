@@ -16,6 +16,9 @@ extern "C" {
 #include <gx2/mem.h>
 #include <gx2r/surface.h>
 #include <whb/gfx.h>
+
+void GX2ExpandAAColorBuffer(GX2ColorBuffer *colorBuffer);
+void GX2ExpandDepthBuffer(GX2DepthBuffer *depthBuffer);
 #ifdef __cplusplus
 }
 #endif
@@ -35,7 +38,7 @@ extern "C" {
 #define MAX_FRAMEBUFFERS 128
 #define MAX_RENDERBUFFERS 256
 #define GX2GL_MAX_RENDERBUFFER_SIZE 8192
-#define GX2GL_MAX_RENDERBUFFER_SAMPLES 1
+#define GX2GL_MAX_RENDERBUFFER_SAMPLES GL33_MAX_SAMPLES
 #define GX2GL_MAX_FRAMEBUFFER_3D_TEXTURE_SIZE 2048
 
 typedef enum {
@@ -67,6 +70,7 @@ typedef struct {
     GLsizei width;
     GLsizei height;
     GLsizei samples;
+    GLboolean fixed_sample_locations;
     GX2Surface surface;
     GX2ColorBuffer color_buffer;
     GX2DepthBuffer depth_buffer;
@@ -86,6 +90,7 @@ typedef struct {
     bool color_needs_resolve[8];
     bool color_buffer_owns_aux[8];
     GX2DepthBuffer db;
+    bool depth_needs_expand;
     bool dirty;
 } GLFramebuffer;
 
@@ -472,7 +477,11 @@ static void resolve_framebuffer_texture_targets(GLFramebuffer *fb) {
 
         target = &fb->texture_targets[i];
         GX2DrawDone();
-        if (target->allocated && target->surface.image) {
+        if (texture->surface.aa != GX2_AA_MODE1X) {
+            GX2ExpandAAColorBuffer(&fb->cb[i]);
+            GX2DrawDone();
+            if (g_gl_context) g_gl_context->dirty_flags = 0xFFFFFFFFu;
+        } else if (target->allocated && target->surface.image) {
             uint32_t slice = attachment_view_slice(&fb->color_attachments[i]);
             GX2CopySurface(&target->surface, 0, slice,
                            &texture->surface,
@@ -531,7 +540,9 @@ static GLint max_texture_level_for_size(uint32_t size) {
 
 static uint32_t attachment_view_slice(const GLAttachmentRef *attachment) {
     if (!attachment || attachment->kind != GL_ATTACHMENT_KIND_TEXTURE) return 0u;
-    if (attachment->textarget == GL_TEXTURE_3D) return (uint32_t)attachment->layer;
+    if (attachment->textarget == GL_TEXTURE_3D ||
+        attachment->textarget == GL_TEXTURE_2D_MULTISAMPLE_ARRAY)
+        return (uint32_t)attachment->layer;
     return cube_map_face_slice(attachment->textarget);
 }
 
@@ -540,6 +551,9 @@ static uint32_t texture_level_depth_for_attachment(const GLAttachmentRef *attach
     if (!attachment || !surface) return 1u;
     if (attachment->textarget == GL_TEXTURE_3D) {
         return texture_level_extent(surface->depth, attachment->level);
+    }
+    if (attachment->textarget == GL_TEXTURE_2D_MULTISAMPLE_ARRAY) {
+        return surface->depth ? surface->depth : 1u;
     }
     if (is_cube_map_face_target(attachment->textarget)) {
         return surface->depth ? surface->depth : 6u;
@@ -937,6 +951,7 @@ typedef struct {
     GLsizei width;
     GLsizei height;
     GLsizei samples;
+    GLboolean fixed_sample_locations;
     GLint internal_format;
     bool depth_renderable;
     bool stencil_renderable;
@@ -953,7 +968,9 @@ static bool get_attachment_image_info(const GLAttachmentRef *attachment,
                                                     attachment->level);
         info->height = (GLsizei)texture_level_extent(texture->surface.height,
                                                      attachment->level);
-        info->samples = 0;
+        info->samples = gl_get_texture_samples(attachment->object);
+        info->fixed_sample_locations =
+            gl_get_texture_fixed_sample_locations(attachment->object);
         info->internal_format = gl_get_texture_internal_format(attachment->object);
         info->depth_renderable = is_depth_internal_format(info->internal_format);
         info->stencil_renderable = is_stencil_internal_format(info->internal_format);
@@ -966,6 +983,7 @@ static bool get_attachment_image_info(const GLAttachmentRef *attachment,
         info->width = renderbuffer->width;
         info->height = renderbuffer->height;
         info->samples = renderbuffer->samples;
+        info->fixed_sample_locations = GL_TRUE;
         info->internal_format = renderbuffer->internal_format;
         info->depth_renderable = is_depth_internal_format(info->internal_format);
         info->stencil_renderable = is_stencil_internal_format(info->internal_format);
@@ -973,6 +991,26 @@ static bool get_attachment_image_info(const GLAttachmentRef *attachment,
     }
 
     return false;
+}
+
+static GLsizei framebuffer_sample_count(GLuint framebuffer) {
+    GLFramebuffer *fb;
+    GLAttachmentImageInfo info;
+
+    if (framebuffer == 0 || framebuffer >= MAX_FRAMEBUFFERS) return 0;
+    fb = &g_framebuffers[framebuffer];
+    for (uint32_t i = 0; i < 8; ++i) {
+        if (get_attachment_image_info(&fb->color_attachments[i], &info)) {
+            return info.samples;
+        }
+    }
+    if (get_attachment_image_info(&fb->depth_attachment, &info)) {
+        return info.samples;
+    }
+    if (get_attachment_image_info(&fb->stencil_attachment, &info)) {
+        return info.samples;
+    }
+    return 0;
 }
 
 static float decode_gpu_float32(const uint8_t *ptr) {
@@ -1299,12 +1337,16 @@ void _gl_FramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget
 
     if (!g_gl_context) return;
     if (!is_framebuffer_target(target) ||
-        (textarget != GL_TEXTURE_2D && !is_cube_map_face_target(textarget))) { _gl_set_error(GL_INVALID_ENUM); return; }
+        (textarget != GL_TEXTURE_2D &&
+         textarget != GL_TEXTURE_2D_MULTISAMPLE &&
+         !is_cube_map_face_target(textarget))) { _gl_set_error(GL_INVALID_ENUM); return; }
     if (level < 0) { _gl_set_error(GL_INVALID_VALUE); return; }
     if (texture != 0) {
         if (_gl_IsTexture(texture) != GL_TRUE) { _gl_set_error(GL_INVALID_OPERATION); return; }
         texture_target = gl_get_texture_target(texture);
         if ((textarget == GL_TEXTURE_2D && texture_target != GL_TEXTURE_2D) ||
+            (textarget == GL_TEXTURE_2D_MULTISAMPLE &&
+             texture_target != GL_TEXTURE_2D_MULTISAMPLE) ||
             (is_cube_map_face_target(textarget) && texture_target != GL_TEXTURE_CUBE_MAP)) {
             _gl_set_error(GL_INVALID_OPERATION);
             return;
@@ -1371,7 +1413,8 @@ void _gl_FramebufferTextureLayer(GLenum target, GLenum attachment, GLuint textur
             return;
         }
         texture_target = gl_get_texture_target(texture);
-        if (texture_target != GL_TEXTURE_3D) {
+        if (texture_target != GL_TEXTURE_3D &&
+            texture_target != GL_TEXTURE_2D_MULTISAMPLE_ARRAY) {
             _gl_set_error(GL_INVALID_OPERATION);
             return;
         }
@@ -1390,9 +1433,9 @@ void _gl_FramebufferTextureLayer(GLenum target, GLenum attachment, GLuint textur
             clear_attachment_ref(&fb->stencil_attachment);
         } else {
             set_texture_attachment_ref(&fb->depth_attachment, texture,
-                                       GL_TEXTURE_3D, level, layer, GL_FALSE);
+                                       texture_target, level, layer, GL_FALSE);
             set_texture_attachment_ref(&fb->stencil_attachment, texture,
-                                       GL_TEXTURE_3D, level, layer, GL_FALSE);
+                                       texture_target, level, layer, GL_FALSE);
         }
         fb->dirty = true;
         g_gl_context->dirty_flags |= GL_DIRTY_FRAMEBUFFER;
@@ -1406,7 +1449,7 @@ void _gl_FramebufferTextureLayer(GLenum target, GLenum attachment, GLuint textur
             return;
         }
         if (texture == 0) clear_attachment_ref(ref);
-        else set_texture_attachment_ref(ref, texture, GL_TEXTURE_3D, level,
+        else set_texture_attachment_ref(ref, texture, texture_target, level,
                                         layer, GL_FALSE);
     }
 
@@ -1453,6 +1496,8 @@ static void renderbuffer_storage(GLenum target,
     GX2Surface new_surface;
     GX2ColorBuffer new_color_buffer;
     GX2DepthBuffer new_depth_buffer;
+    GX2AAMode aa_mode = GX2_AA_MODE1X;
+    GLsizei actual_samples = 0;
 
     if (!g_gl_context || target != GL_RENDERBUFFER) { _gl_set_error(GL_INVALID_ENUM); return; }
     if (samples < 0 || samples > GX2GL_MAX_RENDERBUFFER_SAMPLES ||
@@ -1469,6 +1514,30 @@ static void renderbuffer_storage(GLenum target,
     GX2RResourceFlags surface_flags;
     if (!get_renderbuffer_format_info(internalformat, &fmt, &use, &is_depth)) { _gl_set_error(GL_INVALID_ENUM); return; }
 
+    if (samples > 0) {
+        if (samples == 1) {
+            aa_mode = GX2_AA_MODE1X;
+            actual_samples = 1;
+        } else if (samples == 2) {
+            aa_mode = GX2_AA_MODE2X;
+            actual_samples = 2;
+        } else if (samples <= 4) {
+            aa_mode = GX2_AA_MODE4X;
+            actual_samples = 4;
+        } else {
+            aa_mode = GX2_AA_MODE8X;
+            actual_samples = 8;
+        }
+    }
+    {
+        uint32_t numeric_type = ((uint32_t)fmt >> 8) & 0x7u;
+        bool integer_format = numeric_type == 1u || numeric_type == 3u;
+        if (integer_format && actual_samples > 1) {
+            _gl_set_error(GL_INVALID_OPERATION);
+            return;
+        }
+    }
+
     memset(&new_surface, 0, sizeof(new_surface));
     memset(&new_color_buffer, 0, sizeof(new_color_buffer));
     memset(&new_depth_buffer, 0, sizeof(new_depth_buffer));
@@ -1482,15 +1551,16 @@ static void renderbuffer_storage(GLenum target,
         rb->height = height;
         rb->internal_format = internalformat;
         rb->is_depth = is_depth;
-        rb->samples = samples == 0 ? 0 : 1;
+        rb->samples = actual_samples;
+        rb->fixed_sample_locations = GL_TRUE;
         mark_framebuffers_for_renderbuffer(id);
         g_gl_context->dirty_flags |= GL_DIRTY_FRAMEBUFFER;
         return;
     }
 
     new_surface.dim = GX2_SURFACE_DIM_TEXTURE_2D; new_surface.width = width; new_surface.height = height;
-    new_surface.depth = 1; new_surface.mipLevels = 1; new_surface.format = fmt; new_surface.aa = GX2_AA_MODE1X; new_surface.use = use;
-    new_surface.tileMode = is_depth ? GX2_TILE_MODE_DEFAULT : GX2_TILE_MODE_LINEAR_ALIGNED;
+    new_surface.depth = 1; new_surface.mipLevels = 1; new_surface.format = fmt; new_surface.aa = aa_mode; new_surface.use = use;
+    new_surface.tileMode = GX2_TILE_MODE_DEFAULT;
     GX2CalcSurfaceSizeAndAlignment(&new_surface);
     surface_flags = build_framebuffer_surface_flags(internalformat, is_depth, false);
     if (!GX2RCreateSurface(&new_surface, surface_flags)) {
@@ -1518,7 +1588,8 @@ static void renderbuffer_storage(GLenum target,
     rb->height = height;
     rb->internal_format = internalformat;
     rb->is_depth = is_depth;
-    rb->samples = samples == 0 ? 0 : 1;
+    rb->samples = actual_samples;
+    rb->fixed_sample_locations = GL_TRUE;
     mark_framebuffers_for_renderbuffer(id);
     g_gl_context->dirty_flags |= GL_DIRTY_FRAMEBUFFER;
 }
@@ -1552,6 +1623,11 @@ void _gl_ReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum form
     if (format != GL_RGBA || type != GL_UNSIGNED_BYTE) { _gl_set_error(GL_INVALID_ENUM); return; }
     if (_gl_CheckFramebufferStatus(GL_READ_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
         _gl_set_error(GL_INVALID_FRAMEBUFFER_OPERATION);
+        return;
+    }
+    if (g_gl_context->bound_read_framebuffer != 0 &&
+        framebuffer_sample_count(g_gl_context->bound_read_framebuffer) > 0) {
+        _gl_set_error(GL_INVALID_OPERATION);
         return;
     }
     if (width == 0 || height == 0) return;
@@ -2242,6 +2318,7 @@ void _gl_BlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
     GLint destination_stencil_format = 0;
     bool copy_depth = false;
     bool copy_stencil = false;
+    bool color_blit_completed = false;
 
     if (!g_gl_context) return;
     if (filter != GL_NEAREST && filter != GL_LINEAR) {
@@ -2330,7 +2407,50 @@ void _gl_BlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
     if (srcX0 == srcX1 || srcY0 == srcY1 ||
         dstX0 == dstX1 || dstY0 == dstY1 || mask == 0) return;
 
-    if ((mask & GL_COLOR_BUFFER_BIT) && source_color_format != 0) {
+    if ((mask & GL_COLOR_BUFFER_BIT) && source_color_format != 0 &&
+        source_color.aa != GX2_AA_MODE1X) {
+        GX2ColorBuffer *source_buffer = get_read_color_buffer();
+        if (!source_buffer || srcX0 != 0 || srcY0 != 0 ||
+            srcX1 != (GLint)source_color.width ||
+            srcY1 != (GLint)source_color.height) {
+            _gl_set_error(GL_INVALID_OPERATION);
+            return;
+        }
+        for (uint32_t index = 0; index < 8; ++index) {
+            if (!destination_color_active[index]) continue;
+            if (destination_colors[index].aa != GX2_AA_MODE1X ||
+                source_color_format != destination_color_formats[index] ||
+                dstX0 != 0 || dstY0 != 0 ||
+                dstX1 != (GLint)destination_colors[index].width ||
+                dstY1 != (GLint)destination_colors[index].height) {
+                _gl_set_error(GL_INVALID_OPERATION);
+                return;
+            }
+        }
+        for (uint32_t index = 0; index < 8; ++index) {
+            if (!destination_color_active[index]) continue;
+            GX2ResolveAAColorBuffer(source_buffer, &destination_colors[index],
+                                    0, 0);
+            gl_framebuffer_mark_bound_color_buffer_dirty(index);
+        }
+        GX2DrawDone();
+        g_gl_context->dirty_flags = 0xFFFFFFFFu;
+        color_blit_completed = true;
+    }
+
+    if ((mask & GL_COLOR_BUFFER_BIT) && source_color_format != 0 &&
+        !color_blit_completed) {
+        for (uint32_t index = 0; index < 8; ++index) {
+            if (destination_color_active[index] &&
+                destination_colors[index].aa != GX2_AA_MODE1X) {
+                _gl_set_error(GL_INVALID_OPERATION);
+                return;
+            }
+        }
+    }
+
+    if ((mask & GL_COLOR_BUFFER_BIT) && source_color_format != 0 &&
+        !color_blit_completed) {
         for (uint32_t index = 0; index < 8; ++index) {
             if (!destination_color_active[index]) continue;
             if (!blit_color_surface(&source_color, source_color_format,
@@ -2476,6 +2596,8 @@ GLenum _gl_CheckFramebufferStatus(GLenum target) {
     bool has_att = false;
     GLsizei expected_samples = 0;
     bool expected_samples_set = false;
+    GLboolean expected_fixed_sample_locations = GL_TRUE;
+    bool expected_fixed_sample_locations_set = false;
     for (uint32_t i = 0; i < 8; ++i) {
         GLAttachmentImageInfo info;
         if (!attachment_ref_present(&fb->color_attachments[i])) continue;
@@ -2489,6 +2611,13 @@ GLenum _gl_CheckFramebufferStatus(GLenum target) {
             expected_samples = info.samples;
             expected_samples_set = true;
         } else if (info.samples != expected_samples) {
+            return GL_FRAMEBUFFER_INCOMPLETE_MULTISAMPLE;
+        }
+        if (!expected_fixed_sample_locations_set) {
+            expected_fixed_sample_locations = info.fixed_sample_locations;
+            expected_fixed_sample_locations_set = true;
+        } else if (info.fixed_sample_locations !=
+                   expected_fixed_sample_locations) {
             return GL_FRAMEBUFFER_INCOMPLETE_MULTISAMPLE;
         }
     }
@@ -2506,6 +2635,13 @@ GLenum _gl_CheckFramebufferStatus(GLenum target) {
         } else if (info.samples != expected_samples) {
             return GL_FRAMEBUFFER_INCOMPLETE_MULTISAMPLE;
         }
+        if (!expected_fixed_sample_locations_set) {
+            expected_fixed_sample_locations = info.fixed_sample_locations;
+            expected_fixed_sample_locations_set = true;
+        } else if (info.fixed_sample_locations !=
+                   expected_fixed_sample_locations) {
+            return GL_FRAMEBUFFER_INCOMPLETE_MULTISAMPLE;
+        }
     }
     if (attachment_ref_present(&fb->stencil_attachment)) {
         GLAttachmentImageInfo info;
@@ -2519,6 +2655,13 @@ GLenum _gl_CheckFramebufferStatus(GLenum target) {
             expected_samples = info.samples;
             expected_samples_set = true;
         } else if (info.samples != expected_samples) {
+            return GL_FRAMEBUFFER_INCOMPLETE_MULTISAMPLE;
+        }
+        if (!expected_fixed_sample_locations_set) {
+            expected_fixed_sample_locations = info.fixed_sample_locations;
+            expected_fixed_sample_locations_set = true;
+        } else if (info.fixed_sample_locations !=
+                   expected_fixed_sample_locations) {
             return GL_FRAMEBUFFER_INCOMPLETE_MULTISAMPLE;
         }
     }
@@ -2746,6 +2889,11 @@ GX2DepthBuffer *gl_get_draw_depth_buffer(void) {
     return NULL;
 }
 
+GLsizei gl_get_draw_sample_count(void) {
+    if (!g_gl_context) return 0;
+    return framebuffer_sample_count(g_gl_context->bound_framebuffer);
+}
+
 void gl_framebuffer_mark_bound_color_dirty(void) {
     GLuint fbo;
     GLFramebuffer *fb;
@@ -2762,6 +2910,11 @@ void gl_framebuffer_mark_bound_color_dirty(void) {
             fb->color_needs_resolve[attachment_index] = true;
         }
     }
+    if ((fb->depth_attachment.kind == GL_ATTACHMENT_KIND_TEXTURE ||
+         fb->stencil_attachment.kind == GL_ATTACHMENT_KIND_TEXTURE) &&
+        fb->db.surface.aa != GX2_AA_MODE1X) {
+        fb->depth_needs_expand = true;
+    }
 }
 
 void gl_framebuffer_mark_bound_color_buffer_dirty(GLuint index) {
@@ -2777,6 +2930,11 @@ void gl_framebuffer_mark_bound_color_buffer_dirty(GLuint index) {
     if (get_color_attachment_index(fb->draw_buffers[index], &attachment_index) &&
         fb->color_attachments[attachment_index].kind == GL_ATTACHMENT_KIND_TEXTURE) {
         fb->color_needs_resolve[attachment_index] = true;
+    }
+    if ((fb->depth_attachment.kind == GL_ATTACHMENT_KIND_TEXTURE ||
+         fb->stencil_attachment.kind == GL_ATTACHMENT_KIND_TEXTURE) &&
+        fb->db.surface.aa != GX2_AA_MODE1X) {
+        fb->depth_needs_expand = true;
     }
 }
 
@@ -2800,6 +2958,17 @@ void gl_framebuffer_sync_texture_for_sampling(GLuint texture) {
                 resolve_framebuffer_texture_targets(fb);
                 break;
             }
+        }
+        if (fb->depth_needs_expand &&
+            ((fb->depth_attachment.kind == GL_ATTACHMENT_KIND_TEXTURE &&
+              fb->depth_attachment.object == texture) ||
+             (fb->stencil_attachment.kind == GL_ATTACHMENT_KIND_TEXTURE &&
+              fb->stencil_attachment.object == texture))) {
+            GX2DrawDone();
+            GX2ExpandDepthBuffer(&fb->db);
+            GX2DrawDone();
+            fb->depth_needs_expand = false;
+            if (g_gl_context) g_gl_context->dirty_flags = 0xFFFFFFFFu;
         }
     }
 }
@@ -2830,6 +2999,7 @@ GLboolean gl_read_color_pixels_rgba8(GLint x, GLint y, GLsizei width, GLsizei he
     uint8_t *dst;
     GLint internal_format;
     bool staged_surface = false;
+    bool texture_attachment_read = false;
     GLuint read_fbo;
     uint32_t texture_attachment_index = 0;
 
@@ -2853,6 +3023,7 @@ GLboolean gl_read_color_pixels_rgba8(GLint x, GLint y, GLsizei width, GLsizei he
                                                              &texture->surface,
                                                              &texture_read_surface)) {
             surface = &texture_read_surface;
+            texture_attachment_read = true;
         }
     }
     internal_format = get_read_color_internal_format();
@@ -2872,7 +3043,10 @@ GLboolean gl_read_color_pixels_rgba8(GLint x, GLint y, GLsizei width, GLsizei he
     }
 
     for (GLsizei row = 0; row < height; ++row) {
-        GLint src_y = y + row;
+        GLint gl_y = y + row;
+        GLint src_y = texture_attachment_read
+                          ? (GLint)read_surface->height - 1 - gl_y
+                          : gl_y;
         if (src_y < 0 || src_y >= (GLint)read_surface->height) continue;
 
         for (GLsizei col = 0; col < width; ++col) {

@@ -27,6 +27,7 @@ typedef struct {
 } GLVAO;
 
 static GLVAO g_vaos[MAX_VAOS];
+static GLuint g_bound_vao = 0;
 static GLint g_current_attrib_i[GL33_MAX_VERTEX_ATTRIBS][4];
 static GLuint g_current_attrib_ui[GL33_MAX_VERTEX_ATTRIBS][4];
 
@@ -55,7 +56,7 @@ static GLVAO *current_vao(bool require_live) {
 
   if (!g_gl_context) return NULL;
 
-  id = g_gl_context->bound_vao;
+  id = g_bound_vao;
   if (id == 0 || id >= MAX_VAOS || !g_vaos[id].in_use) {
     if (require_live) _gl_set_error(GL_INVALID_OPERATION);
     return NULL;
@@ -223,6 +224,7 @@ static bool store_pointer(GLuint index, GLint size, GLenum type,
 
 void gl_vao_init(void) {
   memset(g_vaos, 0, sizeof(g_vaos));
+  g_bound_vao = 0;
   init_vao(&g_vaos[0], false);
 
   memset(g_current_attrib_i, 0, sizeof(g_current_attrib_i));
@@ -278,7 +280,8 @@ void _gl_DeleteVertexArrays(GLsizei n, const GLuint *arrays) {
     if (id == 0 || id >= MAX_VAOS) continue;
     if (!g_vaos[id].reserved && !g_vaos[id].in_use) continue;
 
-    if (g_gl_context && g_gl_context->bound_vao == id) {
+    if (g_gl_context && g_bound_vao == id) {
+      g_bound_vao = 0;
       g_gl_context->bound_vao = 0;
       g_gl_context->dirty_flags |= GL_DIRTY_VAO;
     }
@@ -306,6 +309,7 @@ void _gl_BindVertexArray(GLuint array) {
     init_vao(&g_vaos[array], true);
   }
 
+  g_bound_vao = array;
   g_gl_context->bound_vao = array;
   g_gl_context->dirty_flags |= GL_DIRTY_VAO;
 }
@@ -701,6 +705,10 @@ void gl_vao_unbind_buffer(GLuint buffer) {
 GLuint gl_vao_get_element_array_buffer(void) {
   GLVAO *vao = current_vao(false);
   return vao ? vao->element_array_buffer : 0;
+}
+
+GLuint gl_vao_get_bound_vertex_array(void) {
+  return g_bound_vao;
 }
 
 GLboolean gl_vao_get_attrib_state(GLuint index, gl_vao_attrib_state_t *state) {

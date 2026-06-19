@@ -72,19 +72,9 @@ add_library(gl33_gx2_core STATIC ${SOURCES})
 target_include_directories(gl33_gx2_core PRIVATE "${GX2GL_GENERATED_DIR}")
 
 # Build RPX
-add_executable(gl33_test tests/test_main.cpp tests/gles2_compile.cpp)
+add_executable(gl33_test
+    tests/piglit_main.cpp
+    tests/piglit_lite.cpp
+)
 target_link_libraries(gl33_test gl33_gx2_core wut)
 wut_create_rpx(gl33_test)
-
-add_executable(gl33_compare tests/pc/test_main.cpp)
-target_compile_definitions(gl33_compare PRIVATE GX2GL_COMPARE_WIIU=1)
-target_link_libraries(gl33_compare gl33_gx2_core wut)
-wut_create_rpx(gl33_compare)
-if(COMMAND wut_create_wuhb)
-    wut_create_wuhb(gl33_compare
-        CONTENT "${GX2GL_WUHB_CONTENT_STAGING_DIR}"
-        NAME "gx2gl Compare"
-        SHORTNAME "gx2glcmp"
-        AUTHOR "gx2gl"
-    )
-endif()

@@ -258,6 +258,8 @@ static void gl_context_init_raster_state(gl_context_t *ctx) {
   ctx->logic_op = GL_COPY;
   ctx->point_size = 1.0f;
   ctx->sample_coverage_value = 1.0f;
+  ctx->sample_mask_value = 0xFFFFFFFFu;
+  ctx->multisample_enabled = GL_TRUE;
   ctx->generate_mipmap_hint = GL_DONT_CARE;
   ctx->primitive_restart_index = 0;
   ctx->color_mask[0] = GL_TRUE;
@@ -1008,7 +1010,11 @@ void glColorMaski(GLuint index, GLboolean r, GLboolean g, GLboolean b, GLboolean
 
 void glGetIntegeri_v(GLenum target, GLuint index, GLint *data) {
     if (!g_gl_context || !data) return;
-    if (target == GL_UNIFORM_BUFFER_BINDING && index < GL33_MAX_UNIFORM_BUFFER_BINDINGS)
+    if (target == GL_SAMPLE_MASK_VALUE && index < GL33_MAX_SAMPLE_MASK_WORDS)
+        *data = (GLint)g_gl_context->sample_mask_value;
+    else if (target == GL_SAMPLE_MASK_VALUE)
+        _gl_set_error(GL_INVALID_VALUE);
+    else if (target == GL_UNIFORM_BUFFER_BINDING && index < GL33_MAX_UNIFORM_BUFFER_BINDINGS)
         *data = (GLint)g_gl_context->uniform_buffer_bindings[index].buffer;
     else if (target == GL_UNIFORM_BUFFER_START && index < GL33_MAX_UNIFORM_BUFFER_BINDINGS)
         *data = g_gl_context->uniform_buffer_bindings[index].whole_buffer
@@ -2104,50 +2110,34 @@ void glGetSynciv(GLsync sync, GLenum pname, GLsizei bufSize, GLsizei *length, GL
 
 
 void glGetMultisamplefv(GLenum pname, GLuint index, GLfloat *val) {
-    (void)val;
     if (pname != GL_SAMPLE_POSITION) {
         _gl_set_error(GL_INVALID_ENUM);
         return;
     }
-    if (index != 0) {
+    if (!g_gl_context || !val) return;
+    GLsizei samples = gl_get_draw_sample_count();
+    if (index >= (GLuint)samples) {
         _gl_set_error(GL_INVALID_VALUE);
         return;
     }
-    _gl_set_error(GL_INVALID_OPERATION);
+    if (gl_get_multisample_position(samples, index, val) != GL_TRUE) {
+        _gl_set_error(GL_INVALID_OPERATION);
+    }
 }
 void glSampleMaski(GLuint maskNumber, GLbitfield mask) {
-    (void)mask;
-    if (maskNumber != 0) {
+    if (!g_gl_context) return;
+    if (maskNumber >= GL33_MAX_SAMPLE_MASK_WORDS) {
         _gl_set_error(GL_INVALID_VALUE);
         return;
     }
-    _gl_set_error(GL_INVALID_OPERATION);
+    g_gl_context->sample_mask_value = mask;
+    g_gl_context->dirty_flags |= GL_DIRTY_MULTISAMPLE;
 }
 void glTexImage2DMultisample(GLenum target, GLsizei samples, GLenum internalformat, GLsizei w, GLsizei h, GLboolean fixed) {
-    (void)internalformat; (void)fixed;
-    if (target != GL_TEXTURE_2D_MULTISAMPLE &&
-        target != GL_PROXY_TEXTURE_2D_MULTISAMPLE) {
-        _gl_set_error(GL_INVALID_ENUM);
-        return;
-    }
-    if (samples <= 0 || w < 0 || h < 0) {
-        _gl_set_error(GL_INVALID_VALUE);
-        return;
-    }
-    _gl_set_error(GL_INVALID_OPERATION);
+    _gl_TexImage2DMultisample(target, samples, internalformat, w, h, fixed);
 }
 void glTexImage3DMultisample(GLenum target, GLsizei samples, GLenum internalformat, GLsizei w, GLsizei h, GLsizei d, GLboolean fixed) {
-    (void)internalformat; (void)fixed;
-    if (target != GL_TEXTURE_2D_MULTISAMPLE_ARRAY &&
-        target != GL_PROXY_TEXTURE_2D_MULTISAMPLE_ARRAY) {
-        _gl_set_error(GL_INVALID_ENUM);
-        return;
-    }
-    if (samples <= 0 || w < 0 || h < 0 || d < 0) {
-        _gl_set_error(GL_INVALID_VALUE);
-        return;
-    }
-    _gl_set_error(GL_INVALID_OPERATION);
+    _gl_TexImage3DMultisample(target, samples, internalformat, w, h, d, fixed);
 }
 
 

@@ -1,4 +1,5 @@
 #include "gl_context.h"
+#include "gl_framebuffer.h"
 #include "gl_vao.h"
 
 #include <stdint.h>
@@ -363,6 +364,11 @@ static bool get_context_value(GLenum pname, GetValue *value) {
   case GL_MAX_RENDERBUFFER_SIZE:
     return set_int1(value, GX2GL_MAX_TEXTURE_SIZE);
   case GL_MAX_SAMPLES:
+  case GL_MAX_COLOR_TEXTURE_SAMPLES:
+  case GL_MAX_DEPTH_TEXTURE_SAMPLES:
+    return set_int1(value, GL33_MAX_SAMPLES);
+  case GL_MAX_INTEGER_SAMPLES:
+  case GL_MAX_SAMPLE_MASK_WORDS:
     return set_int1(value, 1);
   case GL_MAX_VERTEX_UNIFORM_BLOCKS:
   case GL_MAX_FRAGMENT_UNIFORM_BLOCKS:
@@ -437,8 +443,14 @@ static bool get_context_value(GLenum pname, GetValue *value) {
     return set_bool1(value, g_gl_context->scissor_test_enabled);
   case GL_SAMPLE_ALPHA_TO_COVERAGE:
     return set_bool1(value, g_gl_context->sample_alpha_to_coverage_enabled);
+  case GL_SAMPLE_ALPHA_TO_ONE:
+    return set_bool1(value, g_gl_context->sample_alpha_to_one_enabled);
   case GL_SAMPLE_COVERAGE:
     return set_bool1(value, g_gl_context->sample_coverage_enabled);
+  case GL_SAMPLE_MASK:
+    return set_bool1(value, g_gl_context->sample_mask_enabled);
+  case GL_MULTISAMPLE:
+    return set_bool1(value, g_gl_context->multisample_enabled);
   case GL_SAMPLE_COVERAGE_INVERT:
     return set_bool1(value, g_gl_context->sample_coverage_invert);
   case GL_PRIMITIVE_RESTART:
@@ -461,7 +473,7 @@ static bool get_context_value(GLenum pname, GetValue *value) {
   case GL_ELEMENT_ARRAY_BUFFER_BINDING:
     return set_int1(value, (GLint)gl_vao_get_element_array_buffer());
   case GL_VERTEX_ARRAY_BINDING:
-    return set_int1(value, (GLint)g_gl_context->bound_vao);
+    return set_int1(value, (GLint)gl_vao_get_bound_vertex_array());
   case GL_UNIFORM_BUFFER_BINDING:
     return set_int1(value, (GLint)g_gl_context->bound_uniform_buffer);
   case GL_COPY_READ_BUFFER_BINDING:
@@ -480,6 +492,13 @@ static bool get_context_value(GLenum pname, GetValue *value) {
     return set_int1(value, (GLint)g_gl_context->bound_texture_3d[unit]);
   case GL_TEXTURE_BINDING_CUBE_MAP:
     return set_int1(value, (GLint)g_gl_context->bound_texture_cube[unit]);
+  case GL_TEXTURE_BINDING_2D_MULTISAMPLE:
+    return set_int1(value,
+                    (GLint)g_gl_context->bound_texture_2d_multisample[unit]);
+  case GL_TEXTURE_BINDING_2D_MULTISAMPLE_ARRAY:
+    return set_int1(
+        value,
+        (GLint)g_gl_context->bound_texture_2d_multisample_array[unit]);
   case GL_TEXTURE_BINDING_BUFFER:
     return set_int1(value, (GLint)g_gl_context->bound_texture_buffer);
   case GL_SAMPLER_BINDING:
@@ -564,6 +583,12 @@ static bool get_context_value(GLenum pname, GetValue *value) {
     return set_float1(value, g_gl_context->polygon_offset_units);
   case GL_SAMPLE_COVERAGE_VALUE:
     return set_float1(value, g_gl_context->sample_coverage_value);
+  case GL_SAMPLE_BUFFERS: {
+    GLsizei samples = gl_get_draw_sample_count();
+    return set_int1(value, samples > 0 ? 1 : 0);
+  }
+  case GL_SAMPLES:
+    return set_int1(value, gl_get_draw_sample_count());
 
   case GL_DEPTH_WRITEMASK:
     return set_bool1(value, g_gl_context->depth_mask);

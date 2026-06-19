@@ -268,6 +268,8 @@ typedef struct {
 #define GL33_MAX_COMBINED_TEXTURE_IMAGE_UNITS 48
 #define GL33_MAX_UNIFORM_BUFFER_BINDINGS 36
 #define GL33_MAX_TRANSFORM_FEEDBACK_BUFFER_BINDINGS 4
+#define GL33_MAX_SAMPLES 8
+#define GL33_MAX_SAMPLE_MASK_WORDS 1
 #define GL33_MAX_TEXTURE_UNITS GL33_MAX_COMBINED_TEXTURE_IMAGE_UNITS
 
 typedef struct {
@@ -295,6 +297,8 @@ typedef struct {
     GLuint bound_texture_2d[GL33_MAX_TEXTURE_UNITS];
     GLuint bound_texture_3d[GL33_MAX_TEXTURE_UNITS];
     GLuint bound_texture_cube[GL33_MAX_TEXTURE_UNITS];
+    GLuint bound_texture_2d_multisample[GL33_MAX_TEXTURE_UNITS];
+    GLuint bound_texture_2d_multisample_array[GL33_MAX_TEXTURE_UNITS];
     GLuint bound_sampler[GL33_MAX_TEXTURE_UNITS];
     GLuint bound_renderbuffer;
     GLuint bound_framebuffer;
@@ -321,10 +325,13 @@ typedef struct {
     GLfloat clear_color[4], clear_depth;
     GLint clear_stencil;
     GLboolean depth_test_enabled, stencil_test_enabled, blend_enabled, cull_face_enabled, scissor_test_enabled, sample_coverage_enabled;
-    GLboolean sample_alpha_to_coverage_enabled, color_logic_op_enabled;
+    GLboolean multisample_enabled, sample_alpha_to_coverage_enabled;
+    GLboolean sample_alpha_to_one_enabled, sample_mask_enabled;
+    GLboolean color_logic_op_enabled;
     GLboolean primitive_restart_enabled, rasterizer_discard_enabled;
     GLboolean polygon_offset_point_enabled, polygon_offset_line_enabled, polygon_offset_fill_enabled, sample_coverage_invert;
     GLfloat sample_coverage_value;
+    GLuint sample_mask_value;
     GLuint primitive_restart_index;
     GLuint active_query_samples_passed;
     GLuint active_query_any_samples_passed;

@@ -20,17 +20,15 @@ This project is not production ready yet. The goal is OpenGL 3.3 core behavior o
 
 ## Testing
 
-Build and run the desktop OpenGL 3.3 reference suite with:
+`gl33_test.rpx` is the Piglit runner. Build it with:
 
 ```powershell
-cmake -S tests/pc -B build_pc -G Ninja
-cmake --build build_pc
-ctest --test-dir build_pc --output-on-failure
+cmake --build build_shader_msys --target gl33_test
 ```
 
-The `gl33_compare` Wii U target runs the same cases through gx2gl. It writes
-`gx2gl_results.txt`, `gx2gl_done.flag`, and the diagnostic framebuffer image
-to the SD card root.
+The runner writes the Piglit summary to `gx2gl_results.txt`, individual case
+results to `gx2gl_piglit.txt`, and completion to `gx2gl_done.flag` on the SD
+card root. The old project-specific test suite is not part of the runner.
 
 ## Performance
 

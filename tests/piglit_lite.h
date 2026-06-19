@@ -1,0 +1,26 @@
+#ifndef GX2GL_TESTS_PIGLIT_LITE_H
+#define GX2GL_TESTS_PIGLIT_LITE_H
+
+typedef void (*PiglitReportFunc)(const char *fmt, ...);
+
+typedef enum {
+    PIGLIT_RESULT_PASS,
+    PIGLIT_RESULT_FAIL,
+    PIGLIT_RESULT_SKIP,
+} PiglitResult;
+
+typedef struct {
+    unsigned int total;
+    unsigned int pass;
+    unsigned int fail;
+    unsigned int skip;
+} PiglitRunStats;
+
+typedef void (*PiglitResultFunc)(const char *name, PiglitResult result,
+                                 const char *detail, void *user_data);
+
+PiglitRunStats run_piglit_tests(PiglitReportFunc report,
+                                PiglitResultFunc result_func,
+                                void *user_data);
+
+#endif

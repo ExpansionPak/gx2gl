@@ -44,6 +44,13 @@ void _gl_SamplerParameterf(GLuint sampler, GLenum pname, GLfloat param);
 void _gl_GetSamplerParameteriv(GLuint sampler, GLenum pname, GLint *params);
 void _gl_GetSamplerParameterfv(GLuint sampler, GLenum pname, GLfloat *params);
 void _gl_GenerateMipmap(GLenum target);
+void _gl_TexImage2DMultisample(GLenum target, GLsizei samples,
+                               GLenum internalformat, GLsizei width,
+                               GLsizei height, GLboolean fixedsamplelocations);
+void _gl_TexImage3DMultisample(GLenum target, GLsizei samples,
+                               GLenum internalformat, GLsizei width,
+                               GLsizei height, GLsizei depth,
+                               GLboolean fixedsamplelocations);
 
 void _gl_TexImage1D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLint border, GLenum format, GLenum type, const GLvoid *pixels);
 void _gl_TexSubImage1D(GLenum target, GLint level, GLint xoffset, GLsizei width, GLenum format, GLenum type, const GLvoid *pixels);
@@ -64,6 +71,8 @@ void gl_bind_textures(void);
 GX2Texture *gl_get_gx2_texture(GLuint id);
 GLint gl_get_texture_internal_format(GLuint id);
 GLenum gl_get_texture_target(GLuint id);
+GLsizei gl_get_texture_samples(GLuint id);
+GLboolean gl_get_texture_fixed_sample_locations(GLuint id);
 GX2Sampler *gl_get_gx2_sampler(GLuint id, bool use_sampler_obj);
 
 #ifdef __cplusplus
