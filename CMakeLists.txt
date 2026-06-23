@@ -63,6 +63,7 @@ set(SOURCES
     src/core/gl_vao.cpp
     src/core/gl_framebuffer.cpp
     src/core/gl_draw.cpp
+    src/core/gl_query.cpp
     src/core/gl_get.cpp
     src/state/gl_state.cpp
     src/mem/gl_mem.cpp
