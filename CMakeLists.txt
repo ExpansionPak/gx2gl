@@ -88,6 +88,7 @@ target_include_directories(gl33_gx2_core PRIVATE "${GX2GL_GENERATED_DIR}")
 add_executable(gl33_test
     tests/piglit_main.cpp
     tests/piglit_lite.cpp
+    tests/piglit_manifest.cpp
 )
 target_link_libraries(gl33_test gl33_gx2_core wut)
 wut_create_rpx(gl33_test)

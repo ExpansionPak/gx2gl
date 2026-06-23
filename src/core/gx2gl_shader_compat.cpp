@@ -597,6 +597,80 @@ static std::string with_layout_integer(const std::string &line, const char *key,
          line.substr(first);
 }
 
+static bool source_has_layout_key(const std::string &source, const char *key) {
+  size_t cursor = 0;
+
+  while ((cursor = source.find("layout", cursor)) != std::string::npos) {
+    size_t open = source.find('(', cursor + strlen("layout"));
+    size_t close = open == std::string::npos ? std::string::npos
+                                             : source.find(')', open + 1u);
+    if (open != std::string::npos && close != std::string::npos) {
+      std::string body = source.substr(open + 1u, close - open - 1u);
+      for (size_t body_cursor = 0; body_cursor < body.size(); ++body_cursor) {
+        if (layout_key_matches(body, body_cursor, key)) {
+          return true;
+        }
+      }
+      cursor = close + 1u;
+    } else {
+      cursor += strlen("layout");
+    }
+  }
+  return false;
+}
+
+static std::string add_extension_after_version(const std::string &source,
+                                               const char *extension) {
+  std::string directive = std::string("#extension ") + extension +
+                          " : enable";
+  size_t line_start = 0;
+
+  if (source.find(directive) != std::string::npos) {
+    return source;
+  }
+
+  while (line_start < source.size()) {
+    size_t line_end = source.find('\n', line_start);
+    size_t line_length = line_end == std::string::npos
+                             ? source.size() - line_start
+                             : line_end - line_start;
+    std::string line = source.substr(line_start, line_length);
+    if (!line.empty() && line[line.size() - 1] == '\r') {
+      line.resize(line.size() - 1);
+    }
+    if (starts_with_keyword(line, skip_whitespace(line, 0), "#version")) {
+      size_t insert_at = line_end == std::string::npos
+                             ? source.size()
+                             : line_end + 1u;
+      return source.substr(0, insert_at) + directive + "\n" +
+             source.substr(insert_at);
+    }
+    if (line_end == std::string::npos) {
+      break;
+    }
+    line_start = line_end + 1u;
+  }
+
+  return directive + "\n" + source;
+}
+
+static std::string add_cafeglsl_layout_extensions(
+    const std::string &source) {
+  std::string result = source;
+
+  if (source_has_layout_key(result, "location")) {
+    result = add_extension_after_version(result,
+                                         "GL_ARB_separate_shader_objects");
+    result = add_extension_after_version(result,
+                                         "GL_ARB_explicit_attrib_location");
+  }
+  if (source_has_layout_key(result, "binding")) {
+    result = add_extension_after_version(result,
+                                         "GL_ARB_shading_language_420pack");
+  }
+  return result;
+}
+
 static bool collect_interface_declarations(
     const char *source, GLenum shader_type, const char *storage,
     std::vector<CollectedInterfaceDecl> *decls, char *info_log_out,
@@ -878,6 +952,7 @@ static char *lower_source_for_cafeglsl(const char *source,
   if (shader_type == GL_FRAGMENT_SHADER) {
     rewritten_source = normalize_fragment_output_channels(rewritten_source);
   }
+  rewritten_source = add_cafeglsl_layout_extensions(rewritten_source);
   return copy_source(rewritten_source.c_str());
 }
 

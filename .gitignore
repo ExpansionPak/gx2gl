@@ -98,6 +98,7 @@ id_ecdsa*
 # Test / coverage
 coverage/
 coverage.xml
+dist/
 
 # Misc
 *.log.*

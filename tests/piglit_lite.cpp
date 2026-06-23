@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "gl/gl.h"
+#include "piglit_manifest.h"
 
 namespace {
 
@@ -1154,6 +1155,14 @@ PiglitRunStats run_piglit_tests(PiglitReportFunc report,
                         user_data);
         }
     }
+
+    const PiglitRunStats manifest =
+        run_piglit_manifest_tests(report, result_func, continue_func,
+                                  user_data);
+    stats.total += manifest.total;
+    stats.pass += manifest.pass;
+    stats.fail += manifest.fail;
+    stats.skip += manifest.skip;
 
     return stats;
 }
