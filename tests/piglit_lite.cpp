@@ -351,6 +351,122 @@ cleanup:
     return ok;
 }
 
+static bool expect_error(PiglitReportFunc report, const char *operation,
+                         GLenum expected);
+
+static bool run_unqualified_varying_link(PiglitReportFunc report) {
+    static const char *vertex_source =
+        "#version 330 core\n"
+        "layout(location = 0) in vec2 aPosition;\n"
+        "out vec2 vTexCoord;\n"
+        "void main() {\n"
+        "    vTexCoord = aPosition * 0.5 + 0.5;\n"
+        "    gl_Position = vec4(aPosition, 0.0, 1.0);\n"
+        "}\n";
+    static const char *fragment_source =
+        "#version 330 core\n"
+        "in vec2 vTexCoord;\n"
+        "layout(location = 0) out vec4 FragColor;\n"
+        "void main() { FragColor = vec4(vTexCoord, 0.0, 1.0); }\n";
+    GLuint vertex_shader = 0;
+    GLuint fragment_shader = 0;
+    GLuint program = 0;
+    bool passed = false;
+
+    clear_gl_errors();
+    vertex_shader = compile_shader(report, GL_VERTEX_SHADER, vertex_source,
+                                   "spec/glsl-1.30/link-name-varying");
+    fragment_shader = compile_shader(report, GL_FRAGMENT_SHADER,
+                                     fragment_source,
+                                     "spec/glsl-1.30/link-name-varying");
+    if (!vertex_shader || !fragment_shader) goto cleanup;
+
+    program = link_program(report, vertex_shader, fragment_shader,
+                           "spec/glsl-1.30/link-name-varying");
+    passed = program != 0 && expect_error(report, "link-name-varying",
+                                          GL_NO_ERROR);
+
+cleanup:
+    if (program) glDeleteProgram(program);
+    if (vertex_shader) glDeleteShader(vertex_shader);
+    if (fragment_shader) glDeleteShader(fragment_shader);
+    return passed;
+}
+
+static bool pixel_matches(const GLubyte *pixel, GLubyte r, GLubyte g,
+                          GLubyte b, GLubyte a) {
+    return pixel[0] == r && pixel[1] == g && pixel[2] == b && pixel[3] == a;
+}
+
+static bool run_framebuffer_texture_layer_2d_array(PiglitReportFunc report) {
+    GLubyte initial[2 * 4 * 4 * 4];
+    GLubyte pixel[4] = {0, 0, 0, 0};
+    GLuint texture = 0;
+    GLuint fbo = 0;
+    GLint layer = -1;
+    bool passed = false;
+
+    clear_gl_errors();
+    for (int i = 0; i < 4 * 4; ++i) {
+        initial[i * 4 + 0] = 255;
+        initial[i * 4 + 1] = 0;
+        initial[i * 4 + 2] = 0;
+        initial[i * 4 + 3] = 255;
+    }
+    for (int i = 4 * 4; i < 2 * 4 * 4; ++i) {
+        initial[i * 4 + 0] = 0;
+        initial[i * 4 + 1] = 0;
+        initial[i * 4 + 2] = 255;
+        initial[i * 4 + 3] = 255;
+    }
+
+    glGenTextures(1, &texture);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, texture);
+    glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA8, 4, 4, 2, 0, GL_RGBA,
+                 GL_UNSIGNED_BYTE, initial);
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, texture,
+                              0, 1);
+    glGetFramebufferAttachmentParameteriv(
+        GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+        GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER, &layer);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE ||
+        layer != 1 || !expect_error(report, "2d-array layer attach",
+                                    GL_NO_ERROR)) {
+        goto cleanup;
+    }
+
+    glViewport(0, 0, 4, 4);
+    glDisable(GL_SCISSOR_TEST);
+    glClearColor(0.0f, 1.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+    if (!expect_error(report, "2d-array layer clear/read", GL_NO_ERROR) ||
+        !pixel_matches(pixel, 0, 255, 0, 255)) {
+        report("[FAIL] Piglit framebuffer layer 1 read {%u,%u,%u,%u}.\n",
+               pixel[0], pixel[1], pixel[2], pixel[3]);
+        goto cleanup;
+    }
+
+    glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, texture,
+                              0, 0);
+    glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+    passed = expect_error(report, "2d-array layer isolation", GL_NO_ERROR) &&
+             pixel_matches(pixel, 255, 0, 0, 255);
+    if (!passed) {
+        report("[FAIL] Piglit framebuffer layer 0 read {%u,%u,%u,%u}.\n",
+               pixel[0], pixel[1], pixel[2], pixel[3]);
+    }
+
+cleanup:
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+    if (fbo) glDeleteFramebuffers(1, &fbo);
+    if (texture) glDeleteTextures(1, &texture);
+    return passed;
+}
+
 /*
  * The API cases below are adapted from Piglit's
  * tests/spec/arb_texture_multisample tests. Piglit's MIT license applies.
@@ -966,6 +1082,9 @@ struct PiglitApiCase {
 
 static const PiglitApiCase kApiCases[] = {
     {"spec/gl-3.3/get-core-profile-identity", run_get_core_profile_queries},
+    {"spec/glsl-1.30/link-name-varying", run_unqualified_varying_link},
+    {"spec/arb_framebuffer_object/framebuffer-texture-layer-2d-array",
+     run_framebuffer_texture_layer_2d_array},
     {"draw/constant-white-triangle", run_shadered_triangle_probe},
     {"spec/arb_texture_multisample/minmax", run_multisample_minmax},
     {"spec/arb_texture_multisample/sample-mask", run_multisample_sample_mask},

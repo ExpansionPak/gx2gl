@@ -544,6 +544,8 @@ static uint32_t attachment_view_slice(const GLAttachmentRef *attachment) {
     if (!attachment || attachment->kind != GL_ATTACHMENT_KIND_TEXTURE) return 0u;
     if (attachment->layered) return 0u;
     if (attachment->textarget == GL_TEXTURE_3D ||
+        attachment->textarget == GL_TEXTURE_1D_ARRAY ||
+        attachment->textarget == GL_TEXTURE_2D_ARRAY ||
         attachment->textarget == GL_TEXTURE_2D_MULTISAMPLE_ARRAY)
         return (uint32_t)attachment->layer;
     return cube_map_face_slice(attachment->textarget);
@@ -556,6 +558,10 @@ static uint32_t texture_level_depth_for_attachment(const GLAttachmentRef *attach
         return texture_level_extent(surface->depth, attachment->level);
     }
     if (attachment->textarget == GL_TEXTURE_2D_MULTISAMPLE_ARRAY) {
+        return surface->depth ? surface->depth : 1u;
+    }
+    if (attachment->textarget == GL_TEXTURE_1D_ARRAY ||
+        attachment->textarget == GL_TEXTURE_2D_ARRAY) {
         return surface->depth ? surface->depth : 1u;
     }
     if (attachment->textarget == GL_TEXTURE_CUBE_MAP) {
@@ -1434,6 +1440,8 @@ void _gl_FramebufferTextureLayer(GLenum target, GLenum attachment, GLuint textur
         }
         texture_target = gl_get_texture_target(texture);
         if (texture_target != GL_TEXTURE_3D &&
+            texture_target != GL_TEXTURE_1D_ARRAY &&
+            texture_target != GL_TEXTURE_2D_ARRAY &&
             texture_target != GL_TEXTURE_2D_MULTISAMPLE_ARRAY) {
             _gl_set_error(GL_INVALID_OPERATION);
             return;
@@ -2960,6 +2968,8 @@ void _gl_GetFramebufferAttachmentParameteriv(GLenum target, GLenum attachment, G
         if (ref->kind != GL_ATTACHMENT_KIND_TEXTURE) { _gl_set_error(GL_INVALID_ENUM); return; }
         *params = !ref->layered &&
                           (ref->textarget == GL_TEXTURE_3D ||
+                           ref->textarget == GL_TEXTURE_1D_ARRAY ||
+                           ref->textarget == GL_TEXTURE_2D_ARRAY ||
                            ref->textarget == GL_TEXTURE_2D_MULTISAMPLE_ARRAY)
                       ? ref->layer
                       : 0;
