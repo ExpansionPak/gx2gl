@@ -52,6 +52,8 @@ file(WRITE "${GX2GL_PROC_TABLE}" "${GX2GL_PROC_TABLE_TEXT}")
 # Source files
 set(SOURCES
     src/core/gl_context.cpp
+    src/core/gl_dispatch.cpp
+    src/core/gl_entrypoints.cpp
     src/core/gl_buffer.cpp
     src/core/gl_buffer_compat.cpp
     src/core/gl_texture.cpp
