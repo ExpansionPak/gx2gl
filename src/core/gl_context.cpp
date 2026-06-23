@@ -1055,8 +1055,7 @@ void glGetIntegeri_v(GLenum target, GLuint index, GLint *data) {
         _gl_set_error(GL_INVALID_ENUM);
 }
 void glGetInteger64v(GLenum pname, GLint64 *data) {
-    if (!data) return;
-    GLint v = 0; glGetIntegerv(pname, &v); *data = (GLint64)v;
+    _gl_GetInteger64v(pname, data);
 }
 void glGetInteger64i_v(GLenum target, GLuint index, GLint64 *data) {
     gl_uniform_buffer_binding_t *binding;

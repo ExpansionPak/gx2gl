@@ -224,9 +224,9 @@ static const uint32_t g_extension_count =
 static const char g_vendor[] = "Wii U Homebrew";
 static const char g_renderer[] = "gx2gl on AMD Latte";
 static const char g_version[] =
-    "0.1.0 gx2gl (OpenGL 3.3 core target; not Khronos-conformant)";
+    "3.3 gx2gl 0.1.0 (Core Profile; not Khronos-conformant)";
 static const char g_sl_version[] =
-    "0.1 gx2gl-CafeGLSL (vertex/fragment runtime path)";
+    "3.30 gx2gl-CafeGLSL (vertex/fragment runtime path)";
 
 static unsigned active_texture_unit(void) {
   if (!g_gl_context) return 0;
@@ -325,13 +325,13 @@ static bool get_context_value(GLenum pname, GetValue *value) {
 
   switch (pname) {
   case GL_MAJOR_VERSION:
-    return set_int1(value, 0);
+    return set_int1(value, 3);
   case GL_MINOR_VERSION:
-    return set_int1(value, 1);
+    return set_int1(value, 3);
   case GL_CONTEXT_FLAGS:
     return set_int1(value, 0);
   case GL_CONTEXT_PROFILE_MASK:
-    return set_int1(value, 0);
+    return set_int1(value, GL_CONTEXT_CORE_PROFILE_BIT);
   case GL_NUM_EXTENSIONS:
     return set_int1(value, (GLint)g_extension_count);
   case GL_VENDOR:
@@ -704,6 +704,22 @@ static void write_integer_values(const GetValue *value, GLint *data) {
   }
 }
 
+static void write_integer64_values(const GetValue *value, GLint64 *data) {
+  for (uint32_t i = 0; i < value->count; ++i) {
+    switch (value->type) {
+    case GET_VALUE_BOOL:
+      data[i] = value->data.b[i] ? GL_TRUE : GL_FALSE;
+      break;
+    case GET_VALUE_INT:
+      data[i] = (GLint64)value->data.i[i];
+      break;
+    case GET_VALUE_FLOAT:
+      data[i] = (GLint64)float_to_int(value->data.f[i]);
+      break;
+    }
+  }
+}
+
 static void write_float_values(const GetValue *value, GLfloat *data) {
   for (uint32_t i = 0; i < value->count; ++i) {
     switch (value->type) {
@@ -782,6 +798,14 @@ void _gl_GetIntegerv(GLenum pname, GLint *data) {
   if (!data) return;
   if (!read_value(pname, &value)) return;
   write_integer_values(&value, data);
+}
+
+void _gl_GetInteger64v(GLenum pname, GLint64 *data) {
+  GetValue value;
+
+  if (!data) return;
+  if (!read_value(pname, &value)) return;
+  write_integer64_values(&value, data);
 }
 
 void _gl_GetFloatv(GLenum pname, GLfloat *data) {

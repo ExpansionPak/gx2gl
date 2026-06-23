@@ -363,6 +363,7 @@ const GLubyte* _gl_GetStringi(GLenum name, GLuint index);
 void _gl_GetBooleanv(GLenum pname, GLboolean *params);
 void _gl_GetDoublev(GLenum pname, GLdouble *params);
 void _gl_GetIntegerv(GLenum pname, GLint *params);
+void _gl_GetInteger64v(GLenum pname, GLint64 *params);
 void _gl_GetFloatv(GLenum pname, GLfloat *params);
 void _gl_GenQueries(GLsizei n, GLuint *ids);
 void _gl_DeleteQueries(GLsizei n, const GLuint *ids);
