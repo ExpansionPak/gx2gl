@@ -713,20 +713,6 @@ void glDrawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLenum type, 
 void glMultiDrawArrays(GLenum mode, const GLint *first, const GLsizei *count, GLsizei dc) { _gl_MultiDrawArrays(mode, first, count, dc); }
 void glMultiDrawElements(GLenum mode, const GLsizei *count, GLenum type, const GLvoid *const *i, GLsizei dc) { _gl_MultiDrawElements(mode, count, type, i, dc); }
 void glMultiDrawElementsBaseVertex(GLenum mode, const GLsizei *count, GLenum type, const GLvoid *const *i, GLsizei dc, const GLint *bv) { _gl_MultiDrawElementsBaseVertex(mode, count, type, i, dc, bv); }
-
-
-void glCopyBufferSubData(GLenum readTarget, GLenum writeTarget, GLintptr readOffset, GLintptr writeOffset, GLsizeiptr size) {
-    gl_buffer_copy_sub_data(readTarget, writeTarget, readOffset, writeOffset, size);
-}
-
-void glGetBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, GLvoid *data) {
-    gl_buffer_get_sub_data(target, offset, size, data);
-}
-void glGetPointerv(GLenum pname, GLvoid **params) {
-    (void)pname;
-    if (params) *params = NULL;
-    _gl_set_error(GL_INVALID_OPERATION);
-}
 #ifdef __cplusplus
 }
 #endif

@@ -53,6 +53,7 @@ file(WRITE "${GX2GL_PROC_TABLE}" "${GX2GL_PROC_TABLE_TEXT}")
 set(SOURCES
     src/core/gl_context.cpp
     src/core/gl_buffer.cpp
+    src/core/gl_buffer_compat.cpp
     src/core/gl_texture.cpp
     src/core/gl_shader.cpp
     src/core/gx2gl_cafeglsl.cpp
