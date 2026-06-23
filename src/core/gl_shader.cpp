@@ -1878,6 +1878,34 @@ static void bind_program_uniform_blocks(GLProgram *prog) {
   }
 }
 
+static void bind_direct_uniform_registers(const uint8_t *shadow,
+                                          uint32_t shadow_size,
+                                          bool pixel_stage) {
+  uint32_t stack_words[64];
+  uint32_t *words;
+  uint32_t word_count;
+
+  if (!shadow || shadow_size == 0) return;
+  word_count = shadow_size / sizeof(uint32_t);
+  words = word_count <= (uint32_t)(sizeof(stack_words) / sizeof(stack_words[0]))
+              ? stack_words
+              : (uint32_t *)malloc(shadow_size);
+  if (!words) return;
+
+  for (uint32_t i = 0; i < word_count; ++i) {
+    uint32_t word;
+    memcpy(&word, shadow + i * sizeof(uint32_t), sizeof(word));
+    words[i] = CPU_TO_GPU_32(word);
+  }
+
+  if (pixel_stage) {
+    GX2SetPixelUniformReg(0, word_count, words);
+  } else {
+    GX2SetVertexUniformReg(0, word_count, words);
+  }
+  if (words != stack_words) free(words);
+}
+
 static uint32_t attrib_mask_from_size(GLint size) {
   switch (size) {
   case 1:
@@ -2185,7 +2213,14 @@ void gl_bind_program_fetch_shader(void) {
 
   for (uint32_t i = 0; i < buffer_count; ++i) {
     if (!buffers[i].in_use) continue;
-    GX2RSetAttributeBuffer(buffers[i].gx2r, buffers[i].gx2_index, buffers[i].stride, 0);
+    DCFlushRange((void *)buffers[i].data_ptr, buffers[i].size);
+    GX2Invalidate(GX2_INVALIDATE_MODE_CPU_ATTRIBUTE_BUFFER,
+                  (void *)buffers[i].data_ptr,
+                  buffers[i].size);
+    GX2SetAttribBuffer(buffers[i].gx2_index,
+                       buffers[i].size,
+                       buffers[i].stride,
+                       buffers[i].data_ptr);
   }
 }
 
@@ -3235,6 +3270,14 @@ void gl_bind_shaders(void) {
   GX2SetShaderMode(choose_shader_mode(prog));
   if (prog->group->vertexShader) GX2SetVertexShader(prog->group->vertexShader);
   if (prog->group->pixelShader)  GX2SetPixelShader(prog->group->pixelShader);
+  if (!stage_uses_virtual_uniform_block(prog, false)) {
+    bind_direct_uniform_registers(prog->vs_direct_uniform_shadow,
+                                  prog->vs_direct_uniform_shadow_size, false);
+  }
+  if (!stage_uses_virtual_uniform_block(prog, true)) {
+    bind_direct_uniform_registers(prog->ps_direct_uniform_shadow,
+                                  prog->ps_direct_uniform_shadow_size, true);
+  }
   bind_program_uniform_blocks(prog);
 }
 
