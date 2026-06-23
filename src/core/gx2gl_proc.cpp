@@ -1,5 +1,6 @@
 #include "gx2gl/proc.h"
 #include "gx2gl/gx2gl_sdl.h"
+#include "gx2gl/present.h"
 
 #include "gl/gl.h"
 
@@ -85,6 +86,8 @@ static const GX2GLProcEntry kGX2GLAliasProcTable[] = {
     {"GX2GL_GetSwapInterval", reinterpret_cast<GX2GL_Proc>(GX2GL_GetSwapInterval)},
     {"GX2GL_LoadLibrary", reinterpret_cast<GX2GL_Proc>(GX2GL_LoadLibrary)},
     {"GX2GL_MakeCurrent", reinterpret_cast<GX2GL_Proc>(GX2GL_MakeCurrent)},
+    {"GX2GL_MirrorTVToDRC", reinterpret_cast<GX2GL_Proc>(GX2GL_MirrorTVToDRC)},
+    {"GX2GL_MirrorTVToGamePad", reinterpret_cast<GX2GL_Proc>(GX2GL_MirrorTVToGamePad)},
     {"GX2GL_Present", reinterpret_cast<GX2GL_Proc>(GX2GL_Present)},
     {"GX2GL_SetAutomaticDRCEnabled", reinterpret_cast<GX2GL_Proc>(GX2GL_SetAutomaticDRCEnabled)},
     {"GX2GL_SetDefaultFramebufferTargetDRC", reinterpret_cast<GX2GL_Proc>(GX2GL_SetDefaultFramebufferTargetDRC)},

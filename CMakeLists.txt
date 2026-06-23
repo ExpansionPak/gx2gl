@@ -57,6 +57,7 @@ set(SOURCES
     src/core/gl_shader.cpp
     src/core/gx2gl_cafeglsl.cpp
     src/core/gx2gl_shader_compat.cpp
+    src/core/gx2gl_present.cpp
     src/core/gx2gl_proc.cpp
     src/core/gx2gl_sdl.cpp
     src/core/gl_vao.cpp

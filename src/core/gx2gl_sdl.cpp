@@ -3,10 +3,10 @@
 #include "core/gl_context.h"
 #include "core/gl_framebuffer.h"
 #include "gx2gl/proc.h"
+#include "gx2gl/present.h"
 #include "mem/gl_mem.h"
 
 #include <gx2/event.h>
-#include <gx2/swap.h>
 #include <proc_ui/procui.h>
 #include <whb/gfx.h>
 #include <whb/proc.h>
@@ -25,6 +25,7 @@ typedef struct {
     int gfx_owned;
     int gfx_ready;
     int mem_ready;
+    int defaults_ready;
     int frame_active;
     int frame_tv_active;
     int frame_drc_active;
@@ -36,8 +37,20 @@ typedef struct {
 
 static GX2GLSdlState g_gx2gl_sdl;
 
+static void gx2gl_init_defaults(void)
+{
+    if (g_gx2gl_sdl.defaults_ready) return;
+
+    g_gx2gl_sdl.swap_interval = 1;
+    g_gx2gl_sdl.automatic_drc_enabled = 1;
+    g_gx2gl_sdl.default_target_drc = 0;
+    g_gx2gl_sdl.defaults_ready = 1;
+}
+
 static GX2GLRenderTarget gx2gl_default_render_target(void)
 {
+    gx2gl_init_defaults();
+
     if (g_gx2gl_sdl.default_target_drc) {
         if (WHBGfxGetDRCColourBuffer()) return GX2GL_RENDER_TARGET_DRC;
         if (WHBGfxGetTVColourBuffer()) return GX2GL_RENDER_TARGET_TV;
@@ -63,6 +76,8 @@ static int gx2gl_ensure_proc_ready(void)
 
 static int gx2gl_ensure_graphics_ready(void)
 {
+    gx2gl_init_defaults();
+
     if (gx2gl_ensure_proc_ready() != 0) return -1;
 
     if (!g_gx2gl_sdl.gfx_ready) {
@@ -141,6 +156,7 @@ int GX2GL_LoadLibrary(const char *path)
 {
     (void)path;
 
+    gx2gl_init_defaults();
     if (gx2gl_ensure_graphics_ready() != 0) return -1;
 
     g_gx2gl_sdl.library_refs += 1;
@@ -238,12 +254,19 @@ void GX2GL_DeleteContext(GX2GL_Context context)
 
 int GX2GL_Present(void)
 {
+    int mirror_to_drc;
+
+    gx2gl_init_defaults();
     if (!g_gl_context || g_gx2gl_sdl.library_refs <= 0) return -1;
     if (GX2GL_BeginFrame() != 0) return -1;
 
     _gl_Flush();
-    if (!g_gx2gl_sdl.default_target_drc &&
-        g_gx2gl_sdl.automatic_drc_enabled) {
+    mirror_to_drc = !g_gx2gl_sdl.default_target_drc &&
+                    g_gx2gl_sdl.automatic_drc_enabled &&
+                    g_gx2gl_sdl.frame_tv_active;
+    if (mirror_to_drc) {
+        WHBGfxFinishRenderTV();
+        g_gx2gl_sdl.frame_tv_active = 0;
         GX2GL_CopyToDRC();
     }
     gx2gl_finish_frame();
@@ -252,6 +275,7 @@ int GX2GL_Present(void)
 
 int GX2GL_SetSwapInterval(int interval)
 {
+    gx2gl_init_defaults();
     if (interval < -1 || interval > 1) return -1;
     g_gx2gl_sdl.swap_interval = interval;
     return 0;
@@ -259,23 +283,28 @@ int GX2GL_SetSwapInterval(int interval)
 
 int GX2GL_GetSwapInterval(void)
 {
+    gx2gl_init_defaults();
     return g_gx2gl_sdl.swap_interval;
 }
 
 int GX2GL_SetAutomaticDRCEnabled(int enabled)
 {
+    gx2gl_init_defaults();
     g_gx2gl_sdl.automatic_drc_enabled = enabled ? 1 : 0;
     return 0;
 }
 
 int GX2GL_GetAutomaticDRCEnabled(void)
 {
+    gx2gl_init_defaults();
     return g_gx2gl_sdl.automatic_drc_enabled;
 }
 
 int GX2GL_SetDefaultFramebufferTargetDRC(int enabled)
 {
     int new_target = enabled ? 1 : 0;
+
+    gx2gl_init_defaults();
     if (g_gx2gl_sdl.default_target_drc == new_target) return 0;
 
     g_gx2gl_sdl.default_target_drc = new_target;
@@ -289,24 +318,16 @@ int GX2GL_SetDefaultFramebufferTargetDRC(int enabled)
 
 int GX2GL_GetDefaultFramebufferTargetDRC(void)
 {
+    gx2gl_init_defaults();
     return g_gx2gl_sdl.default_target_drc;
 }
 
 int GX2GL_CopyToDRC(void)
 {
-    GX2ColorBuffer *tv_color;
-
+    gx2gl_init_defaults();
     if (!g_gl_context || g_gx2gl_sdl.library_refs <= 0) return -1;
     if (gx2gl_ensure_graphics_ready() != 0) return -1;
-
-    tv_color = WHBGfxGetTVColourBuffer();
-    if (!tv_color || !WHBGfxGetDRCColourBuffer()) return -1;
-
-    _gl_Flush();
-    GX2DrawDone();
-    GX2CopyColorBufferToScanBuffer(tv_color, GX2_SCAN_TARGET_DRC);
-    GX2Flush();
-    return 0;
+    return GX2GL_MirrorTVToDRC();
 }
 
 void* GX2GL_GetSDLProcAddress(const char *proc)
