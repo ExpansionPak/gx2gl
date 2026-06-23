@@ -71,6 +71,7 @@ set(SOURCES
     src/core/gl_program_interface.cpp
     src/core/gl_state_compat.cpp
     src/core/gl_texture_compat.cpp
+    src/core/gl_framebuffer_compat.cpp
     src/core/gl_get.cpp
     src/state/gl_state.cpp
     src/mem/gl_mem.cpp
