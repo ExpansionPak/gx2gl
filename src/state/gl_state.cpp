@@ -20,6 +20,7 @@ typedef struct {
   int8_t y[8];
 } GX2GLAASampleLoc;
 
+void GX2SetAAMode(GX2AAMode aa);
 void GX2SetAAModeEx(GX2GLAASampleLoc *sampleLoc, GX2AAMode aa);
 #ifdef __cplusplus
 }
@@ -1043,6 +1044,7 @@ static void emit_multisample_state(void) {
   GX2AAMode aa_mode = GX2_AA_MODE1X;
   uint32_t active_mask;
   uint32_t mask;
+  GX2AAMaskReg mask_reg;
 
   memset(&locations, 0, sizeof(locations));
   if (programmed_samples == 2) aa_mode = GX2_AA_MODE2X;
@@ -1054,10 +1056,12 @@ static void emit_multisample_state(void) {
       locations.y[i] = offsets[i][1];
     }
   }
+  GX2SetAAMode(aa_mode);
   GX2SetAAModeEx(&locations, aa_mode);
 
   if (samples <= 0) {
-    GX2SetAAMask(0xFF, 0xFF, 0xFF, 0xFF);
+    GX2InitAAMaskReg(&mask_reg, 0xFF, 0xFF, 0xFF, 0xFF);
+    GX2SetAAMaskReg(&mask_reg);
     return;
   }
 
@@ -1078,8 +1082,9 @@ static void emit_multisample_state(void) {
     mask &= g_gl_context->sample_mask_value;
   }
 
-  GX2SetAAMask((uint8_t)mask, (uint8_t)mask,
-               (uint8_t)mask, (uint8_t)mask);
+  GX2InitAAMaskReg(&mask_reg, (uint8_t)mask, (uint8_t)mask,
+                   (uint8_t)mask, (uint8_t)mask);
+  GX2SetAAMaskReg(&mask_reg);
 }
 
 static void emit_viewport_state(void) {
