@@ -68,6 +68,7 @@ set(SOURCES
     src/core/gl_vertex_attrib.cpp
     src/core/gl_indexed_state.cpp
     src/core/gl_clear.cpp
+    src/core/gl_program_interface.cpp
     src/core/gl_get.cpp
     src/state/gl_state.cpp
     src/mem/gl_mem.cpp
