@@ -297,6 +297,8 @@ typedef struct {
     GLuint bound_texture_2d[GL33_MAX_TEXTURE_UNITS];
     GLuint bound_texture_3d[GL33_MAX_TEXTURE_UNITS];
     GLuint bound_texture_cube[GL33_MAX_TEXTURE_UNITS];
+    GLuint bound_texture_1d_array[GL33_MAX_TEXTURE_UNITS];
+    GLuint bound_texture_2d_array[GL33_MAX_TEXTURE_UNITS];
     GLuint bound_texture_2d_multisample[GL33_MAX_TEXTURE_UNITS];
     GLuint bound_texture_2d_multisample_array[GL33_MAX_TEXTURE_UNITS];
     GLuint bound_sampler[GL33_MAX_TEXTURE_UNITS];

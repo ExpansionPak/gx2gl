@@ -122,6 +122,8 @@ static GLTexture g_default_texture_1d;
 static GLTexture g_default_texture_2d;
 static GLTexture g_default_texture_3d;
 static GLTexture g_default_texture_cube;
+static GLTexture g_default_texture_1d_array;
+static GLTexture g_default_texture_2d_array;
 static GLTexture g_default_texture_2d_multisample;
 static GLTexture g_default_texture_2d_multisample_array;
 
@@ -201,6 +203,10 @@ static GLTexture *default_texture_for_target(GLenum target) {
     return &g_default_texture_3d;
   case GL_TEXTURE_CUBE_MAP:
     return &g_default_texture_cube;
+  case GL_TEXTURE_1D_ARRAY:
+    return &g_default_texture_1d_array;
+  case GL_TEXTURE_2D_ARRAY:
+    return &g_default_texture_2d_array;
   case GL_TEXTURE_2D_MULTISAMPLE:
     return &g_default_texture_2d_multisample;
   case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
@@ -402,6 +408,12 @@ static bool map_dim(GLenum target, GX2SurfaceDim *dim) {
   case GL_TEXTURE_CUBE_MAP:
     *dim = GX2_SURFACE_DIM_TEXTURE_CUBE;
     return true;
+  case GL_TEXTURE_1D_ARRAY:
+    *dim = GX2_SURFACE_DIM_TEXTURE_1D_ARRAY;
+    return true;
+  case GL_TEXTURE_2D_ARRAY:
+    *dim = GX2_SURFACE_DIM_TEXTURE_2D_ARRAY;
+    return true;
   case GL_TEXTURE_2D_MULTISAMPLE:
     *dim = GX2_SURFACE_DIM_TEXTURE_2D_MSAA;
     return true;
@@ -416,12 +428,17 @@ static bool map_dim(GLenum target, GX2SurfaceDim *dim) {
 
 static bool is_valid_texture_target(GLenum target) {
   return target == GL_TEXTURE_1D || target == GL_TEXTURE_2D ||
-         target == GL_TEXTURE_3D || target == GL_TEXTURE_CUBE_MAP;
+         target == GL_TEXTURE_3D || target == GL_TEXTURE_CUBE_MAP ||
+         target == GL_TEXTURE_1D_ARRAY || target == GL_TEXTURE_2D_ARRAY;
 }
 
 static bool is_multisample_texture_target(GLenum target) {
   return target == GL_TEXTURE_2D_MULTISAMPLE ||
          target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
+}
+
+static bool texture_depth_is_spatial(GLenum target) {
+  return target == GL_TEXTURE_3D;
 }
 
 static bool map_sample_count(GLsizei requested, GX2AAMode *mode,
@@ -971,9 +988,13 @@ static bool calc_level_layout(GLenum target, GX2SurfaceFormat format,
 
   surface.dim = dim;
   surface.width = (uint32_t)((base_width >> level) > 0 ? (base_width >> level) : 1);
-  surface.height =
-      (uint32_t)((base_height >> level) > 0 ? (base_height >> level) : 1);
-  if (target == GL_TEXTURE_3D) {
+  if (target == GL_TEXTURE_1D_ARRAY) {
+    surface.height = 1;
+  } else {
+    surface.height =
+        (uint32_t)((base_height >> level) > 0 ? (base_height >> level) : 1);
+  }
+  if (texture_depth_is_spatial(target)) {
     surface.depth =
         (uint32_t)((base_depth >> level) > 0 ? (base_depth >> level) : 1);
   } else {
@@ -1095,7 +1116,9 @@ static bool rebuild_texture_storage(GLTexture *tex, GLsizei width,
   new_texture.viewFirstMip = 0;
   new_texture.viewNumMips = mip_levels;
   new_texture.viewFirstSlice = 0;
-  new_texture.viewNumSlices = (dim == GX2_SURFACE_DIM_TEXTURE_3D)
+  new_texture.viewNumSlices = (dim == GX2_SURFACE_DIM_TEXTURE_3D ||
+                               dim == GX2_SURFACE_DIM_TEXTURE_1D_ARRAY ||
+                               dim == GX2_SURFACE_DIM_TEXTURE_2D_ARRAY)
                                   ? (uint32_t)depth
                                   : (dim == GX2_SURFACE_DIM_TEXTURE_CUBE)
                                         ? 6u
@@ -1880,11 +1903,13 @@ static bool generate_mipmap_level(GLTexture *tex, uint32_t dst_level,
 
   for (GLsizei z = 0; z < dst_layout.depth; ++z) {
     uint8_t *dst_slice = dst_base + (uint32_t)z * dst_layout.slice_size;
-    uint32_t src_z0 =
-        tex->target == GL_TEXTURE_CUBE_MAP ? (uint32_t)z : (uint32_t)z * 2u;
-    uint32_t src_z_count =
-        tex->target == GL_TEXTURE_CUBE_MAP ? 1u
-                                           : (src_layout.depth > 1 ? 2u : 1u);
+    uint32_t src_z0 = texture_depth_is_spatial(tex->target)
+                          ? (uint32_t)z * 2u
+                          : (uint32_t)z;
+    uint32_t src_z_count = texture_depth_is_spatial(tex->target) &&
+                                   src_layout.depth > 1
+                               ? 2u
+                               : 1u;
 
     if (src_z0 + src_z_count > (uint32_t)src_layout.depth) {
       src_z_count = (uint32_t)src_layout.depth - src_z0;
@@ -1993,6 +2018,10 @@ static GLuint get_bound_tex(GLenum target) {
     return g_gl_context->bound_texture_3d[unit];
   case GL_TEXTURE_CUBE_MAP:
     return g_gl_context->bound_texture_cube[unit];
+  case GL_TEXTURE_1D_ARRAY:
+    return g_gl_context->bound_texture_1d_array[unit];
+  case GL_TEXTURE_2D_ARRAY:
+    return g_gl_context->bound_texture_2d_array[unit];
   case GL_TEXTURE_2D_MULTISAMPLE:
     return g_gl_context->bound_texture_2d_multisample[unit];
   case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
@@ -2034,6 +2063,12 @@ static void set_bound_tex(GLenum target, GLuint texture) {
     break;
   case GL_TEXTURE_CUBE_MAP:
     g_gl_context->bound_texture_cube[unit] = texture;
+    break;
+  case GL_TEXTURE_1D_ARRAY:
+    g_gl_context->bound_texture_1d_array[unit] = texture;
+    break;
+  case GL_TEXTURE_2D_ARRAY:
+    g_gl_context->bound_texture_2d_array[unit] = texture;
     break;
   case GL_TEXTURE_2D_MULTISAMPLE:
     g_gl_context->bound_texture_2d_multisample[unit] = texture;
@@ -2304,6 +2339,8 @@ void gl_texture_init(void) {
   init_texture_object(&g_default_texture_2d, GL_TEXTURE_2D, false);
   init_texture_object(&g_default_texture_3d, GL_TEXTURE_3D, false);
   init_texture_object(&g_default_texture_cube, GL_TEXTURE_CUBE_MAP, false);
+  init_texture_object(&g_default_texture_1d_array, GL_TEXTURE_1D_ARRAY, false);
+  init_texture_object(&g_default_texture_2d_array, GL_TEXTURE_2D_ARRAY, false);
   init_texture_object(&g_default_texture_2d_multisample,
                       GL_TEXTURE_2D_MULTISAMPLE, false);
   init_texture_object(&g_default_texture_2d_multisample_array,
@@ -2312,6 +2349,8 @@ void gl_texture_init(void) {
   init_texture_sampler(&g_default_texture_2d);
   init_texture_sampler(&g_default_texture_3d);
   init_texture_sampler(&g_default_texture_cube);
+  init_texture_sampler(&g_default_texture_1d_array);
+  init_texture_sampler(&g_default_texture_2d_array);
   init_texture_sampler(&g_default_texture_2d_multisample);
   init_texture_sampler(&g_default_texture_2d_multisample_array);
 }
@@ -2372,6 +2411,12 @@ void _gl_DeleteTextures(GLsizei n, const GLuint *textures) {
         }
         if (g_gl_context->bound_texture_cube[u] == id) {
           g_gl_context->bound_texture_cube[u] = 0;
+        }
+        if (g_gl_context->bound_texture_1d_array[u] == id) {
+          g_gl_context->bound_texture_1d_array[u] = 0;
+        }
+        if (g_gl_context->bound_texture_2d_array[u] == id) {
+          g_gl_context->bound_texture_2d_array[u] = 0;
         }
         if (g_gl_context->bound_texture_2d_multisample[u] == id) {
           g_gl_context->bound_texture_2d_multisample[u] = 0;
@@ -2626,6 +2671,11 @@ void _gl_TexImage2D(GLenum target, GLint level, GLint internalformat,
   TextureFormatInfo info;
   GLsizei expected_width;
   GLsizei expected_height;
+  GLsizei storage_width;
+  GLsizei storage_height;
+  GLsizei storage_depth;
+  GLsizei upload_height;
+  GLsizei upload_depth;
   GLenum bind_target;
   uint32_t face_index;
   const GLvoid *upload_pixels = pixels;
@@ -2639,12 +2689,13 @@ void _gl_TexImage2D(GLenum target, GLint level, GLint internalformat,
                    (unsigned int)target, (int)level, (unsigned int)internalformat,
                    (int)width, (int)height, (int)border, (unsigned int)format,
                    (unsigned int)type, pixels);
-  if (target != GL_TEXTURE_2D && !is_cube_map_face_target(target)) {
+  if (target != GL_TEXTURE_2D && target != GL_TEXTURE_1D_ARRAY &&
+      !is_cube_map_face_target(target)) {
     _gl_set_error(GL_INVALID_ENUM);
     return;
   }
 
-  bind_target = target == GL_TEXTURE_2D ? GL_TEXTURE_2D : GL_TEXTURE_CUBE_MAP;
+  bind_target = is_cube_map_face_target(target) ? GL_TEXTURE_CUBE_MAP : target;
   face_index = is_cube_map_face_target(target) ? cube_map_face_index(target) : 0;
   tex = get_bound_texture(bind_target);
   if (!tex) {
@@ -2657,6 +2708,13 @@ void _gl_TexImage2D(GLenum target, GLint level, GLint internalformat,
     _gl_set_error(GL_INVALID_VALUE);
     return;
   }
+  storage_width = width;
+  storage_height = bind_target == GL_TEXTURE_1D_ARRAY ? 1 : height;
+  storage_depth = bind_target == GL_TEXTURE_CUBE_MAP
+                      ? 6
+                      : (bind_target == GL_TEXTURE_1D_ARRAY ? height : 1);
+  upload_height = bind_target == GL_TEXTURE_1D_ARRAY ? 1 : height;
+  upload_depth = bind_target == GL_TEXTURE_1D_ARRAY ? height : 1;
   has_unpack_pixels = pixels != NULL ||
                       g_gl_context->bound_pixel_unpack_buffer != 0;
   if (!get_texture_format_info(internalformat, format, type,
@@ -2688,8 +2746,8 @@ void _gl_TexImage2D(GLenum target, GLint level, GLint internalformat,
       }
     } else {
       log_texture_step("_gl_TexImage2D: rebuilding level 0 storage");
-      if (!rebuild_texture_storage(tex, width, height, 1, internalformat, 1,
-                                   false)) {
+      if (!rebuild_texture_storage(tex, storage_width, storage_height,
+                                   storage_depth, internalformat, 1, false)) {
         log_texture_step("_gl_TexImage2D: rebuild failed");
         _gl_set_error(GL_OUT_OF_MEMORY);
         return;
@@ -2698,7 +2756,9 @@ void _gl_TexImage2D(GLenum target, GLint level, GLint internalformat,
   } else {
     if (!tex->storage_allocated) {
       GLsizei base_width = width << level;
-      GLsizei base_height = height << level;
+      GLsizei base_height = bind_target == GL_TEXTURE_1D_ARRAY ? 1
+                                                               : height << level;
+      GLsizei base_depth = bind_target == GL_TEXTURE_1D_ARRAY ? height : 1;
       if (bind_target == GL_TEXTURE_CUBE_MAP) {
         if (!rebuild_texture_storage(tex, base_width, base_height, 6,
                                      internalformat, (uint32_t)(level + 1),
@@ -2706,7 +2766,8 @@ void _gl_TexImage2D(GLenum target, GLint level, GLint internalformat,
           _gl_set_error(GL_OUT_OF_MEMORY);
           return;
         }
-      } else if (!rebuild_texture_storage(tex, base_width, base_height, 1,
+      } else if (!rebuild_texture_storage(tex, base_width, base_height,
+                                          base_depth,
                                           internalformat,
                                           (uint32_t)(level + 1), false)) {
         _gl_set_error(GL_OUT_OF_MEMORY);
@@ -2718,11 +2779,13 @@ void _gl_TexImage2D(GLenum target, GLint level, GLint internalformat,
     }
 
     expected_width = tex->width >> level;
-    expected_height = tex->height >> level;
+    expected_height = bind_target == GL_TEXTURE_1D_ARRAY
+                          ? tex->depth
+                          : tex->height >> level;
     if (expected_width < 1) {
       expected_width = 1;
     }
-    if (expected_height < 1) {
+    if (expected_height < 1 && bind_target != GL_TEXTURE_1D_ARRAY) {
       expected_height = 1;
     }
     if (width != expected_width || height != expected_height) {
@@ -2743,7 +2806,11 @@ void _gl_TexImage2D(GLenum target, GLint level, GLint internalformat,
   if ((bind_target == GL_TEXTURE_CUBE_MAP && upload_pixels &&
        !upload_texture_sub_region(tex, level, 0, 0, (GLint)face_index, width,
                                   height, 1, &info, upload_pixels)) ||
+      (bind_target == GL_TEXTURE_1D_ARRAY &&
+       !upload_texture_level(tex, level, width, upload_height, upload_depth,
+                             &info, upload_pixels)) ||
       (bind_target != GL_TEXTURE_CUBE_MAP &&
+       bind_target != GL_TEXTURE_1D_ARRAY &&
        !upload_texture_level(tex, level, width, height, 1, &info,
                              upload_pixels))) {
     log_texture_step("_gl_TexImage2D: upload failed");
@@ -2772,7 +2839,7 @@ void _gl_TexImage3D(GLenum target, GLint level, GLint internalformat,
   if (!g_gl_context) {
     return;
   }
-  if (target != GL_TEXTURE_3D) {
+  if (target != GL_TEXTURE_3D && target != GL_TEXTURE_2D_ARRAY) {
     _gl_set_error(GL_INVALID_ENUM);
     return;
   }
@@ -2809,7 +2876,8 @@ void _gl_TexImage3D(GLenum target, GLint level, GLint internalformat,
     if (!tex->storage_allocated) {
       GLsizei base_width = width << level;
       GLsizei base_height = height << level;
-      GLsizei base_depth = depth << level;
+      GLsizei base_depth =
+          texture_depth_is_spatial(target) ? depth << level : depth;
       if (!rebuild_texture_storage(tex, base_width, base_height, base_depth,
                                    internalformat, (uint32_t)(level + 1),
                                    false)) {
@@ -2823,7 +2891,8 @@ void _gl_TexImage3D(GLenum target, GLint level, GLint internalformat,
 
     expected_width = tex->width >> level;
     expected_height = tex->height >> level;
-    expected_depth = tex->depth >> level;
+    expected_depth =
+        texture_depth_is_spatial(target) ? tex->depth >> level : tex->depth;
     if (expected_width < 1) {
       expected_width = 1;
     }
@@ -2873,12 +2942,13 @@ void _gl_TexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
   if (!g_gl_context) {
     return;
   }
-  if (target != GL_TEXTURE_2D && !is_cube_map_face_target(target)) {
+  if (target != GL_TEXTURE_2D && target != GL_TEXTURE_1D_ARRAY &&
+      !is_cube_map_face_target(target)) {
     _gl_set_error(GL_INVALID_ENUM);
     return;
   }
 
-  bind_target = target == GL_TEXTURE_2D ? GL_TEXTURE_2D : GL_TEXTURE_CUBE_MAP;
+  bind_target = is_cube_map_face_target(target) ? GL_TEXTURE_CUBE_MAP : target;
   face_index = is_cube_map_face_target(target) ? cube_map_face_index(target) : 0;
   tex = get_bound_texture(bind_target);
   if (!tex) {
@@ -2914,9 +2984,13 @@ void _gl_TexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
                              &upload_pixels)) {
     return;
   }
-  if (!upload_texture_sub_region(tex, level, xoffset, yoffset,
-                                 (GLint)face_index, width, height, 1, &info,
-                                 upload_pixels)) {
+  if ((bind_target == GL_TEXTURE_1D_ARRAY &&
+       !upload_texture_sub_region(tex, level, xoffset, 0, yoffset, width, 1,
+                                  height, &info, upload_pixels)) ||
+      (bind_target != GL_TEXTURE_1D_ARRAY &&
+       !upload_texture_sub_region(tex, level, xoffset, yoffset,
+                                  (GLint)face_index, width, height, 1, &info,
+                                  upload_pixels))) {
     _gl_set_error(upload_pixels ? GL_INVALID_VALUE : GL_INVALID_OPERATION);
     return;
   }
@@ -2936,7 +3010,7 @@ void _gl_TexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
   if (!g_gl_context) {
     return;
   }
-  if (target != GL_TEXTURE_3D) {
+  if (target != GL_TEXTURE_3D && target != GL_TEXTURE_2D_ARRAY) {
     _gl_set_error(GL_INVALID_ENUM);
     return;
   }
@@ -4286,11 +4360,11 @@ void _gl_CopyTexSubImage3D(GLenum target, GLint level, GLint xoffset,
   if (!g_gl_context) {
     return;
   }
-  if (target != GL_TEXTURE_3D) {
+  if (target != GL_TEXTURE_3D && target != GL_TEXTURE_2D_ARRAY) {
     _gl_set_error(GL_INVALID_ENUM);
     return;
   }
-  tex = get_bound_texture(GL_TEXTURE_3D);
+  tex = get_bound_texture(target);
   if (!tex) {
     _gl_set_error(GL_INVALID_OPERATION);
     return;
@@ -4369,7 +4443,7 @@ void _gl_CompressedTexImage3D(GLenum target, GLint level, GLenum internalformat,
   if (!g_gl_context) {
     return;
   }
-  if (target != GL_TEXTURE_3D) {
+  if (target != GL_TEXTURE_3D && target != GL_TEXTURE_2D_ARRAY) {
     _gl_set_error(GL_INVALID_ENUM);
     return;
   }
@@ -4378,7 +4452,7 @@ void _gl_CompressedTexImage3D(GLenum target, GLint level, GLenum internalformat,
     _gl_set_error(GL_INVALID_VALUE);
     return;
   }
-  if (!get_bound_texture(GL_TEXTURE_3D)) {
+  if (!get_bound_texture(target)) {
     _gl_set_error(GL_INVALID_OPERATION);
     return;
   }
@@ -4418,7 +4492,7 @@ void _gl_CompressedTexSubImage3D(GLenum target, GLint level, GLint xoffset,
   if (!g_gl_context) {
     return;
   }
-  if (target != GL_TEXTURE_3D) {
+  if (target != GL_TEXTURE_3D && target != GL_TEXTURE_2D_ARRAY) {
     _gl_set_error(GL_INVALID_ENUM);
     return;
   }
@@ -4428,7 +4502,7 @@ void _gl_CompressedTexSubImage3D(GLenum target, GLint level, GLint xoffset,
     _gl_set_error(GL_INVALID_VALUE);
     return;
   }
-  if (!get_bound_texture(GL_TEXTURE_3D)) {
+  if (!get_bound_texture(target)) {
     _gl_set_error(GL_INVALID_OPERATION);
     return;
   }
@@ -4500,10 +4574,6 @@ void _gl_GetTexLevelParameteriv(GLenum target, GLint level, GLenum pname,
     break;
   case GL_TEXTURE_SAMPLES:
   case GL_TEXTURE_FIXED_SAMPLE_LOCATIONS:
-    if (!multisample_target) {
-      _gl_set_error(GL_INVALID_ENUM);
-      return;
-    }
     break;
   default:
     _gl_set_error(GL_INVALID_ENUM);
@@ -4583,10 +4653,17 @@ void _gl_GetTexLevelParameteriv(GLenum target, GLint level, GLenum pname,
     *params = (GLint)layout.width;
     break;
   case GL_TEXTURE_HEIGHT:
-    *params = tex->target == GL_TEXTURE_1D ? 1 : (GLint)layout.height;
+    *params = tex->target == GL_TEXTURE_1D
+                  ? 1
+                  : (tex->target == GL_TEXTURE_1D_ARRAY
+                         ? (GLint)layout.depth
+                         : (GLint)layout.height);
     break;
   case GL_TEXTURE_DEPTH:
-    *params = tex->target == GL_TEXTURE_3D ? (GLint)layout.depth : 1;
+    *params = (tex->target == GL_TEXTURE_3D ||
+               tex->target == GL_TEXTURE_2D_ARRAY)
+                  ? (GLint)layout.depth
+                  : 1;
     break;
   case GL_TEXTURE_INTERNAL_FORMAT:
     *params = tex->internal_format;
@@ -4643,6 +4720,12 @@ void _gl_GetTexLevelParameteriv(GLenum target, GLint level, GLenum pname,
                     : GL_FALSE;
     }
     break;
+  case GL_TEXTURE_SAMPLES:
+    *params = 0;
+    break;
+  case GL_TEXTURE_FIXED_SAMPLE_LOCATIONS:
+    *params = GL_TRUE;
+    break;
   default:
     break;
   }
@@ -4669,6 +4752,9 @@ void _gl_GetTexImage(GLenum target, GLint level, GLenum format, GLenum type,
   uint32_t src_row_bytes;
   uint32_t start_slice = 0;
   uint32_t slice_count = 1;
+  GLsizei read_width;
+  GLsizei read_height;
+  GLsizei read_depth;
   size_t dst_base_offset;
   GLuint texture_name = 0;
 
@@ -4681,7 +4767,8 @@ void _gl_GetTexImage(GLenum target, GLint level, GLenum format, GLenum type,
   }
 
   if (target == GL_TEXTURE_1D || target == GL_TEXTURE_2D ||
-      target == GL_TEXTURE_3D) {
+      target == GL_TEXTURE_3D || target == GL_TEXTURE_1D_ARRAY ||
+      target == GL_TEXTURE_2D_ARRAY) {
     texture_name = get_bound_tex(target);
     tex = get_bound_texture(target);
   } else if (is_cube_map_face_target(target)) {
@@ -4725,20 +4812,28 @@ void _gl_GetTexImage(GLenum target, GLint level, GLenum format, GLenum type,
   }
   if (!calc_level_layout(tex->target, tex->gx2_texture.surface.format,
                          tex->width, tex->height, tex->depth, (uint32_t)level,
-                         &layout) ||
-      !get_pack_layout(&info, layout.width, layout.height, &dst_row_bytes,
+                         &layout)) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
+  read_width = layout.width;
+  read_height = target == GL_TEXTURE_1D_ARRAY ? layout.depth : layout.height;
+  read_depth = (target == GL_TEXTURE_3D || target == GL_TEXTURE_2D_ARRAY)
+                   ? layout.depth
+                   : 1;
+  if (!get_pack_layout(&info, read_width, read_height, &dst_row_bytes,
                        &dst_image_bytes, &dst_base_offset)) {
     _gl_set_error(GL_INVALID_OPERATION);
     return;
   }
-  if (!resolve_pack_pixels(&info, layout.width, layout.height,
-                           target == GL_TEXTURE_3D ? layout.depth : 1,
+  if (!resolve_pack_pixels(&info, read_width, read_height, read_depth,
                            pixels, &resolved_pixels, &pack_buffer_offset,
                            &pack_byte_count)) {
     return;
   }
 
-  if (target == GL_TEXTURE_3D) {
+  if (target == GL_TEXTURE_3D || target == GL_TEXTURE_2D_ARRAY ||
+      target == GL_TEXTURE_1D_ARRAY) {
     slice_count = (uint32_t)layout.depth;
   } else if (is_cube_map_face_target(target)) {
     if (start_slice >= (uint32_t)layout.depth) {
@@ -4765,11 +4860,16 @@ void _gl_GetTexImage(GLenum target, GLint level, GLenum format, GLenum type,
   for (uint32_t z = 0; z < slice_count; ++z) {
     const uint8_t *src_slice =
         src_level + (start_slice + z) * layout.slice_size;
-    uint8_t *dst_slice = dst_base + (size_t)z * dst_image_bytes;
-    for (GLsizei y = 0; y < layout.height; ++y) {
-      read_texture_row(dst_slice + (size_t)y * dst_row_bytes,
-                       src_slice + (size_t)y * src_row_bytes,
-                       (uint32_t)layout.width, &info);
+    if (target == GL_TEXTURE_1D_ARRAY) {
+      read_texture_row(dst_base + (size_t)z * dst_row_bytes,
+                       src_slice, (uint32_t)layout.width, &info);
+    } else {
+      uint8_t *dst_slice = dst_base + (size_t)z * dst_image_bytes;
+      for (GLsizei y = 0; y < layout.height; ++y) {
+        read_texture_row(dst_slice + (size_t)y * dst_row_bytes,
+                         src_slice + (size_t)y * src_row_bytes,
+                         (uint32_t)layout.width, &info);
+      }
     }
   }
 
@@ -4869,7 +4969,8 @@ void _gl_GenerateMipmap(GLenum target) {
     return;
   }
   if (target != GL_TEXTURE_1D && target != GL_TEXTURE_2D &&
-      target != GL_TEXTURE_3D && target != GL_TEXTURE_CUBE_MAP) {
+      target != GL_TEXTURE_3D && target != GL_TEXTURE_CUBE_MAP &&
+      target != GL_TEXTURE_1D_ARRAY && target != GL_TEXTURE_2D_ARRAY) {
     _gl_set_error(GL_INVALID_ENUM);
     return;
   }
@@ -4889,8 +4990,10 @@ void _gl_GenerateMipmap(GLenum target) {
     return;
   }
 
-  mip_count = calc_full_mip_count(tex->width, tex->height,
-                                  target == GL_TEXTURE_3D ? tex->depth : 1);
+  mip_count = calc_full_mip_count(
+      tex->width,
+      target == GL_TEXTURE_1D_ARRAY ? 1 : tex->height,
+      texture_depth_is_spatial(target) ? tex->depth : 1);
   if (mip_count <= 1) {
     return;
   }

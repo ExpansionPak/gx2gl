@@ -492,6 +492,10 @@ static bool get_context_value(GLenum pname, GetValue *value) {
     return set_int1(value, (GLint)g_gl_context->bound_texture_3d[unit]);
   case GL_TEXTURE_BINDING_CUBE_MAP:
     return set_int1(value, (GLint)g_gl_context->bound_texture_cube[unit]);
+  case GL_TEXTURE_BINDING_1D_ARRAY:
+    return set_int1(value, (GLint)g_gl_context->bound_texture_1d_array[unit]);
+  case GL_TEXTURE_BINDING_2D_ARRAY:
+    return set_int1(value, (GLint)g_gl_context->bound_texture_2d_array[unit]);
   case GL_TEXTURE_BINDING_2D_MULTISAMPLE:
     return set_int1(value,
                     (GLint)g_gl_context->bound_texture_2d_multisample[unit]);
