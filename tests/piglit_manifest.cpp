@@ -566,6 +566,10 @@ static std::vector<VaryingLocation> build_varying_locations(
         contains_identifier(fragment_source, "gl_Color")) {
         next_location = 1;
     }
+    if (contains_identifier(vertex_source, "gl_FrontSecondaryColor") ||
+        contains_identifier(fragment_source, "gl_SecondaryColor")) {
+        next_location = next_location < 1 ? 1 : next_location + 1;
+    }
 
     collect_varying_names(vertex_source, &names);
     collect_varying_names(fragment_source, &names);
@@ -585,6 +589,16 @@ static int front_color_location_for(const std::string &vertex_source,
         return -1;
     }
     return 0;
+}
+
+static int secondary_color_location_for(const std::string &vertex_source,
+                                        const std::string &fragment_source,
+                                        int front_color_location) {
+    if (!contains_identifier(vertex_source, "gl_FrontSecondaryColor") &&
+        !contains_identifier(fragment_source, "gl_SecondaryColor")) {
+        return -1;
+    }
+    return front_color_location >= 0 ? front_color_location + 1 : 0;
 }
 
 static bool parse_texcoord_reference(const std::string &source, size_t pos,
@@ -685,7 +699,7 @@ static void collect_texcoord_indices(const std::string &source,
 static std::vector<TexCoordLocation> build_texcoord_locations(
     const std::string &vertex_source, const std::string &fragment_source,
     const std::vector<VaryingLocation> &varyings,
-    int front_color_location) {
+    int front_color_location, int secondary_color_location) {
     std::vector<int> indices;
     std::vector<TexCoordLocation> locations;
     int next_location = 0;
@@ -693,6 +707,10 @@ static std::vector<TexCoordLocation> build_texcoord_locations(
     if (front_color_location >= 0 &&
         next_location <= front_color_location) {
         next_location = front_color_location + 1;
+    }
+    if (secondary_color_location >= 0 &&
+        next_location <= secondary_color_location) {
+        next_location = secondary_color_location + 1;
     }
     for (size_t i = 0; i < varyings.size(); ++i) {
         if (next_location <= varyings[i].location) {
@@ -750,6 +768,64 @@ static std::string rewrite_legacy_texcoords(
     return out;
 }
 
+static size_t find_main_closing_brace(const std::string &source) {
+    size_t main_pos = source.find("void main");
+    size_t open_brace;
+    int depth = 0;
+    bool line_comment = false;
+    bool block_comment = false;
+
+    if (main_pos == std::string::npos) return std::string::npos;
+    open_brace = source.find('{', main_pos);
+    if (open_brace == std::string::npos) return std::string::npos;
+
+    for (size_t i = open_brace; i < source.size(); ++i) {
+        const char c = source[i];
+        const char next = i + 1u < source.size() ? source[i + 1u] : '\0';
+
+        if (line_comment) {
+            if (c == '\n') line_comment = false;
+            continue;
+        }
+        if (block_comment) {
+            if (c == '*' && next == '/') {
+                block_comment = false;
+                ++i;
+            }
+            continue;
+        }
+        if (c == '/' && next == '/') {
+            line_comment = true;
+            ++i;
+            continue;
+        }
+        if (c == '/' && next == '*') {
+            block_comment = true;
+            ++i;
+            continue;
+        }
+        if (c == '{') {
+            ++depth;
+        } else if (c == '}') {
+            --depth;
+            if (depth == 0) {
+                return i;
+            }
+        }
+    }
+    return std::string::npos;
+}
+
+static std::string append_main_epilogue(const std::string &source,
+                                        const std::string &epilogue) {
+    const size_t closing_brace = find_main_closing_brace(source);
+    if (closing_brace == std::string::npos || epilogue.empty()) {
+        return source;
+    }
+    return source.substr(0, closing_brace) + epilogue +
+           source.substr(closing_brace);
+}
+
 static std::string rewrite_legacy_varyings(
     const std::string &source, GLenum stage,
     const std::vector<VaryingLocation> &varyings) {
@@ -800,7 +876,7 @@ static std::string make_source_330(
     GLenum stage, const std::string &source,
     const std::vector<VaryingLocation> &varyings,
     const std::vector<TexCoordLocation> &texcoords,
-    int front_color_location) {
+    int front_color_location, int secondary_color_location) {
     std::string out;
     std::string body = rewrite_legacy_varyings(
         remove_version_directives(source), stage, varyings);
@@ -809,11 +885,17 @@ static std::string make_source_330(
     out = "#version 330 core\n";
     if (stage == GL_FRAGMENT_SHADER) {
         const bool uses_gl_color = contains_identifier(body, "gl_Color");
+        const bool uses_gl_secondary_color =
+            contains_identifier(body, "gl_SecondaryColor");
         const bool uses_gl_frag_color =
             contains_identifier(body, "gl_FragColor");
         if (uses_gl_color) {
             body = replace_identifier(body, "gl_Color",
                                       "gx2gl_FrontColor");
+        }
+        if (uses_gl_secondary_color) {
+            body = replace_identifier(body, "gl_SecondaryColor",
+                                      "gx2gl_FrontSecondaryColor");
         }
         if (uses_gl_frag_color) {
             body = replace_identifier(body, "gl_FragColor",
@@ -826,6 +908,13 @@ static std::string make_source_330(
                                       ? front_color_location
                                       : 0);
             out += ") in vec4 gx2gl_FrontColor;\n";
+        }
+        if (uses_gl_secondary_color) {
+            out += "layout(location = ";
+            out += std::to_string(secondary_color_location >= 0
+                                      ? secondary_color_location
+                                      : 0);
+            out += ") in vec4 gx2gl_FrontSecondaryColor;\n";
         }
         if (uses_gl_frag_color) {
             out += "layout(location = 0) out vec4 gx2gl_FragColor;\n";
@@ -840,10 +929,13 @@ static std::string make_source_330(
         out += "#define texture2D texture\n";
         out += "#define textureCube texture\n";
     } else if (stage == GL_VERTEX_SHADER) {
+        std::string color_epilogue;
         const bool uses_gl_vertex = contains_identifier(body, "gl_Vertex") ||
                                     contains_identifier(body, "ftransform");
         const bool uses_gl_front_color =
             contains_identifier(body, "gl_FrontColor");
+        const bool uses_gl_front_secondary_color =
+            contains_identifier(body, "gl_FrontSecondaryColor");
         const bool uses_mvp =
             contains_identifier(body, "gl_ModelViewProjectionMatrix") ||
             contains_identifier(body, "ftransform");
@@ -855,6 +947,15 @@ static std::string make_source_330(
         if (uses_gl_front_color) {
             body = replace_identifier(body, "gl_FrontColor",
                                       "gx2gl_FrontColor");
+            color_epilogue +=
+                "    gx2gl_FrontColor = clamp(gx2gl_FrontColor, 0.0, 1.0);\n";
+        }
+        if (uses_gl_front_secondary_color) {
+            body = replace_identifier(body, "gl_FrontSecondaryColor",
+                                      "gx2gl_FrontSecondaryColor");
+            color_epilogue +=
+                "    gx2gl_FrontSecondaryColor = "
+                "clamp(gx2gl_FrontSecondaryColor, 0.0, 1.0);\n";
         }
         if (uses_mvp) {
             body = replace_identifier(body, "gl_ModelViewProjectionMatrix",
@@ -876,6 +977,13 @@ static std::string make_source_330(
                                       : 0);
             out += ") out vec4 gx2gl_FrontColor;\n";
         }
+        if (uses_gl_front_secondary_color) {
+            out += "layout(location = ";
+            out += std::to_string(secondary_color_location >= 0
+                                      ? secondary_color_location
+                                      : 0);
+            out += ") out vec4 gx2gl_FrontSecondaryColor;\n";
+        }
         for (size_t i = 0; i < texcoords.size(); ++i) {
             out += "layout(location = ";
             out += std::to_string(texcoords[i].location);
@@ -889,6 +997,7 @@ static std::string make_source_330(
         if (uses_current_color) {
             out += "uniform vec4 gx2gl_CurrentColor;\n";
         }
+        body = append_main_epilogue(body, color_epilogue);
         out += "#define attribute layout(location = 0) in\n";
         out += "#define ftransform() (gx2gl_ModelViewProjectionMatrix * gx2gl_Vertex)\n";
     }
@@ -901,9 +1010,11 @@ static GLuint compile_shader(PiglitReportFunc report, GLenum type,
                              const char *case_name,
                              const std::vector<VaryingLocation> &varyings,
                              const std::vector<TexCoordLocation> &texcoords,
-                             int front_color_location) {
+                             int front_color_location,
+                             int secondary_color_location) {
     const std::string upgraded = make_source_330(
-        type, source, varyings, texcoords, front_color_location);
+        type, source, varyings, texcoords, front_color_location,
+        secondary_color_location);
     const char *src = upgraded.c_str();
     GLuint shader = glCreateShader(type);
     GLint status = GL_FALSE;
@@ -1887,9 +1998,13 @@ static PiglitResult run_shader_test(PiglitReportFunc report,
         build_varying_locations(vertex_source, test.fragment_shader);
     const int front_color_location =
         front_color_location_for(vertex_source, test.fragment_shader);
+    const int secondary_color_location =
+        secondary_color_location_for(vertex_source, test.fragment_shader,
+                                     front_color_location);
     const std::vector<TexCoordLocation> texcoords =
         build_texcoord_locations(vertex_source, test.fragment_shader,
-                                 varyings, front_color_location);
+                                 varyings, front_color_location,
+                                 secondary_color_location);
     bool linked = false;
     bool link_error_expected = false;
 
@@ -1916,11 +2031,13 @@ static PiglitResult run_shader_test(PiglitReportFunc report,
     clear_gl_errors();
     obj.vertex_shader = compile_shader(report, GL_VERTEX_SHADER,
                                        vertex_source, case_name, varyings,
-                                       texcoords, front_color_location);
+                                       texcoords, front_color_location,
+                                       secondary_color_location);
     obj.fragment_shader = compile_shader(report, GL_FRAGMENT_SHADER,
                                          test.fragment_shader, case_name,
                                          varyings, texcoords,
-                                         front_color_location);
+                                         front_color_location,
+                                         secondary_color_location);
     if (!obj.vertex_shader || !obj.fragment_shader) {
         *detail = "shader compile failed";
         destroy_objects(&obj);
