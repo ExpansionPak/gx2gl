@@ -218,6 +218,8 @@ typedef struct {
 
 static GLShader g_shaders[MAX_SHADERS];
 static GLProgram g_programs[MAX_PROGRAMS];
+static bool g_shader_mode_valid = false;
+static GX2ShaderMode g_shader_mode = GX2_SHADER_MODE_UNIFORM_REGISTER;
 
 static bool is_valid_shader(GLuint s) { return s > 0 && s < MAX_SHADERS && g_shaders[s].in_use; }
 static bool is_valid_program(GLuint p) { return p > 0 && p < MAX_PROGRAMS && g_programs[p].in_use; }
@@ -1859,6 +1861,8 @@ static void bind_program_uniform_blocks(GLProgram *prog) {
   if (stage_uses_virtual_uniform_block(prog, false) &&
       prog->vs_direct_uniform_shadow &&
       prog->vs_direct_uniform_shadow_size > 0) {
+    DCFlushRange(prog->vs_direct_uniform_shadow,
+                 prog->vs_direct_uniform_shadow_size);
     GX2Invalidate(GX2_INVALIDATE_MODE_UNIFORM_BLOCK,
                   prog->vs_direct_uniform_shadow,
                   prog->vs_direct_uniform_shadow_size);
@@ -1869,6 +1873,8 @@ static void bind_program_uniform_blocks(GLProgram *prog) {
   if (stage_uses_virtual_uniform_block(prog, true) &&
       prog->ps_direct_uniform_shadow &&
       prog->ps_direct_uniform_shadow_size > 0) {
+    DCFlushRange(prog->ps_direct_uniform_shadow,
+                 prog->ps_direct_uniform_shadow_size);
     GX2Invalidate(GX2_INVALIDATE_MODE_UNIFORM_BLOCK,
                   prog->ps_direct_uniform_shadow,
                   prog->ps_direct_uniform_shadow_size);
@@ -2262,6 +2268,8 @@ static char *concatenate_shader_source(GLsizei count, const GLchar *const *strin
 void gl_shader_init(void) {
   memset(g_shaders, 0, sizeof(g_shaders));
   memset(g_programs, 0, sizeof(g_programs));
+  g_shader_mode_valid = false;
+  g_shader_mode = GX2_SHADER_MODE_UNIFORM_REGISTER;
 }
 GLuint _gl_CreateShader(GLenum type) {
     if (!is_supported_shader_type(type)) {
@@ -3268,13 +3276,17 @@ void gl_bind_shaders(void) {
   GLProgram *prog = &g_programs[prog_id];
   if (!prog->group || !prog->linked) return;
   GX2ShaderMode shader_mode = choose_shader_mode(prog);
-  GX2SetShaderMode(shader_mode);
+  if (!g_shader_mode_valid || g_shader_mode != shader_mode) {
+    GX2SetShaderMode(shader_mode);
+    g_shader_mode = shader_mode;
+    g_shader_mode_valid = true;
+  }
+  if (prog->group->vertexShader) GX2SetVertexShader(prog->group->vertexShader);
+  if (prog->group->pixelShader)  GX2SetPixelShader(prog->group->pixelShader);
   if (shader_mode == GX2_SHADER_MODE_UNIFORM_BLOCK ||
       shader_mode == GX2_SHADER_MODE_GEOMETRY_SHADER) {
     GX2Invalidate(GX2_INVALIDATE_MODE_SHADER, NULL, 0xFFFFFFFFu);
   }
-  if (prog->group->vertexShader) GX2SetVertexShader(prog->group->vertexShader);
-  if (prog->group->pixelShader)  GX2SetPixelShader(prog->group->pixelShader);
   if (!stage_uses_virtual_uniform_block(prog, false)) {
     bind_direct_uniform_registers(prog->vs_direct_uniform_shadow,
                                   prog->vs_direct_uniform_shadow_size, false);
