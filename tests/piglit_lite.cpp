@@ -468,6 +468,115 @@ cleanup:
     return passed;
 }
 
+static bool run_clear_buffer_color(PiglitReportFunc report) {
+    static const GLfloat clear_attachment1[4] =
+        {1.0f, 0.25f, 0.0f, 1.0f};
+    static const GLfloat masked_clear[4] =
+        {0.0f, 0.5f, 1.0f, 0.25f};
+    static const GLfloat invalid_clear[4] =
+        {0.0f, 0.0f, 0.0f, 0.0f};
+    static const GLuint invalid_uint_clear[4] = {0, 0, 0, 0};
+    GLubyte initial0[4 * 4 * 4];
+    GLubyte initial1[4 * 4 * 4];
+    GLubyte pixel[4] = {0, 0, 0, 0};
+    GLuint textures[2] = {0, 0};
+    GLuint fbo = 0;
+    GLenum draw_buffers[2] = {GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT0};
+    GLfloat depth = 1.0f;
+    bool passed = false;
+
+    clear_gl_errors();
+    for (int i = 0; i < 4 * 4; ++i) {
+        initial0[i * 4 + 0] = 0;
+        initial0[i * 4 + 1] = 0;
+        initial0[i * 4 + 2] = 255;
+        initial0[i * 4 + 3] = 255;
+        initial1[i * 4 + 0] = 0;
+        initial1[i * 4 + 1] = 0;
+        initial1[i * 4 + 2] = 0;
+        initial1[i * 4 + 3] = 255;
+    }
+
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glGenTextures(2, textures);
+    for (int i = 0; i < 2; ++i) {
+        glBindTexture(GL_TEXTURE_2D, textures[i]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 4, 4, 0, GL_RGBA,
+                     GL_UNSIGNED_BYTE, i == 0 ? initial0 : initial1);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + i,
+                               GL_TEXTURE_2D, textures[i], 0);
+    }
+    glDrawBuffers(2, draw_buffers);
+
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE ||
+        !expect_error(report, "clearbuffer FBO setup", GL_NO_ERROR)) {
+        goto cleanup;
+    }
+
+    glDisable(GL_SCISSOR_TEST);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glClearBufferfv(GL_COLOR, 0, clear_attachment1);
+    glReadBuffer(GL_COLOR_ATTACHMENT1);
+    glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+    if (!expect_error(report, "glClearBufferfv selected draw buffer",
+                      GL_NO_ERROR) ||
+        !pixel_matches(pixel, 255, 64, 0, 255)) {
+        report("[FAIL] Piglit glClearBufferfv draw buffer 0 read {%u,%u,%u,%u}.\n",
+               pixel[0], pixel[1], pixel[2], pixel[3]);
+        goto cleanup;
+    }
+
+    glReadBuffer(GL_COLOR_ATTACHMENT0);
+    glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+    if (!expect_error(report, "glClearBufferfv untouched attachment",
+                      GL_NO_ERROR) ||
+        !pixel_matches(pixel, 0, 0, 255, 255)) {
+        report("[FAIL] Piglit glClearBufferfv touched wrong attachment {%u,%u,%u,%u}.\n",
+               pixel[0], pixel[1], pixel[2], pixel[3]);
+        goto cleanup;
+    }
+
+    glColorMask(GL_FALSE, GL_TRUE, GL_FALSE, GL_TRUE);
+    glClearBufferfv(GL_COLOR, 0, masked_clear);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glReadBuffer(GL_COLOR_ATTACHMENT1);
+    glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+    if (!expect_error(report, "glClearBufferfv color mask", GL_NO_ERROR) ||
+        !pixel_matches(pixel, 255, 128, 0, 64)) {
+        report("[FAIL] Piglit glClearBufferfv masked read {%u,%u,%u,%u}.\n",
+               pixel[0], pixel[1], pixel[2], pixel[3]);
+        goto cleanup;
+    }
+
+    glClearBufferfv(GL_COLOR, -1, invalid_clear);
+    if (!expect_error(report, "glClearBufferfv negative color drawbuffer",
+                      GL_INVALID_VALUE)) {
+        goto cleanup;
+    }
+
+    glClearBufferfv(GL_DEPTH, 1, &depth);
+    if (!expect_error(report, "glClearBufferfv depth drawbuffer",
+                      GL_INVALID_VALUE)) {
+        goto cleanup;
+    }
+
+    glClearBufferuiv(GL_DEPTH, 0, invalid_uint_clear);
+    passed = expect_error(report, "glClearBufferuiv depth enum",
+                          GL_INVALID_ENUM);
+
+cleanup:
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glReadBuffer(GL_COLOR_ATTACHMENT0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    if (textures[0] || textures[1]) glDeleteTextures(2, textures);
+    if (fbo) glDeleteFramebuffers(1, &fbo);
+    return passed;
+}
+
 /*
  * The API cases below are adapted from Piglit's
  * tests/spec/arb_texture_multisample tests. Piglit's MIT license applies.
@@ -1086,6 +1195,7 @@ static const PiglitApiCase kApiCases[] = {
     {"spec/glsl-1.30/link-name-varying", run_unqualified_varying_link},
     {"spec/arb_framebuffer_object/framebuffer-texture-layer-2d-array",
      run_framebuffer_texture_layer_2d_array},
+    {"spec/gl-3.0/clearbuffer-color", run_clear_buffer_color},
     {"draw/constant-white-triangle", run_shadered_triangle_probe},
     {"spec/arb_texture_multisample/minmax", run_multisample_minmax},
     {"spec/arb_texture_multisample/sample-mask", run_multisample_sample_mask},

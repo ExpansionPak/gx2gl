@@ -588,6 +588,11 @@ static bool cpu_clear_draw_color_buffer(GLuint index, const GLfloat *clear_color
   return true;
 }
 
+GLboolean gl_state_cpu_clear_draw_color_buffer(GLuint index,
+                                               const GLfloat *clear_color) {
+  return cpu_clear_draw_color_buffer(index, clear_color) ? GL_TRUE : GL_FALSE;
+}
+
 void _gl_ClearColor(GLclampf red, GLclampf green, GLclampf blue, GLclampf alpha) {
   if (!g_gl_context) return;
   g_gl_context->clear_color[0] = clamp01f(red);
