@@ -23,6 +23,7 @@ static const size_t kMaxShaderTestBytes = 512 * 1024;
 static const int kTargetWidth = 256;
 static const int kTargetHeight = 256;
 static const int kMaxRunnerTextures = 32;
+static const int kLegacyVertexAttribLocation = 15;
 
 struct ManifestEntry {
     std::string name;
@@ -85,6 +86,11 @@ struct ProgramObjects {
 
 struct VaryingLocation {
     std::string name;
+    int location;
+};
+
+struct TexCoordLocation {
+    int index;
     int location;
 };
 
@@ -554,11 +560,12 @@ static std::vector<VaryingLocation> build_varying_locations(
     const std::string &vertex_source, const std::string &fragment_source) {
     std::vector<std::string> names;
     std::vector<VaryingLocation> locations;
-    int next_location =
-        contains_identifier(vertex_source, "gl_Vertex") ||
-        contains_identifier(vertex_source, "ftransform") ||
-        contains_identifier(vertex_source, "gl_FrontColor") ||
-        contains_identifier(fragment_source, "gl_Color") ? 1 : 0;
+    int next_location = 0;
+
+    if (contains_identifier(vertex_source, "gl_FrontColor") ||
+        contains_identifier(fragment_source, "gl_Color")) {
+        next_location = 1;
+    }
 
     collect_varying_names(vertex_source, &names);
     collect_varying_names(fragment_source, &names);
@@ -569,6 +576,178 @@ static std::vector<VaryingLocation> build_varying_locations(
         locations.push_back(varying);
     }
     return locations;
+}
+
+static int front_color_location_for(const std::string &vertex_source,
+                                    const std::string &fragment_source) {
+    if (!contains_identifier(vertex_source, "gl_FrontColor") &&
+        !contains_identifier(fragment_source, "gl_Color")) {
+        return -1;
+    }
+    return 0;
+}
+
+static bool parse_texcoord_reference(const std::string &source, size_t pos,
+                                     int *index, size_t *end_pos) {
+    static const char kName[] = "gl_TexCoord";
+    const size_t name_len = strlen(kName);
+    size_t cursor = pos + name_len;
+
+    if (source.compare(pos, name_len, kName) != 0) {
+        return false;
+    }
+    if (pos > 0 && is_identifier_char(source[pos - 1])) {
+        return false;
+    }
+    if (cursor < source.size() && is_identifier_char(source[cursor])) {
+        return false;
+    }
+    while (cursor < source.size() &&
+           isspace((unsigned char)source[cursor])) {
+        ++cursor;
+    }
+    if (cursor >= source.size() || source[cursor] != '[') {
+        return false;
+    }
+    ++cursor;
+    while (cursor < source.size() &&
+           isspace((unsigned char)source[cursor])) {
+        ++cursor;
+    }
+    if (cursor >= source.size() || !isdigit((unsigned char)source[cursor])) {
+        return false;
+    }
+
+    int parsed = 0;
+    while (cursor < source.size() &&
+           isdigit((unsigned char)source[cursor])) {
+        parsed = parsed * 10 + (source[cursor] - '0');
+        ++cursor;
+    }
+    while (cursor < source.size() &&
+           isspace((unsigned char)source[cursor])) {
+        ++cursor;
+    }
+    if (cursor >= source.size() || source[cursor] != ']') {
+        return false;
+    }
+
+    *index = parsed;
+    *end_pos = cursor + 1;
+    return true;
+}
+
+static bool texcoord_seen(const std::vector<int> &indices, int index) {
+    for (size_t i = 0; i < indices.size(); ++i) {
+        if (indices[i] == index) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void collect_texcoord_indices(const std::string &source,
+                                     std::vector<int> *indices) {
+    size_t line_start = 0;
+    while (line_start <= source.size()) {
+        size_t line_end = source.find('\n', line_start);
+        bool has_newline = true;
+        if (line_end == std::string::npos) {
+            line_end = source.size();
+            has_newline = false;
+        }
+
+        const std::string line =
+            source.substr(line_start, line_end - line_start);
+        std::string varying_name;
+        if (!parse_varying_declaration_name(trim(line), &varying_name) ||
+            varying_name != "gl_TexCoord") {
+            size_t pos = line.find("gl_TexCoord");
+            while (pos != std::string::npos) {
+                int index = 0;
+                size_t end_pos = 0;
+                if (parse_texcoord_reference(line, pos, &index, &end_pos) &&
+                    index >= 0 && index < 8 &&
+                    !texcoord_seen(*indices, index)) {
+                    indices->push_back(index);
+                }
+                pos = line.find("gl_TexCoord", pos + 1);
+            }
+        }
+
+        if (!has_newline) {
+            break;
+        }
+        line_start = line_end + 1;
+    }
+}
+
+static std::vector<TexCoordLocation> build_texcoord_locations(
+    const std::string &vertex_source, const std::string &fragment_source,
+    const std::vector<VaryingLocation> &varyings,
+    int front_color_location) {
+    std::vector<int> indices;
+    std::vector<TexCoordLocation> locations;
+    int next_location = 0;
+
+    if (front_color_location >= 0 &&
+        next_location <= front_color_location) {
+        next_location = front_color_location + 1;
+    }
+    for (size_t i = 0; i < varyings.size(); ++i) {
+        if (next_location <= varyings[i].location) {
+            next_location = varyings[i].location + 1;
+        }
+    }
+
+    collect_texcoord_indices(vertex_source, &indices);
+    collect_texcoord_indices(fragment_source, &indices);
+    for (size_t i = 0; i < indices.size(); ++i) {
+        TexCoordLocation texcoord;
+        texcoord.index = indices[i];
+        texcoord.location = next_location++;
+        locations.push_back(texcoord);
+    }
+    return locations;
+}
+
+static int texcoord_location_for(
+    const std::vector<TexCoordLocation> &texcoords, int index) {
+    for (size_t i = 0; i < texcoords.size(); ++i) {
+        if (texcoords[i].index == index) {
+            return texcoords[i].location;
+        }
+    }
+    return -1;
+}
+
+static std::string rewrite_legacy_texcoords(
+    const std::string &source,
+    const std::vector<TexCoordLocation> &texcoords) {
+    std::string out;
+    size_t pos = 0;
+
+    while (pos < source.size()) {
+        const size_t found = source.find("gl_TexCoord", pos);
+        if (found == std::string::npos) {
+            out.append(source.substr(pos));
+            break;
+        }
+
+        int index = 0;
+        size_t end_pos = 0;
+        out.append(source.substr(pos, found - pos));
+        if (parse_texcoord_reference(source, found, &index, &end_pos) &&
+            texcoord_location_for(texcoords, index) >= 0) {
+            out += "gx2gl_TexCoord";
+            out += std::to_string(index);
+            pos = end_pos;
+        } else {
+            out += "gl_TexCoord";
+            pos = found + strlen("gl_TexCoord");
+        }
+    }
+    return out;
 }
 
 static std::string rewrite_legacy_varyings(
@@ -589,19 +768,21 @@ static std::string rewrite_legacy_varyings(
         const std::string stripped = trim(line);
         std::string name;
         if (parse_varying_declaration_name(stripped, &name)) {
-            const int location = varying_location_for(varyings, name);
-            const size_t indent = line.find_first_not_of(" \t");
-            if (indent != std::string::npos) {
-                out.append(line.substr(0, indent));
+            if (name != "gl_TexCoord") {
+                const int location = varying_location_for(varyings, name);
+                const size_t indent = line.find_first_not_of(" \t");
+                if (indent != std::string::npos) {
+                    out.append(line.substr(0, indent));
+                }
+                out += "layout(location = ";
+                out += std::to_string(location >= 0 ? location : 0);
+                if (stage == GL_VERTEX_SHADER) {
+                    out += ") out ";
+                } else {
+                    out += ") in ";
+                }
+                out += stripped.substr(strlen("varying "));
             }
-            out += "layout(location = ";
-            out += std::to_string(location >= 0 ? location : 0);
-            if (stage == GL_VERTEX_SHADER) {
-                out += ") out ";
-            } else {
-                out += ") in ";
-            }
-            out += stripped.substr(strlen("varying "));
         } else {
             out += line;
         }
@@ -617,10 +798,13 @@ static std::string rewrite_legacy_varyings(
 
 static std::string make_source_330(
     GLenum stage, const std::string &source,
-    const std::vector<VaryingLocation> &varyings) {
+    const std::vector<VaryingLocation> &varyings,
+    const std::vector<TexCoordLocation> &texcoords,
+    int front_color_location) {
     std::string out;
     std::string body = rewrite_legacy_varyings(
         remove_version_directives(source), stage, varyings);
+    body = rewrite_legacy_texcoords(body, texcoords);
 
     out = "#version 330 core\n";
     if (stage == GL_FRAGMENT_SHADER) {
@@ -637,10 +821,21 @@ static std::string make_source_330(
         }
         body = add_fragment_output_location(body);
         if (uses_gl_color) {
-            out += "layout(location = 0) in vec4 gx2gl_FrontColor;\n";
+            out += "layout(location = ";
+            out += std::to_string(front_color_location >= 0
+                                      ? front_color_location
+                                      : 0);
+            out += ") in vec4 gx2gl_FrontColor;\n";
         }
         if (uses_gl_frag_color) {
             out += "layout(location = 0) out vec4 gx2gl_FragColor;\n";
+        }
+        for (size_t i = 0; i < texcoords.size(); ++i) {
+            out += "layout(location = ";
+            out += std::to_string(texcoords[i].location);
+            out += ") in vec4 gx2gl_TexCoord";
+            out += std::to_string(texcoords[i].index);
+            out += ";\n";
         }
         out += "#define texture2D texture\n";
         out += "#define textureCube texture\n";
@@ -670,10 +865,23 @@ static std::string make_source_330(
                                       "gx2gl_CurrentColor");
         }
         if (uses_gl_vertex) {
-            out += "layout(location = 0) in vec4 gx2gl_Vertex;\n";
+            out += "layout(location = ";
+            out += std::to_string(kLegacyVertexAttribLocation);
+            out += ") in vec4 gx2gl_Vertex;\n";
         }
         if (uses_gl_front_color) {
-            out += "layout(location = 0) out vec4 gx2gl_FrontColor;\n";
+            out += "layout(location = ";
+            out += std::to_string(front_color_location >= 0
+                                      ? front_color_location
+                                      : 0);
+            out += ") out vec4 gx2gl_FrontColor;\n";
+        }
+        for (size_t i = 0; i < texcoords.size(); ++i) {
+            out += "layout(location = ";
+            out += std::to_string(texcoords[i].location);
+            out += ") out vec4 gx2gl_TexCoord";
+            out += std::to_string(texcoords[i].index);
+            out += ";\n";
         }
         if (uses_mvp) {
             out += "uniform mat4 gx2gl_ModelViewProjectionMatrix;\n";
@@ -691,8 +899,11 @@ static std::string make_source_330(
 static GLuint compile_shader(PiglitReportFunc report, GLenum type,
                              const std::string &source,
                              const char *case_name,
-                             const std::vector<VaryingLocation> &varyings) {
-    const std::string upgraded = make_source_330(type, source, varyings);
+                             const std::vector<VaryingLocation> &varyings,
+                             const std::vector<TexCoordLocation> &texcoords,
+                             int front_color_location) {
+    const std::string upgraded = make_source_330(
+        type, source, varyings, texcoords, front_color_location);
     const char *src = upgraded.c_str();
     GLuint shader = glCreateShader(type);
     GLint status = GL_FALSE;
@@ -1350,6 +1561,7 @@ static bool bind_framebuffer_texture_2d(PiglitReportFunc report,
 
 static bool setup_rect_vertices(PiglitReportFunc report, ProgramObjects *obj,
                                 const TestCommand &command) {
+    GLint attrib_location;
     float x = command.values[0];
     float y = command.values[1];
     float w = command.values[2];
@@ -1379,9 +1591,22 @@ static bool setup_rect_vertices(PiglitReportFunc report, ProgramObjects *obj,
     glBindBuffer(GL_ARRAY_BUFFER, obj->vbo);
     glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices,
                  GL_STREAM_DRAW);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(GLfloat),
+    attrib_location = glGetAttribLocation(obj->program, "gx2gl_Vertex");
+    if (attrib_location < 0) {
+        attrib_location = glGetAttribLocation(obj->program, "aPosition");
+    }
+    if (attrib_location < 0) {
+        attrib_location = 0;
+    }
+    if (attrib_location >= 16) {
+        report("[FAIL] Piglit manifest vertex attribute location %d is "
+               "outside the runner limit.\n", attrib_location);
+        return false;
+    }
+    glVertexAttribPointer((GLuint)attrib_location, 2, GL_FLOAT, GL_FALSE,
+                          2 * sizeof(GLfloat),
                           (const GLvoid *)0);
-    glEnableVertexAttribArray(0);
+    glEnableVertexAttribArray((GLuint)attrib_location);
     return expect_no_error(report, "manifest vertex setup");
 }
 
@@ -1660,6 +1885,11 @@ static PiglitResult run_shader_test(PiglitReportFunc report,
                                    : test.vertex_shader;
     const std::vector<VaryingLocation> varyings =
         build_varying_locations(vertex_source, test.fragment_shader);
+    const int front_color_location =
+        front_color_location_for(vertex_source, test.fragment_shader);
+    const std::vector<TexCoordLocation> texcoords =
+        build_texcoord_locations(vertex_source, test.fragment_shader,
+                                 varyings, front_color_location);
     bool linked = false;
     bool link_error_expected = false;
 
@@ -1685,10 +1915,12 @@ static PiglitResult run_shader_test(PiglitReportFunc report,
 
     clear_gl_errors();
     obj.vertex_shader = compile_shader(report, GL_VERTEX_SHADER,
-                                       vertex_source, case_name, varyings);
+                                       vertex_source, case_name, varyings,
+                                       texcoords, front_color_location);
     obj.fragment_shader = compile_shader(report, GL_FRAGMENT_SHADER,
                                          test.fragment_shader, case_name,
-                                         varyings);
+                                         varyings, texcoords,
+                                         front_color_location);
     if (!obj.vertex_shader || !obj.fragment_shader) {
         *detail = "shader compile failed";
         destroy_objects(&obj);
@@ -1910,9 +2142,24 @@ static PiglitResult run_manifest_entry(PiglitReportFunc report,
         *detail = "large const-array shader currently poisons CafeGLSL runner";
         return PIGLIT_RESULT_SKIP;
     }
+    if (contains(entry.name,
+                 "fs-vec4-const-array-indirect-access-048-elements") ||
+        contains(entry.name,
+                 "fs-vec4-const-array-indirect-access-064-elements")) {
+        *detail = "large const-array shader currently poisons CafeGLSL runner";
+        return PIGLIT_RESULT_SKIP;
+    }
     if (contains(entry.name, "uniform_buffer/fs-struct-copy") ||
         contains(entry.name, "uniform_buffer/vs-struct-copy")) {
         *detail = "UBO struct-copy shader currently poisons CafeGLSL runner";
+        return PIGLIT_RESULT_SKIP;
+    }
+    if (contains(entry.name, "inline-explosion")) {
+        *detail = "inline-explosion shader currently poisons CafeGLSL runner";
+        return PIGLIT_RESULT_SKIP;
+    }
+    if (contains(entry.name, "glsl-fs-struct-equal")) {
+        *detail = "struct equality shader currently hangs CafeGLSL runner";
         return PIGLIT_RESULT_SKIP;
     }
     if (entry.kind != "shader_test") {

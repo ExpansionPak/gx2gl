@@ -521,7 +521,8 @@ static int assign_binding(bool used_bindings[], int max_bindings) {
 }
 
 static bool scan_explicit_shader_layouts(const char *source,
-                                         bool used_locations[],
+                                         bool used_input_locations[],
+                                         bool used_output_locations[],
                                          bool used_bindings[],
                                          int max_bindings) {
   const char *line_start;
@@ -549,6 +550,9 @@ static bool scan_explicit_shader_layouts(const char *source,
       } else if (parse_interface_declaration(line, &interface_decl) &&
                  !is_builtin_name(interface_decl.name) &&
                  interface_decl.layout.has_location) {
+        bool *used_locations =
+            interface_decl.storage == "out" ? used_output_locations
+                                            : used_input_locations;
         int span = shader_type_location_span(interface_decl.type) *
                    interface_decl.array_size;
         if (!reserve_interface_locations(used_locations,
@@ -882,11 +886,13 @@ static char *lower_source_for_cafeglsl(const char *source,
                                        int info_log_max_length) {
   std::string lowered_source(source);
   std::string rewritten_source;
-  bool used_locations[kMaxShaderInterfaceLocations] = {};
+  bool used_input_locations[kMaxShaderInterfaceLocations] = {};
+  bool used_output_locations[kMaxShaderInterfaceLocations] = {};
   bool used_bindings[GL33_MAX_COMBINED_TEXTURE_IMAGE_UNITS] = {};
   size_t line_start = 0;
 
-  if (!scan_explicit_shader_layouts(source, used_locations, used_bindings,
+  if (!scan_explicit_shader_layouts(source, used_input_locations,
+                                    used_output_locations, used_bindings,
                                     GL33_MAX_COMBINED_TEXTURE_IMAGE_UNITS)) {
     write_info_log(info_log_out, info_log_max_length,
                    "Shader has duplicate or out-of-range explicit layout "
@@ -924,6 +930,9 @@ static char *lower_source_for_cafeglsl(const char *source,
       } else if (parse_interface_declaration(parse_line, &interface_decl) &&
                  !is_builtin_name(interface_decl.name) &&
                  !interface_decl.layout.has_location) {
+        bool *used_locations =
+            interface_decl.storage == "out" ? used_output_locations
+                                            : used_input_locations;
         int span = shader_type_location_span(interface_decl.type) *
                    interface_decl.array_size;
         int location = assign_interface_location(used_locations,
