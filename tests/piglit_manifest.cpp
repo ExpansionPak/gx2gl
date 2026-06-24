@@ -2275,8 +2275,9 @@ static PiglitResult run_manifest_entry(PiglitReportFunc report,
         *detail = "inline-explosion shader currently poisons CafeGLSL runner";
         return PIGLIT_RESULT_SKIP;
     }
-    if (contains(entry.name, "glsl-fs-struct-equal")) {
-        *detail = "struct equality shader currently hangs CafeGLSL runner";
+    if (contains(entry.name, "glsl-fs-struct-equal") ||
+        contains(entry.name, "glsl-fs-struct-notequal")) {
+        *detail = "struct comparison shader currently hangs CafeGLSL runner";
         return PIGLIT_RESULT_SKIP;
     }
     if (entry.kind != "shader_test") {
