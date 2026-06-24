@@ -3267,7 +3267,12 @@ void gl_bind_shaders(void) {
   if (!is_valid_program(prog_id)) return;
   GLProgram *prog = &g_programs[prog_id];
   if (!prog->group || !prog->linked) return;
-  GX2SetShaderMode(choose_shader_mode(prog));
+  GX2ShaderMode shader_mode = choose_shader_mode(prog);
+  GX2SetShaderMode(shader_mode);
+  if (shader_mode == GX2_SHADER_MODE_UNIFORM_BLOCK ||
+      shader_mode == GX2_SHADER_MODE_GEOMETRY_SHADER) {
+    GX2Invalidate(GX2_INVALIDATE_MODE_SHADER, NULL, 0xFFFFFFFFu);
+  }
   if (prog->group->vertexShader) GX2SetVertexShader(prog->group->vertexShader);
   if (prog->group->pixelShader)  GX2SetPixelShader(prog->group->pixelShader);
   if (!stage_uses_virtual_uniform_block(prog, false)) {
