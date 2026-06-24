@@ -22,6 +22,7 @@ static const char *kContentManifest =
 static const size_t kMaxShaderTestBytes = 512 * 1024;
 static const int kTargetWidth = 256;
 static const int kTargetHeight = 256;
+static const int kMaxRunnerTextures = 32;
 
 struct ManifestEntry {
     std::string name;
@@ -46,6 +47,8 @@ struct TestCommand {
         ClearColor,
         Clear,
         Color,
+        TextureRgbw,
+        FramebufferTexture2D,
         Uniform,
         DrawRect,
         Ortho,
@@ -75,6 +78,9 @@ struct ProgramObjects {
     GLuint texture;
     GLuint vao;
     GLuint vbo;
+    GLuint generated_textures[kMaxRunnerTextures];
+    int generated_texture_width[kMaxRunnerTextures];
+    int generated_texture_height[kMaxRunnerTextures];
 };
 
 static void add_result(PiglitRunStats *stats, PiglitResult result) {
@@ -237,6 +243,18 @@ static bool is_integer_uniform_type(const std::string &type) {
            type == "bvec3" || type == "bvec4";
 }
 
+static GLenum parse_gl_format_name(const std::string &name) {
+    if (name == "GL_RGBA8") return GL_RGBA8;
+    if (name == "GL_RGB8") return GL_RGB8;
+    if (name == "GL_RGBA") return GL_RGBA;
+    if (name == "GL_RGB") return GL_RGB;
+    if (name == "GL_R8") return GL_R8;
+    if (name == "GL_RG8") return GL_RG8;
+    if (name == "GL_RGBA16F") return GL_RGBA16F;
+    if (name == "GL_RGBA32F") return GL_RGBA32F;
+    return 0;
+}
+
 static std::vector<float> parse_float_values(std::string line) {
     std::vector<float> values;
     for (size_t i = 0; i < line.size(); ++i) {
@@ -316,10 +334,53 @@ static bool expect_no_error(PiglitReportFunc report, const char *label) {
     return false;
 }
 
+static std::string add_fragment_output_location(const std::string &source) {
+    std::string out;
+    size_t pos = 0;
+    bool output_seen = false;
+
+    while (pos <= source.size()) {
+        size_t next = source.find('\n', pos);
+        bool has_newline = true;
+        if (next == std::string::npos) {
+            next = source.size();
+            has_newline = false;
+        }
+
+        const std::string line = source.substr(pos, next - pos);
+        const std::string stripped = trim(line);
+        if (!output_seen && starts_with(stripped, "out ") &&
+            !contains(stripped, "layout") &&
+            (contains(stripped, " vec4 ") ||
+             starts_with(stripped, "out vec4 "))) {
+            const size_t indent = line.find_first_not_of(" \t");
+            if (indent != std::string::npos) {
+                out.append(line.substr(0, indent));
+            }
+            out += "layout(location = 0) ";
+            out += stripped;
+            output_seen = true;
+        } else {
+            out += line;
+        }
+
+        if (has_newline) {
+            out += '\n';
+            pos = next + 1;
+        } else {
+            break;
+        }
+    }
+    return out;
+}
+
 static std::string make_source_330(GLenum stage, const std::string &source) {
     std::string out;
     const std::string trimmed = trim(source);
     if (starts_with(trimmed, "#version")) {
+        if (stage == GL_FRAGMENT_SHADER) {
+            return add_fragment_output_location(source);
+        }
         return source;
     }
 
@@ -597,6 +658,46 @@ static bool parse_command_line(const std::string &raw_line,
         command->value_count = 4;
         return true;
     }
+    if (tokens.size() >= 4 && tokens[0] == "texture" &&
+        tokens[1] == "rgbw") {
+        const std::vector<float> floats = parse_float_values(line);
+        GLenum internal_format = GL_RGBA8;
+
+        if (floats.size() < 3) {
+            *skip_reason = "unsupported texture rgbw";
+            return false;
+        }
+        if (tokens.size() >= 6) {
+            internal_format = parse_gl_format_name(tokens[tokens.size() - 1]);
+            if (!internal_format) {
+                *skip_reason = "unsupported texture format";
+                return false;
+            }
+        }
+        command->type = TestCommand::TextureRgbw;
+        command->int_values[0] = (GLint)floats[0];
+        command->int_values[1] = (GLint)floats[1];
+        command->int_values[2] = (GLint)floats[2];
+        command->uint_values[0] = (GLuint)internal_format;
+        command->value_count = 3;
+        return true;
+    }
+    if (tokens.size() >= 4 && tokens[0] == "fb" &&
+        tokens[1] == "tex" && tokens[2] == "2d") {
+        command->type = TestCommand::FramebufferTexture2D;
+        command->value_count = (int)tokens.size() - 3;
+        if (command->value_count > 8) {
+            *skip_reason = "too many framebuffer attachments";
+            return false;
+        }
+        for (int i = 0; i < command->value_count; ++i) {
+            if (!parse_int32(tokens[3 + i], &command->int_values[i])) {
+                *skip_reason = "unsupported framebuffer texture";
+                return false;
+            }
+        }
+        return true;
+    }
     if (tokens.size() >= 4 && tokens[0] == "uniform") {
         command->type = TestCommand::Uniform;
         command->uniform_type = tokens[1];
@@ -865,6 +966,102 @@ static bool setup_render_target(PiglitReportFunc report, ProgramObjects *obj) {
         return false;
     }
     return expect_no_error(report, "manifest FBO setup");
+}
+
+static void rgbw_pixel(int x, int y, GLubyte *out) {
+    const bool right = (x & 1) != 0;
+    const bool top = (y & 1) != 0;
+    out[0] = right ? 0 : 255;
+    out[1] = top ? 0 : 255;
+    out[2] = (right == top) ? 255 : 0;
+    out[3] = 255;
+}
+
+static bool create_rgbw_texture(PiglitReportFunc report, ProgramObjects *obj,
+                                const TestCommand &command) {
+    const int unit = command.int_values[0];
+    const int width = command.int_values[1];
+    const int height = command.int_values[2];
+    const GLenum internal_format = (GLenum)command.uint_values[0];
+    GLuint texture = 0;
+
+    if (unit < 0 || unit >= kMaxRunnerTextures ||
+        width <= 0 || height <= 0) {
+        report("[FAIL] Piglit manifest invalid texture rgbw command.\n");
+        return false;
+    }
+
+    if (obj->generated_textures[unit]) {
+        glDeleteTextures(1, &obj->generated_textures[unit]);
+        obj->generated_textures[unit] = 0;
+    }
+
+    std::vector<GLubyte> pixels((size_t)width * (size_t)height * 4u);
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            rgbw_pixel(x, y,
+                       &pixels[((size_t)y * (size_t)width +
+                                (size_t)x) * 4u]);
+        }
+    }
+
+    glGenTextures(1, &texture);
+    glActiveTexture(GL_TEXTURE0 + (GLenum)unit);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, (GLint)internal_format, width, height,
+                 0, GL_RGBA, GL_UNSIGNED_BYTE, &pixels[0]);
+    if (!expect_no_error(report, "manifest texture rgbw")) {
+        if (texture) {
+            glDeleteTextures(1, &texture);
+        }
+        return false;
+    }
+
+    obj->generated_textures[unit] = texture;
+    obj->generated_texture_width[unit] = width;
+    obj->generated_texture_height[unit] = height;
+    return true;
+}
+
+static bool bind_framebuffer_texture_2d(PiglitReportFunc report,
+                                        ProgramObjects *obj,
+                                        const TestCommand &command) {
+    GLenum attachments[8];
+
+    if (command.value_count <= 0 || command.value_count > 8) {
+        report("[FAIL] Piglit manifest invalid fb tex 2d command.\n");
+        return false;
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, obj->fbo);
+    for (int i = 0; i < command.value_count; ++i) {
+        const int unit = command.int_values[i];
+        GLuint texture = 0;
+
+        if (unit >= 0) {
+            if (unit >= kMaxRunnerTextures ||
+                !obj->generated_textures[unit]) {
+                report("[FAIL] Piglit manifest fb tex 2d references "
+                       "missing texture %d.\n", unit);
+                return false;
+            }
+            texture = obj->generated_textures[unit];
+        }
+        attachments[i] = GL_COLOR_ATTACHMENT0 + (GLenum)i;
+        glFramebufferTexture2D(GL_FRAMEBUFFER, attachments[i],
+                               GL_TEXTURE_2D, texture, 0);
+    }
+    glDrawBuffers(command.value_count, attachments);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        report("[FAIL] Piglit manifest fb tex 2d produced incomplete FBO.\n");
+        return false;
+    }
+    glViewport(0, 0, kTargetWidth, kTargetHeight);
+    return expect_no_error(report, "manifest fb tex 2d");
 }
 
 static bool setup_rect_vertices(PiglitReportFunc report, ProgramObjects *obj,
@@ -1152,6 +1349,11 @@ static void destroy_objects(ProgramObjects *obj) {
     glBindVertexArray(0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glBindTexture(GL_TEXTURE_2D, 0);
+    for (int i = 0; i < kMaxRunnerTextures; ++i) {
+        if (obj->generated_textures[i]) {
+            glDeleteTextures(1, &obj->generated_textures[i]);
+        }
+    }
     if (obj->vbo) glDeleteBuffers(1, &obj->vbo);
     if (obj->vao) glDeleteVertexArrays(1, &obj->vao);
     if (obj->texture) glDeleteTextures(1, &obj->texture);
@@ -1288,6 +1490,20 @@ static PiglitResult run_shader_test(PiglitReportFunc report,
                                          ? command.values
                                          : NULL)) {
                     *detail = "ortho setup failed";
+                    destroy_objects(&obj);
+                    return PIGLIT_RESULT_FAIL;
+                }
+                break;
+            case TestCommand::TextureRgbw:
+                if (!create_rgbw_texture(report, &obj, command)) {
+                    *detail = "texture rgbw failed";
+                    destroy_objects(&obj);
+                    return PIGLIT_RESULT_FAIL;
+                }
+                break;
+            case TestCommand::FramebufferTexture2D:
+                if (!bind_framebuffer_texture_2d(report, &obj, command)) {
+                    *detail = "framebuffer texture failed";
                     destroy_objects(&obj);
                     return PIGLIT_RESULT_FAIL;
                 }
