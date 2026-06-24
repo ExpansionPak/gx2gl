@@ -2594,9 +2594,10 @@ void _gl_BlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
             }
             GX2ResolveAAColorBuffer(source_buffer, destination_storage,
                                     destination_mip, destination_slice);
+            GX2DrawDone();
+            invalidate_surface_after_color_write(destination_storage);
             gl_framebuffer_mark_bound_color_buffer_dirty(index);
         }
-        GX2DrawDone();
         g_gl_context->dirty_flags = 0xFFFFFFFFu;
         color_blit_completed = true;
     }
