@@ -83,6 +83,11 @@ struct ProgramObjects {
     int generated_texture_height[kMaxRunnerTextures];
 };
 
+struct VaryingLocation {
+    std::string name;
+    int location;
+};
+
 static void add_result(PiglitRunStats *stats, PiglitResult result) {
     ++stats->total;
     if (result == PIGLIT_RESULT_PASS) {
@@ -469,9 +474,153 @@ static std::string remove_version_directives(const std::string &source) {
     return out;
 }
 
-static std::string make_source_330(GLenum stage, const std::string &source) {
+static bool parse_varying_declaration_name(const std::string &stripped,
+                                           std::string *name) {
+    if (!starts_with(stripped, "varying ")) {
+        return false;
+    }
+
+    std::string decl = stripped.substr(strlen("varying "));
+    const size_t semi = decl.find(';');
+    if (semi == std::string::npos) {
+        return false;
+    }
+    decl.resize(semi);
+    const std::vector<std::string> tokens = split_ws(decl);
+    if (tokens.size() < 2) {
+        return false;
+    }
+
+    std::string parsed = tokens[tokens.size() - 1];
+    const size_t comma = parsed.find(',');
+    if (comma != std::string::npos) {
+        parsed.resize(comma);
+    }
+    const size_t array = parsed.find('[');
+    if (array != std::string::npos) {
+        parsed.resize(array);
+    }
+    if (parsed.empty()) {
+        return false;
+    }
+    *name = parsed;
+    return true;
+}
+
+static int varying_location_for(const std::vector<VaryingLocation> &varyings,
+                                const std::string &name) {
+    for (size_t i = 0; i < varyings.size(); ++i) {
+        if (varyings[i].name == name) {
+            return varyings[i].location;
+        }
+    }
+    return -1;
+}
+
+static void collect_varying_names(const std::string &source,
+                                  std::vector<std::string> *names) {
+    size_t pos = 0;
+    while (pos <= source.size()) {
+        size_t next = source.find('\n', pos);
+        bool has_newline = true;
+        if (next == std::string::npos) {
+            next = source.size();
+            has_newline = false;
+        }
+
+        std::string name;
+        if (parse_varying_declaration_name(
+                trim(source.substr(pos, next - pos)), &name)) {
+            bool seen = false;
+            for (size_t i = 0; i < names->size(); ++i) {
+                if ((*names)[i] == name) {
+                    seen = true;
+                    break;
+                }
+            }
+            if (!seen) {
+                names->push_back(name);
+            }
+        }
+
+        if (!has_newline) {
+            break;
+        }
+        pos = next + 1;
+    }
+}
+
+static std::vector<VaryingLocation> build_varying_locations(
+    const std::string &vertex_source, const std::string &fragment_source) {
+    std::vector<std::string> names;
+    std::vector<VaryingLocation> locations;
+    int next_location =
+        contains_identifier(vertex_source, "gl_Vertex") ||
+        contains_identifier(vertex_source, "ftransform") ||
+        contains_identifier(vertex_source, "gl_FrontColor") ||
+        contains_identifier(fragment_source, "gl_Color") ? 1 : 0;
+
+    collect_varying_names(vertex_source, &names);
+    collect_varying_names(fragment_source, &names);
+    for (size_t i = 0; i < names.size(); ++i) {
+        VaryingLocation varying;
+        varying.name = names[i];
+        varying.location = next_location++;
+        locations.push_back(varying);
+    }
+    return locations;
+}
+
+static std::string rewrite_legacy_varyings(
+    const std::string &source, GLenum stage,
+    const std::vector<VaryingLocation> &varyings) {
     std::string out;
-    std::string body = remove_version_directives(source);
+    size_t pos = 0;
+
+    while (pos <= source.size()) {
+        size_t next = source.find('\n', pos);
+        bool has_newline = true;
+        if (next == std::string::npos) {
+            next = source.size();
+            has_newline = false;
+        }
+
+        const std::string line = source.substr(pos, next - pos);
+        const std::string stripped = trim(line);
+        std::string name;
+        if (parse_varying_declaration_name(stripped, &name)) {
+            const int location = varying_location_for(varyings, name);
+            const size_t indent = line.find_first_not_of(" \t");
+            if (indent != std::string::npos) {
+                out.append(line.substr(0, indent));
+            }
+            out += "layout(location = ";
+            out += std::to_string(location >= 0 ? location : 0);
+            if (stage == GL_VERTEX_SHADER) {
+                out += ") out ";
+            } else {
+                out += ") in ";
+            }
+            out += stripped.substr(strlen("varying "));
+        } else {
+            out += line;
+        }
+
+        if (!has_newline) {
+            break;
+        }
+        out += '\n';
+        pos = next + 1;
+    }
+    return out;
+}
+
+static std::string make_source_330(
+    GLenum stage, const std::string &source,
+    const std::vector<VaryingLocation> &varyings) {
+    std::string out;
+    std::string body = rewrite_legacy_varyings(
+        remove_version_directives(source), stage, varyings);
 
     out = "#version 330 core\n";
     if (stage == GL_FRAGMENT_SHADER) {
@@ -493,7 +642,6 @@ static std::string make_source_330(GLenum stage, const std::string &source) {
         if (uses_gl_frag_color) {
             out += "layout(location = 0) out vec4 gx2gl_FragColor;\n";
         }
-        out += "#define varying layout(location = 0) in\n";
         out += "#define texture2D texture\n";
         out += "#define textureCube texture\n";
     } else if (stage == GL_VERTEX_SHADER) {
@@ -534,7 +682,6 @@ static std::string make_source_330(GLenum stage, const std::string &source) {
             out += "uniform vec4 gx2gl_CurrentColor;\n";
         }
         out += "#define attribute layout(location = 0) in\n";
-        out += "#define varying layout(location = 0) out\n";
         out += "#define ftransform() (gx2gl_ModelViewProjectionMatrix * gx2gl_Vertex)\n";
     }
     out += body;
@@ -543,8 +690,9 @@ static std::string make_source_330(GLenum stage, const std::string &source) {
 
 static GLuint compile_shader(PiglitReportFunc report, GLenum type,
                              const std::string &source,
-                             const char *case_name) {
-    const std::string upgraded = make_source_330(type, source);
+                             const char *case_name,
+                             const std::vector<VaryingLocation> &varyings) {
+    const std::string upgraded = make_source_330(type, source, varyings);
     const char *src = upgraded.c_str();
     GLuint shader = glCreateShader(type);
     GLint status = GL_FALSE;
@@ -1507,6 +1655,11 @@ static PiglitResult run_shader_test(PiglitReportFunc report,
     const ShaderTest test = parse_shader_test(contents);
     std::vector<TestCommand> commands;
     ProgramObjects obj = {};
+    const std::string vertex_source =
+        test.vertex_shader.empty() ? std::string(fallback_vertex_shader())
+                                   : test.vertex_shader;
+    const std::vector<VaryingLocation> varyings =
+        build_varying_locations(vertex_source, test.fragment_shader);
     bool linked = false;
     bool link_error_expected = false;
 
@@ -1531,13 +1684,11 @@ static PiglitResult run_shader_test(PiglitReportFunc report,
     }
 
     clear_gl_errors();
-    obj.vertex_shader = compile_shader(
-        report, GL_VERTEX_SHADER,
-        test.vertex_shader.empty() ? std::string(fallback_vertex_shader())
-                                   : test.vertex_shader,
-        case_name);
+    obj.vertex_shader = compile_shader(report, GL_VERTEX_SHADER,
+                                       vertex_source, case_name, varyings);
     obj.fragment_shader = compile_shader(report, GL_FRAGMENT_SHADER,
-                                         test.fragment_shader, case_name);
+                                         test.fragment_shader, case_name,
+                                         varyings);
     if (!obj.vertex_shader || !obj.fragment_shader) {
         *detail = "shader compile failed";
         destroy_objects(&obj);
@@ -1759,7 +1910,8 @@ static PiglitResult run_manifest_entry(PiglitReportFunc report,
         *detail = "large const-array shader currently poisons CafeGLSL runner";
         return PIGLIT_RESULT_SKIP;
     }
-    if (contains(entry.name, "uniform_buffer/fs-struct-copy")) {
+    if (contains(entry.name, "uniform_buffer/fs-struct-copy") ||
+        contains(entry.name, "uniform_buffer/vs-struct-copy")) {
         *detail = "UBO struct-copy shader currently poisons CafeGLSL runner";
         return PIGLIT_RESULT_SKIP;
     }
