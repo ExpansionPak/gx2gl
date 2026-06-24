@@ -1110,6 +1110,7 @@ static const PiglitApiCase kApiCases[] = {
 } // namespace
 
 PiglitRunStats run_piglit_tests(PiglitReportFunc report,
+                                PiglitBeginFunc begin_func,
                                 PiglitResultFunc result_func,
                                 PiglitContinueFunc continue_func,
                                 void *user_data) {
@@ -1121,6 +1122,9 @@ PiglitRunStats run_piglit_tests(PiglitReportFunc report,
 
     for (size_t i = 0; i < sizeof(kApiCases) / sizeof(kApiCases[0]); ++i) {
         if (continue_func && !continue_func(user_data)) break;
+        if (begin_func) {
+            begin_func(kApiCases[i].name, user_data);
+        }
         const bool passed = kApiCases[i].run(report);
         const PiglitResult result = passed ? PIGLIT_RESULT_PASS
                                            : PIGLIT_RESULT_FAIL;
@@ -1139,6 +1143,9 @@ PiglitRunStats run_piglit_tests(PiglitReportFunc report,
 
     for (size_t i = 0; i < sizeof(kShaderCases) / sizeof(kShaderCases[0]); ++i) {
         if (continue_func && !continue_func(user_data)) break;
+        if (begin_func) {
+            begin_func(kShaderCases[i].name, user_data);
+        }
         const bool passed = run_shader_case(report, kShaderCases[i]);
         const PiglitResult result = passed ? PIGLIT_RESULT_PASS
                                            : PIGLIT_RESULT_FAIL;
@@ -1157,7 +1164,7 @@ PiglitRunStats run_piglit_tests(PiglitReportFunc report,
     }
 
     const PiglitRunStats manifest =
-        run_piglit_manifest_tests(report, result_func, continue_func,
+        run_piglit_manifest_tests(report, begin_func, result_func, continue_func,
                                   user_data);
     stats.total += manifest.total;
     stats.pass += manifest.pass;

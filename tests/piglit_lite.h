@@ -18,9 +18,11 @@ typedef struct {
 
 typedef void (*PiglitResultFunc)(const char *name, PiglitResult result,
                                  const char *detail, void *user_data);
+typedef void (*PiglitBeginFunc)(const char *name, void *user_data);
 typedef int (*PiglitContinueFunc)(void *user_data);
 
 PiglitRunStats run_piglit_tests(PiglitReportFunc report,
+                                PiglitBeginFunc begin_func,
                                 PiglitResultFunc result_func,
                                 PiglitContinueFunc continue_func,
                                 void *user_data);

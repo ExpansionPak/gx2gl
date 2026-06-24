@@ -88,6 +88,40 @@ static void write_summary(const char *path, const char *status,
     fclose(file);
 }
 
+static void write_progress(const RunnerState *state, const char *current) {
+    FILE *file = fopen(kProgressPath, "wb");
+    if (!file) {
+        return;
+    }
+
+    fprintf(file, "status=running\n");
+    fprintf(file, "suite=piglit\n");
+    fprintf(file, "total=%u\n", state->stats.total);
+    fprintf(file, "pass=%u\n", state->stats.pass);
+    fprintf(file, "fail=%u\n", state->stats.fail);
+    fprintf(file, "skip=%u\n", state->stats.skip);
+    if (current && current[0]) {
+        fprintf(file, "current=%s\n", current);
+    }
+    fclose(file);
+}
+
+static bool is_manifest_shader_case(const char *name) {
+    return name && strstr(name, ".shader_test") != NULL;
+}
+
+static void begin_case(const char *name, void *user_data) {
+    RunnerState *state = static_cast<RunnerState *>(user_data);
+    if (!is_manifest_shader_case(name)) {
+        return;
+    }
+    if (state->case_log) {
+        fprintf(state->case_log, "begin\tname=%s\n", name);
+        fflush(state->case_log);
+    }
+    write_progress(state, name);
+}
+
 static void record_result(const char *name, PiglitResult result,
                           const char *detail, void *user_data) {
     RunnerState *state = static_cast<RunnerState *>(user_data);
@@ -105,13 +139,23 @@ static void record_result(const char *name, PiglitResult result,
             break;
     }
 
-    if (state->case_log) {
+    const bool log_case =
+        result != PIGLIT_RESULT_SKIP || is_manifest_shader_case(name);
+    if (state->case_log && log_case) {
         fprintf(state->case_log, "result=%s\tname=%s\tdetail=%s\n",
                 result_name(result), name, detail ? detail : "");
-        fflush(state->case_log);
+        if (result != PIGLIT_RESULT_SKIP ||
+            (state->stats.total & 63u) == 0u) {
+            fflush(state->case_log);
+        }
     }
-    write_summary(kProgressPath, "running", state->stats);
-    report("[%s] %s\n", result_name(result), name);
+    if (result != PIGLIT_RESULT_SKIP ||
+        (state->stats.total & 63u) == 0u) {
+        write_progress(state, NULL);
+    }
+    if (result == PIGLIT_RESULT_FAIL) {
+        report("[%s] %s\n", result_name(result), name);
+    }
 }
 
 static int process_proc_ui(void *user_data) {
@@ -389,7 +433,8 @@ int main(int argc, char **argv) {
     write_summary(kProgressPath, "running", state.stats);
 
     const PiglitRunStats returned =
-        run_piglit_tests(report, record_result, process_proc_ui, &state);
+        run_piglit_tests(report, begin_case, record_result, process_proc_ui,
+                         &state);
     if (returned.total != state.stats.total ||
         returned.pass != state.stats.pass ||
         returned.fail != state.stats.fail ||
@@ -406,6 +451,7 @@ int main(int argc, char **argv) {
                              ? "failed"
                              : (state.exit_requested ? "cancelled" : "complete");
     write_summary(kResultsPath, status, state.stats);
+    write_summary(kProgressPath, status, state.stats);
     write_done_flag();
 
     show_final_result(status, state);

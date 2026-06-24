@@ -134,6 +134,50 @@ static bool contains(const std::string &value, const char *needle) {
     return value.find(needle) != std::string::npos;
 }
 
+static bool is_identifier_char(char c) {
+    return isalnum((unsigned char)c) || c == '_';
+}
+
+static bool contains_identifier(const std::string &value,
+                                const char *needle) {
+    const size_t needle_len = strlen(needle);
+    size_t pos = value.find(needle);
+    while (pos != std::string::npos) {
+        const bool left_ok =
+            pos == 0 || !is_identifier_char(value[pos - 1]);
+        const size_t end = pos + needle_len;
+        const bool right_ok =
+            end >= value.size() || !is_identifier_char(value[end]);
+        if (left_ok && right_ok) {
+            return true;
+        }
+        pos = value.find(needle, pos + 1);
+    }
+    return false;
+}
+
+static std::string replace_identifier(std::string value, const char *from,
+                                      const char *to) {
+    const size_t from_len = strlen(from);
+    const size_t to_len = strlen(to);
+    size_t pos = value.find(from);
+
+    while (pos != std::string::npos) {
+        const bool left_ok =
+            pos == 0 || !is_identifier_char(value[pos - 1]);
+        const size_t end = pos + from_len;
+        const bool right_ok =
+            end >= value.size() || !is_identifier_char(value[end]);
+        if (left_ok && right_ok) {
+            value.replace(pos, from_len, to);
+            pos = value.find(from, pos + to_len);
+        } else {
+            pos = value.find(from, pos + 1);
+        }
+    }
+    return value;
+}
+
 static std::vector<std::string> split_ws(const std::string &line) {
     std::vector<std::string> out;
     size_t i = 0;
@@ -334,6 +378,29 @@ static bool expect_no_error(PiglitReportFunc report, const char *label) {
     return false;
 }
 
+static std::string sanitize_info_log(const char *log, size_t max_len) {
+    std::string out;
+
+    for (size_t i = 0; i < max_len && log[i]; ++i) {
+        const unsigned char c = (unsigned char)log[i];
+        if (c == '\n' || c == '\r' || c == '\t') {
+            out.push_back((char)c);
+        } else if (c >= 32 && c < 127) {
+            out.push_back((char)c);
+        } else {
+            out.push_back('?');
+        }
+        if (out.size() >= 320u) {
+            out += "...";
+            break;
+        }
+    }
+    if (out.empty()) {
+        out = "(empty log)";
+    }
+    return out;
+}
+
 static std::string add_fragment_output_location(const std::string &source) {
     std::string out;
     size_t pos = 0;
@@ -374,37 +441,103 @@ static std::string add_fragment_output_location(const std::string &source) {
     return out;
 }
 
+static std::string remove_version_directives(const std::string &source) {
+    std::string out;
+    size_t pos = 0;
+
+    while (pos <= source.size()) {
+        size_t next = source.find('\n', pos);
+        bool has_newline = true;
+        if (next == std::string::npos) {
+            next = source.size();
+            has_newline = false;
+        }
+
+        const std::string line = source.substr(pos, next - pos);
+        if (!starts_with(trim(line), "#version")) {
+            out += line;
+            if (has_newline) {
+                out += '\n';
+            }
+        }
+
+        if (!has_newline) {
+            break;
+        }
+        pos = next + 1;
+    }
+    return out;
+}
+
 static std::string make_source_330(GLenum stage, const std::string &source) {
     std::string out;
-    const std::string trimmed = trim(source);
-    if (starts_with(trimmed, "#version")) {
-        if (stage == GL_FRAGMENT_SHADER) {
-            return add_fragment_output_location(source);
-        }
-        return source;
-    }
+    std::string body = remove_version_directives(source);
 
     out = "#version 330 core\n";
     if (stage == GL_FRAGMENT_SHADER) {
-        out += "in vec4 gx2gl_FrontColor;\n";
-        out += "layout(location = 0) out vec4 gx2gl_FragColor;\n";
-        out += "#define gl_FragColor gx2gl_FragColor\n";
-        out += "#define gl_Color gx2gl_FrontColor\n";
+        const bool uses_gl_color = contains_identifier(body, "gl_Color");
+        const bool uses_gl_frag_color =
+            contains_identifier(body, "gl_FragColor");
+        if (uses_gl_color) {
+            body = replace_identifier(body, "gl_Color",
+                                      "gx2gl_FrontColor");
+        }
+        if (uses_gl_frag_color) {
+            body = replace_identifier(body, "gl_FragColor",
+                                      "gx2gl_FragColor");
+        }
+        body = add_fragment_output_location(body);
+        if (uses_gl_color) {
+            out += "layout(location = 0) in vec4 gx2gl_FrontColor;\n";
+        }
+        if (uses_gl_frag_color) {
+            out += "layout(location = 0) out vec4 gx2gl_FragColor;\n";
+        }
+        out += "#define varying layout(location = 0) in\n";
         out += "#define texture2D texture\n";
         out += "#define textureCube texture\n";
     } else if (stage == GL_VERTEX_SHADER) {
-        out += "layout(location = 0) in vec4 gx2gl_Vertex;\n";
-        out += "out vec4 gx2gl_FrontColor;\n";
-        out += "uniform mat4 gx2gl_ModelViewProjectionMatrix;\n";
-        out += "uniform vec4 gx2gl_CurrentColor;\n";
-        out += "#define attribute in\n";
-        out += "#define varying out\n";
-        out += "#define gl_Vertex gx2gl_Vertex\n";
-        out += "#define gl_FrontColor gx2gl_FrontColor\n";
-        out += "#define gl_ModelViewProjectionMatrix gx2gl_ModelViewProjectionMatrix\n";
-        out += "#define ftransform() (gl_ModelViewProjectionMatrix * gl_Vertex)\n";
+        const bool uses_gl_vertex = contains_identifier(body, "gl_Vertex") ||
+                                    contains_identifier(body, "ftransform");
+        const bool uses_gl_front_color =
+            contains_identifier(body, "gl_FrontColor");
+        const bool uses_mvp =
+            contains_identifier(body, "gl_ModelViewProjectionMatrix") ||
+            contains_identifier(body, "ftransform");
+        const bool uses_current_color =
+            contains_identifier(body, "gl_CurrentColor");
+        if (uses_gl_vertex) {
+            body = replace_identifier(body, "gl_Vertex", "gx2gl_Vertex");
+        }
+        if (uses_gl_front_color) {
+            body = replace_identifier(body, "gl_FrontColor",
+                                      "gx2gl_FrontColor");
+        }
+        if (uses_mvp) {
+            body = replace_identifier(body, "gl_ModelViewProjectionMatrix",
+                                      "gx2gl_ModelViewProjectionMatrix");
+        }
+        if (uses_current_color) {
+            body = replace_identifier(body, "gl_CurrentColor",
+                                      "gx2gl_CurrentColor");
+        }
+        if (uses_gl_vertex) {
+            out += "layout(location = 0) in vec4 gx2gl_Vertex;\n";
+        }
+        if (uses_gl_front_color) {
+            out += "layout(location = 0) out vec4 gx2gl_FrontColor;\n";
+        }
+        if (uses_mvp) {
+            out += "uniform mat4 gx2gl_ModelViewProjectionMatrix;\n";
+        }
+        if (uses_current_color) {
+            out += "uniform vec4 gx2gl_CurrentColor;\n";
+        }
+        out += "#define attribute layout(location = 0) in\n";
+        out += "#define varying layout(location = 0) out\n";
+        out += "#define ftransform() (gx2gl_ModelViewProjectionMatrix * gx2gl_Vertex)\n";
     }
-    out += source;
+    out += body;
     return out;
 }
 
@@ -438,8 +571,9 @@ static GLuint compile_shader(PiglitReportFunc report, GLenum type,
 
     memset(log, 0, sizeof(log));
     glGetShaderInfoLog(shader, sizeof(log), &log_len, log);
+    const std::string clean_log = sanitize_info_log(log, sizeof(log));
     report("[FAIL] Piglit manifest %s shader compile failed: %s\n",
-           case_name, log);
+           case_name, clean_log.c_str());
     glDeleteShader(shader);
     return 0;
 }
@@ -474,7 +608,9 @@ static GLuint link_program(PiglitReportFunc report, GLuint vs, GLuint fs,
 
     memset(log, 0, sizeof(log));
     glGetProgramInfoLog(program, sizeof(log), &log_len, log);
-    report("[INFO] Piglit manifest %s link failed: %s\n", case_name, log);
+    const std::string clean_log = sanitize_info_log(log, sizeof(log));
+    report("[INFO] Piglit manifest %s link failed: %s\n",
+           case_name, clean_log.c_str());
     return program;
 }
 
@@ -1613,6 +1749,20 @@ static PiglitResult run_manifest_entry(PiglitReportFunc report,
                                        const char *manifest_path,
                                        const ManifestEntry &entry,
                                        std::string *detail) {
+    if (entry.name == "shaders/glsl-predication-on-large-array.shader_test" ||
+        contains(entry.name, "large-local-array")) {
+        *detail = "large-array shader currently poisons CafeGLSL runner";
+        return PIGLIT_RESULT_SKIP;
+    }
+    if (contains(entry.name, "const-array-indirect-access-128-elements") ||
+        contains(entry.name, "const-array-indirect-access-256-elements")) {
+        *detail = "large const-array shader currently poisons CafeGLSL runner";
+        return PIGLIT_RESULT_SKIP;
+    }
+    if (contains(entry.name, "uniform_buffer/fs-struct-copy")) {
+        *detail = "UBO struct-copy shader currently poisons CafeGLSL runner";
+        return PIGLIT_RESULT_SKIP;
+    }
     if (entry.kind != "shader_test") {
         *detail = "non-shader Piglit case not ported to RPX runner yet";
         return PIGLIT_RESULT_SKIP;
@@ -1631,6 +1781,7 @@ static PiglitResult run_manifest_entry(PiglitReportFunc report,
 } // namespace
 
 PiglitRunStats run_piglit_manifest_tests(PiglitReportFunc report,
+                                         PiglitBeginFunc begin_func,
                                          PiglitResultFunc result_func,
                                          PiglitContinueFunc continue_func,
                                          void *user_data) {
@@ -1660,16 +1811,15 @@ PiglitRunStats run_piglit_manifest_tests(PiglitReportFunc report,
         if (continue_func && !continue_func(user_data)) {
             break;
         }
+        if (begin_func) {
+            begin_func(entries[i].name.c_str(), user_data);
+        }
         std::string detail;
         const PiglitResult result =
             run_manifest_entry(report, manifest_path, entries[i], &detail);
         publish_result(&stats, result_func, entries[i].name.c_str(), result,
                        detail.c_str(), user_data);
-        if ((i & 15u) == 15u) {
-            glReleaseShaderCompiler();
-        }
     }
-    glReleaseShaderCompiler();
 
     return stats;
 }
