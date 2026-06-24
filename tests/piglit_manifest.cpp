@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -19,8 +20,8 @@ static const char *kExternalManifest =
 static const char *kContentManifest =
     "/vol/content/gx2gl/piglit_manifest.tsv";
 static const size_t kMaxShaderTestBytes = 512 * 1024;
-static const int kTargetWidth = 16;
-static const int kTargetHeight = 16;
+static const int kTargetWidth = 256;
+static const int kTargetHeight = 256;
 
 struct ManifestEntry {
     std::string name;
@@ -44,10 +45,13 @@ struct TestCommand {
     enum Type {
         ClearColor,
         Clear,
+        Color,
         Uniform,
         DrawRect,
+        Ortho,
         ProbeAllRgba,
         ProbeRgba,
+        ProbeRectRgba,
         LinkSuccess,
         LinkError,
     } type;
@@ -55,7 +59,12 @@ struct TestCommand {
     std::string uniform_type;
     std::string uniform_name;
     float values[8];
+    GLint int_values[8];
+    GLuint uint_values[8];
     int value_count;
+    int compare_components;
+    bool relative;
+    bool force_ortho;
 };
 
 struct ProgramObjects {
@@ -171,6 +180,88 @@ static bool parse_float(const std::string &token, float *value) {
     return true;
 }
 
+static bool parse_uint32(const std::string &token, GLuint *value) {
+    char *end = NULL;
+    errno = 0;
+    const unsigned long parsed = strtoul(token.c_str(), &end, 0);
+    if (end == token.c_str() || errno == ERANGE ||
+        parsed > 0xFFFFFFFFul) {
+        return false;
+    }
+    while (end && *end) {
+        if (!isspace((unsigned char)*end)) {
+            return false;
+        }
+        ++end;
+    }
+    *value = (GLuint)parsed;
+    return true;
+}
+
+static bool parse_int32(const std::string &token, GLint *value) {
+    if (token == "true") {
+        *value = 1;
+        return true;
+    }
+    if (token == "false") {
+        *value = 0;
+        return true;
+    }
+
+    char *end = NULL;
+    errno = 0;
+    const long parsed = strtol(token.c_str(), &end, 0);
+    if (end == token.c_str() || errno == ERANGE ||
+        parsed < (long)INT32_MIN || parsed > (long)INT32_MAX) {
+        return false;
+    }
+    while (end && *end) {
+        if (!isspace((unsigned char)*end)) {
+            return false;
+        }
+        ++end;
+    }
+    *value = (GLint)parsed;
+    return true;
+}
+
+static bool is_unsigned_uniform_type(const std::string &type) {
+    return type == "uint" || type == "uvec2" ||
+           type == "uvec3" || type == "uvec4";
+}
+
+static bool is_integer_uniform_type(const std::string &type) {
+    return type == "int" || type == "bool" ||
+           type == "ivec2" || type == "ivec3" ||
+           type == "ivec4" || type == "bvec2" ||
+           type == "bvec3" || type == "bvec4";
+}
+
+static std::vector<float> parse_float_values(std::string line) {
+    std::vector<float> values;
+    for (size_t i = 0; i < line.size(); ++i) {
+        switch (line[i]) {
+            case '(':
+            case ')':
+            case ',':
+            case ';':
+                line[i] = ' ';
+                break;
+            default:
+                break;
+        }
+    }
+
+    const std::vector<std::string> tokens = split_ws(line);
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        float value = 0.0f;
+        if (parse_float(tokens[i], &value)) {
+            values.push_back(value);
+        }
+    }
+    return values;
+}
+
 static std::string strip_comment(const std::string &line) {
     const size_t hash = line.find('#');
     if (hash == std::string::npos) {
@@ -243,11 +334,13 @@ static std::string make_source_330(GLenum stage, const std::string &source) {
     } else if (stage == GL_VERTEX_SHADER) {
         out += "layout(location = 0) in vec4 gx2gl_Vertex;\n";
         out += "out vec4 gx2gl_FrontColor;\n";
+        out += "uniform mat4 gx2gl_ModelViewProjectionMatrix;\n";
+        out += "uniform vec4 gx2gl_CurrentColor;\n";
         out += "#define attribute in\n";
         out += "#define varying out\n";
         out += "#define gl_Vertex gx2gl_Vertex\n";
         out += "#define gl_FrontColor gx2gl_FrontColor\n";
-        out += "#define gl_ModelViewProjectionMatrix mat4(1.0)\n";
+        out += "#define gl_ModelViewProjectionMatrix gx2gl_ModelViewProjectionMatrix\n";
         out += "#define ftransform() (gl_ModelViewProjectionMatrix * gl_Vertex)\n";
     }
     out += source;
@@ -456,8 +549,13 @@ static bool parse_command_line(const std::string &raw_line,
     command->uniform_type.clear();
     command->uniform_name.clear();
     command->value_count = 0;
+    command->compare_components = 4;
+    command->relative = false;
+    command->force_ortho = false;
     for (int i = 0; i < 8; ++i) {
         command->values[i] = 0.0f;
+        command->int_values[i] = 0;
+        command->uint_values[i] = 0;
     }
 
     const std::string line = trim(strip_comment(raw_line));
@@ -488,6 +586,17 @@ static bool parse_command_line(const std::string &raw_line,
         command->type = TestCommand::Clear;
         return true;
     }
+    if (tokens.size() == 5 && tokens[0] == "color") {
+        command->type = TestCommand::Color;
+        for (int i = 0; i < 4; ++i) {
+            if (!parse_float(tokens[1 + i], &command->values[i])) {
+                *skip_reason = "unsupported color";
+                return false;
+            }
+        }
+        command->value_count = 4;
+        return true;
+    }
     if (tokens.size() >= 4 && tokens[0] == "uniform") {
         command->type = TestCommand::Uniform;
         command->uniform_type = tokens[1];
@@ -498,7 +607,21 @@ static bool parse_command_line(const std::string &raw_line,
             return false;
         }
         for (int i = 0; i < command->value_count; ++i) {
-            if (!parse_float(tokens[3 + i], &command->values[i])) {
+            if (is_unsigned_uniform_type(command->uniform_type)) {
+                if (!parse_uint32(tokens[3 + i],
+                                  &command->uint_values[i])) {
+                    *skip_reason = "unsupported uniform value";
+                    return false;
+                }
+                command->values[i] = (float)command->uint_values[i];
+            } else if (is_integer_uniform_type(command->uniform_type)) {
+                if (!parse_int32(tokens[3 + i],
+                                 &command->int_values[i])) {
+                    *skip_reason = "unsupported uniform value";
+                    return false;
+                }
+                command->values[i] = (float)command->int_values[i];
+            } else if (!parse_float(tokens[3 + i], &command->values[i])) {
                 *skip_reason = "unsupported uniform value";
                 return false;
             }
@@ -517,6 +640,32 @@ static bool parse_command_line(const std::string &raw_line,
         command->value_count = 4;
         return true;
     }
+    if (tokens.size() == 7 && tokens[0] == "draw" &&
+        tokens[1] == "rect" && tokens[2] == "ortho") {
+        command->type = TestCommand::DrawRect;
+        command->force_ortho = true;
+        for (int i = 0; i < 4; ++i) {
+            if (!parse_float(tokens[3 + i], &command->values[i])) {
+                *skip_reason = "unsupported draw rect ortho";
+                return false;
+            }
+        }
+        command->value_count = 4;
+        return true;
+    }
+    if ((tokens.size() == 1 || tokens.size() == 5) && tokens[0] == "ortho") {
+        command->type = TestCommand::Ortho;
+        if (tokens.size() == 5) {
+            for (int i = 0; i < 4; ++i) {
+                if (!parse_float(tokens[1 + i], &command->values[i])) {
+                    *skip_reason = "unsupported ortho";
+                    return false;
+                }
+            }
+            command->value_count = 4;
+        }
+        return true;
+    }
     if (tokens.size() == 7 && tokens[0] == "probe" &&
         tokens[1] == "all" && tokens[2] == "rgba") {
         command->type = TestCommand::ProbeAllRgba;
@@ -529,6 +678,19 @@ static bool parse_command_line(const std::string &raw_line,
         command->value_count = 4;
         return true;
     }
+    if (tokens.size() == 6 && tokens[0] == "probe" &&
+        tokens[1] == "all" && tokens[2] == "rgb") {
+        command->type = TestCommand::ProbeAllRgba;
+        command->compare_components = 3;
+        for (int i = 0; i < 3; ++i) {
+            if (!parse_float(tokens[3 + i], &command->values[i])) {
+                *skip_reason = "unsupported probe all rgb";
+                return false;
+            }
+        }
+        command->value_count = 3;
+        return true;
+    }
     if (tokens.size() == 8 && tokens[0] == "probe" &&
         tokens[1] == "rgba") {
         command->type = TestCommand::ProbeRgba;
@@ -539,6 +701,62 @@ static bool parse_command_line(const std::string &raw_line,
             }
         }
         command->value_count = 6;
+        return true;
+    }
+    if (tokens.size() >= 7 && tokens[0] == "probe" &&
+        tokens[1] == "rgb") {
+        command->type = TestCommand::ProbeRgba;
+        command->compare_components = 3;
+        for (int i = 0; i < 5; ++i) {
+            if (!parse_float(tokens[2 + i], &command->values[i])) {
+                *skip_reason = "unsupported probe rgb";
+                return false;
+            }
+        }
+        command->value_count = 5;
+        return true;
+    }
+    if (tokens.size() >= 4 && tokens[0] == "probe" &&
+        tokens[1] == "rect" &&
+        (tokens[2] == "rgba" || tokens[2] == "rgb")) {
+        const std::vector<float> floats = parse_float_values(line);
+        const int components = tokens[2] == "rgba" ? 4 : 3;
+        if (floats.size() < (size_t)(4 + components)) {
+            *skip_reason = "unsupported probe rect";
+            return false;
+        }
+        command->type = TestCommand::ProbeRectRgba;
+        command->compare_components = components;
+        command->value_count = 4 + components;
+        for (int i = 0; i < command->value_count; ++i) {
+            command->values[i] = floats[(size_t)i];
+        }
+        return true;
+    }
+    if (tokens.size() >= 4 && tokens[0] == "relative" &&
+        tokens[1] == "probe") {
+        const bool rect = tokens[2] == "rect";
+        const bool rgba = (!rect && tokens[2] == "rgba") ||
+                          (rect && tokens[3] == "rgba");
+        const bool rgb = (!rect && tokens[2] == "rgb") ||
+                         (rect && tokens[3] == "rgb");
+        const std::vector<float> floats = parse_float_values(line);
+        const int components = rgba ? 4 : (rgb ? 3 : 0);
+        const int coordinate_count = rect ? 4 : 2;
+        if (components == 0 ||
+            floats.size() < (size_t)(coordinate_count + components)) {
+            *skip_reason = "unsupported relative probe";
+            return false;
+        }
+
+        command->type = rect ? TestCommand::ProbeRectRgba
+                             : TestCommand::ProbeRgba;
+        command->compare_components = components;
+        command->relative = true;
+        command->value_count = coordinate_count + components;
+        for (int i = 0; i < command->value_count; ++i) {
+            command->values[i] = floats[(size_t)i];
+        }
         return true;
     }
     if (tokens.size() == 2 && tokens[0] == "link" &&
@@ -622,10 +840,12 @@ static bool unsupported_shader_sections(const ShaderTest &test,
 static const char *fallback_vertex_shader(void) {
     return "#version 330 core\n"
            "layout(location = 0) in vec2 aPosition;\n"
+           "uniform mat4 gx2gl_ModelViewProjectionMatrix;\n"
+           "uniform vec4 gx2gl_CurrentColor;\n"
            "out vec4 gx2gl_FrontColor;\n"
            "void main() {\n"
-           "    gx2gl_FrontColor = vec4(1.0);\n"
-           "    gl_Position = vec4(aPosition, 0.0, 1.0);\n"
+           "    gx2gl_FrontColor = gx2gl_CurrentColor;\n"
+           "    gl_Position = gx2gl_ModelViewProjectionMatrix * vec4(aPosition, 0.0, 1.0);\n"
            "}\n";
 }
 
@@ -649,10 +869,16 @@ static bool setup_render_target(PiglitReportFunc report, ProgramObjects *obj) {
 
 static bool setup_rect_vertices(PiglitReportFunc report, ProgramObjects *obj,
                                 const TestCommand &command) {
-    const float x = command.values[0];
-    const float y = command.values[1];
-    const float w = command.values[2];
-    const float h = command.values[3];
+    float x = command.values[0];
+    float y = command.values[1];
+    float w = command.values[2];
+    float h = command.values[3];
+    if (command.force_ortho) {
+        x = -1.0f + 2.0f * (x / (float)kTargetWidth);
+        y = -1.0f + 2.0f * (y / (float)kTargetHeight);
+        w = 2.0f * (w / (float)kTargetWidth);
+        h = 2.0f * (h / (float)kTargetHeight);
+    }
     const GLfloat vertices[] = {
         x,     y,
         x + w, y,
@@ -678,6 +904,56 @@ static bool setup_rect_vertices(PiglitReportFunc report, ProgramObjects *obj,
     return expect_no_error(report, "manifest vertex setup");
 }
 
+static bool set_mvp_uniform(PiglitReportFunc report, GLuint program,
+                            bool ortho, const float *bounds = NULL) {
+    GLfloat matrix[16];
+    const GLint location =
+        glGetUniformLocation(program, "gx2gl_ModelViewProjectionMatrix");
+
+    if (location < 0) {
+        return expect_no_error(report, "manifest MVP lookup");
+    }
+
+    memset(matrix, 0, sizeof(matrix));
+    if (ortho) {
+        const float left = bounds ? bounds[0] : 0.0f;
+        const float right = bounds ? bounds[1] : (float)kTargetWidth;
+        const float bottom = bounds ? bounds[2] : 0.0f;
+        const float top = bounds ? bounds[3] : (float)kTargetHeight;
+        if (right == left || top == bottom) {
+            report("[FAIL] Piglit manifest invalid ortho bounds.\n");
+            return false;
+        }
+        matrix[0] = 2.0f / (right - left);
+        matrix[5] = 2.0f / (top - bottom);
+        matrix[10] = 1.0f;
+        matrix[12] = -(right + left) / (right - left);
+        matrix[13] = -(top + bottom) / (top - bottom);
+        matrix[15] = 1.0f;
+    } else {
+        matrix[0] = 1.0f;
+        matrix[5] = 1.0f;
+        matrix[10] = 1.0f;
+        matrix[15] = 1.0f;
+    }
+
+    glUniformMatrix4fv(location, 1, GL_FALSE, matrix);
+    return expect_no_error(report, "manifest MVP uniform");
+}
+
+static bool set_current_color_uniform(PiglitReportFunc report, GLuint program,
+                                      const float *rgba) {
+    const GLint location =
+        glGetUniformLocation(program, "gx2gl_CurrentColor");
+
+    if (location < 0) {
+        return expect_no_error(report, "manifest current color lookup");
+    }
+
+    glUniform4f(location, rgba[0], rgba[1], rgba[2], rgba[3]);
+    return expect_no_error(report, "manifest current color uniform");
+}
+
 static bool apply_uniform(PiglitReportFunc report, GLuint program,
                           const TestCommand &command) {
     const GLint location =
@@ -686,8 +962,10 @@ static bool apply_uniform(PiglitReportFunc report, GLuint program,
     if (location < 0) {
         return expect_no_error(report, "manifest inactive uniform");
     }
-    if (type == "int" || type == "bool" || type == "uint") {
-        glUniform1i(location, (GLint)command.values[0]);
+    if (type == "int" || type == "bool") {
+        glUniform1i(location, command.int_values[0]);
+    } else if (type == "uint") {
+        glUniform1ui(location, command.uint_values[0]);
     } else if (type == "float") {
         glUniform1f(location, command.values[0]);
     } else if (type == "vec2") {
@@ -698,18 +976,30 @@ static bool apply_uniform(PiglitReportFunc report, GLuint program,
     } else if (type == "vec4") {
         glUniform4f(location, command.values[0], command.values[1],
                     command.values[2], command.values[3]);
-    } else if (type == "ivec2" || type == "bvec2" || type == "uvec2") {
-        glUniform2i(location, (GLint)command.values[0],
-                    (GLint)command.values[1]);
-    } else if (type == "ivec3" || type == "bvec3" || type == "uvec3") {
-        glUniform3i(location, (GLint)command.values[0],
-                    (GLint)command.values[1],
-                    (GLint)command.values[2]);
-    } else if (type == "ivec4" || type == "bvec4" || type == "uvec4") {
-        glUniform4i(location, (GLint)command.values[0],
-                    (GLint)command.values[1],
-                    (GLint)command.values[2],
-                    (GLint)command.values[3]);
+    } else if (type == "ivec2" || type == "bvec2") {
+        glUniform2i(location, command.int_values[0],
+                    command.int_values[1]);
+    } else if (type == "ivec3" || type == "bvec3") {
+        glUniform3i(location, command.int_values[0],
+                    command.int_values[1],
+                    command.int_values[2]);
+    } else if (type == "ivec4" || type == "bvec4") {
+        glUniform4i(location, command.int_values[0],
+                    command.int_values[1],
+                    command.int_values[2],
+                    command.int_values[3]);
+    } else if (type == "uvec2") {
+        glUniform2ui(location, command.uint_values[0],
+                     command.uint_values[1]);
+    } else if (type == "uvec3") {
+        glUniform3ui(location, command.uint_values[0],
+                     command.uint_values[1],
+                     command.uint_values[2]);
+    } else if (type == "uvec4") {
+        glUniform4ui(location, command.uint_values[0],
+                     command.uint_values[1],
+                     command.uint_values[2],
+                     command.uint_values[3]);
     } else {
         report("[INFO] Piglit manifest unsupported uniform type %s.\n",
                type.c_str());
@@ -728,9 +1018,10 @@ static int expected_u8(float value) {
     return converted;
 }
 
-static bool probe_pixel(const GLubyte *pixel, const float *expected) {
+static bool probe_pixel(const GLubyte *pixel, const float *expected,
+                        int components) {
     const int tolerance = 3;
-    for (int c = 0; c < 4; ++c) {
+    for (int c = 0; c < components; ++c) {
         int diff = (int)pixel[c] - expected_u8(expected[c]);
         if (diff < 0) {
             diff = -diff;
@@ -751,7 +1042,8 @@ static bool run_probe_all(PiglitReportFunc report, const char *case_name,
         return false;
     }
     for (int i = 0; i < kTargetWidth * kTargetHeight; ++i) {
-        if (!probe_pixel(&pixels[(size_t)i * 4], command.values)) {
+        if (!probe_pixel(&pixels[(size_t)i * 4], command.values,
+                         command.compare_components)) {
             const GLubyte *p = &pixels[(size_t)i * 4];
             report("[FAIL] Piglit manifest %s pixel %d returned "
                    "{%u,%u,%u,%u}, expected {%d,%d,%d,%d}.\n",
@@ -766,11 +1058,22 @@ static bool run_probe_all(PiglitReportFunc report, const char *case_name,
     return true;
 }
 
+static int clamped_relative_coord(float value, int extent) {
+    int coord = (int)(value * (float)(extent - 1) + 0.5f);
+    if (coord < 0) return 0;
+    if (coord >= extent) return extent - 1;
+    return coord;
+}
+
 static bool run_probe(PiglitReportFunc report, const char *case_name,
-                      const TestCommand &command) {
+                      const TestCommand &command, bool relative) {
     GLubyte pixel[4] = {0, 0, 0, 0};
-    const int x = (int)command.values[0];
-    const int y = (int)command.values[1];
+    const int x = relative ? clamped_relative_coord(command.values[0],
+                                                    kTargetWidth)
+                           : (int)command.values[0];
+    const int y = relative ? clamped_relative_coord(command.values[1],
+                                                    kTargetHeight)
+                           : (int)command.values[1];
     if (x < 0 || y < 0 || x >= kTargetWidth || y >= kTargetHeight) {
         report("[FAIL] Piglit manifest %s probe outside target.\n",
                case_name);
@@ -780,7 +1083,7 @@ static bool run_probe(PiglitReportFunc report, const char *case_name,
     if (!expect_no_error(report, "manifest probe rgba")) {
         return false;
     }
-    if (probe_pixel(pixel, &command.values[2])) {
+    if (probe_pixel(pixel, &command.values[2], command.compare_components)) {
         return true;
     }
     report("[FAIL] Piglit manifest %s probe returned {%u,%u,%u,%u}, "
@@ -789,6 +1092,58 @@ static bool run_probe(PiglitReportFunc report, const char *case_name,
            expected_u8(command.values[2]), expected_u8(command.values[3]),
            expected_u8(command.values[4]), expected_u8(command.values[5]));
     return false;
+}
+
+static bool run_probe_rect(PiglitReportFunc report, const char *case_name,
+                           const TestCommand &command, bool relative) {
+    int x0;
+    int y0;
+    int x1;
+    int y1;
+
+    if (relative) {
+        x0 = (int)(command.values[0] * (float)kTargetWidth);
+        y0 = (int)(command.values[1] * (float)kTargetHeight);
+        x1 = (int)((command.values[0] + command.values[2]) *
+                   (float)kTargetWidth + 0.999f);
+        y1 = (int)((command.values[1] + command.values[3]) *
+                   (float)kTargetHeight + 0.999f);
+    } else {
+        x0 = (int)command.values[0];
+        y0 = (int)command.values[1];
+        x1 = x0 + (int)command.values[2];
+        y1 = y0 + (int)command.values[3];
+    }
+    const float *expected = &command.values[4];
+    if (x0 < 0 || y0 < 0 || x1 <= x0 || y1 <= y0 ||
+        x1 > kTargetWidth || y1 > kTargetHeight) {
+        report("[FAIL] Piglit manifest %s probe rect outside target.\n",
+               case_name);
+        return false;
+    }
+
+    std::vector<GLubyte> pixels((size_t)(x1 - x0) * (size_t)(y1 - y0) * 4u);
+    glReadPixels(x0, y0, x1 - x0, y1 - y0, GL_RGBA, GL_UNSIGNED_BYTE,
+                 &pixels[0]);
+    if (!expect_no_error(report, "manifest probe rect rgba")) {
+        return false;
+    }
+    for (size_t i = 0; i < pixels.size() / 4u; ++i) {
+        if (!probe_pixel(&pixels[i * 4u], expected,
+                         command.compare_components)) {
+            const GLubyte *p = &pixels[i * 4u];
+            report("[FAIL] Piglit manifest %s rect pixel returned "
+                   "{%u,%u,%u,%u}, expected {%d,%d,%d,%d}.\n",
+                   case_name, p[0], p[1], p[2], p[3],
+                   expected_u8(expected[0]), expected_u8(expected[1]),
+                   expected_u8(expected[2]),
+                   command.compare_components == 4
+                       ? expected_u8(expected[3])
+                       : 255);
+            return false;
+        }
+    }
+    return true;
 }
 
 static void destroy_objects(ProgramObjects *obj) {
@@ -884,6 +1239,17 @@ static PiglitResult run_shader_test(PiglitReportFunc report,
     glDisable(GL_STENCIL_TEST);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glUseProgram(obj.program);
+    if (!set_mvp_uniform(report, obj.program, false)) {
+        *detail = "MVP setup failed";
+        destroy_objects(&obj);
+        return PIGLIT_RESULT_FAIL;
+    }
+    float current_color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    if (!set_current_color_uniform(report, obj.program, current_color)) {
+        *detail = "current color setup failed";
+        destroy_objects(&obj);
+        return PIGLIT_RESULT_FAIL;
+    }
 
     for (size_t i = 0; i < commands.size(); ++i) {
         const TestCommand &command = commands[i];
@@ -897,10 +1263,31 @@ static PiglitResult run_shader_test(PiglitReportFunc report,
                     return PIGLIT_RESULT_FAIL;
                 }
                 break;
+            case TestCommand::Color:
+                for (int c = 0; c < 4; ++c) {
+                    current_color[c] = command.values[c];
+                }
+                if (!set_current_color_uniform(report, obj.program,
+                                               current_color)) {
+                    *detail = "current color failed";
+                    destroy_objects(&obj);
+                    return PIGLIT_RESULT_FAIL;
+                }
+                break;
             case TestCommand::Clear:
                 glClear(GL_COLOR_BUFFER_BIT);
                 if (!expect_no_error(report, "manifest clear")) {
                     *detail = "clear failed";
+                    destroy_objects(&obj);
+                    return PIGLIT_RESULT_FAIL;
+                }
+                break;
+            case TestCommand::Ortho:
+                if (!set_mvp_uniform(report, obj.program, true,
+                                     command.value_count == 4
+                                         ? command.values
+                                         : NULL)) {
+                    *detail = "ortho setup failed";
                     destroy_objects(&obj);
                     return PIGLIT_RESULT_FAIL;
                 }
@@ -935,8 +1322,18 @@ static PiglitResult run_shader_test(PiglitReportFunc report,
                 break;
             case TestCommand::ProbeRgba:
                 glFinish();
-                if (!run_probe(report, case_name, command)) {
+                if (!run_probe(report, case_name, command,
+                               command.relative)) {
                     *detail = "probe rgba failed";
+                    destroy_objects(&obj);
+                    return PIGLIT_RESULT_FAIL;
+                }
+                break;
+            case TestCommand::ProbeRectRgba:
+                glFinish();
+                if (!run_probe_rect(report, case_name, command,
+                                    command.relative)) {
+                    *detail = "probe rect rgba failed";
                     destroy_objects(&obj);
                     return PIGLIT_RESULT_FAIL;
                 }
@@ -1052,7 +1449,7 @@ PiglitRunStats run_piglit_manifest_tests(PiglitReportFunc report,
             run_manifest_entry(report, manifest_path, entries[i], &detail);
         publish_result(&stats, result_func, entries[i].name.c_str(), result,
                        detail.c_str(), user_data);
-        if ((i & 63u) == 63u) {
+        if ((i & 15u) == 15u) {
             glReleaseShaderCompiler();
         }
     }
