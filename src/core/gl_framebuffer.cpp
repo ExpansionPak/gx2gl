@@ -10,6 +10,7 @@ extern "C" {
 #include <coreinit/cache.h>
 #include <gx2/surface.h>
 #include <gx2/state.h>
+#include <gx2/context.h>
 #include <gx2/event.h>
 #include <gx2/display.h>
 #include <gx2/registers.h>
@@ -308,6 +309,14 @@ static void invalidate_surface_after_color_write(const GX2Surface *surface) {
     invalidate_surface_after_write(surface, false);
 }
 
+static void restore_context_after_surface_op(void) {
+    GX2ContextState *state = WHBGfxGetTVContextState();
+
+    if (!state) state = WHBGfxGetDRCContextState();
+    if (state) GX2SetContextState(state);
+    if (g_gl_context) g_gl_context->dirty_flags = 0xFFFFFFFFu;
+}
+
 static bool stage_surface_for_cpu_access(const GX2Surface *source,
                                          GLint internal_format,
                                          bool depth,
@@ -337,6 +346,7 @@ static bool stage_surface_for_cpu_access(const GX2Surface *source,
 
     GX2CopySurface(source, 0, 0, staging_surface, 0, 0);
     GX2DrawDone();
+    restore_context_after_surface_op();
     invalidate_surface_after_write(staging_surface, depth);
     DCInvalidateRange(staging_surface->image, staging_surface->imageSize);
     return true;
@@ -356,6 +366,7 @@ static bool upload_cpu_staging_surface(GX2Surface *staging_surface,
                             GX2R_RESOURCE_USAGE_GPU_READ));
     GX2CopySurface(staging_surface, 0, 0, destination, 0, 0);
     GX2DrawDone();
+    restore_context_after_surface_op();
     invalidate_surface_after_write(destination, depth);
     return true;
 }
@@ -378,6 +389,7 @@ static bool init_color_buffer_from_surface_view(GX2ColorBuffer *cb,
     cb->viewFirstSlice = slice;
     cb->viewNumSlices = slices ? slices : 1u;
 
+    GX2InitColorBufferRegs(cb);
     GX2CalcColorBufferAuxInfo(cb, &aux_size, &aux_alignment);
     if (aux_size) {
         cb->aaBuffer = gl_mem_alloc(GL_MEM_TYPE_MEM2, aux_size, aux_alignment ? aux_alignment : 0x100);
@@ -388,9 +400,12 @@ static bool init_color_buffer_from_surface_view(GX2ColorBuffer *cb,
 
         memset(cb->aaBuffer, GX2GL_AUX_BUFFER_CLEAR_VALUE, aux_size);
         cb->aaSize = aux_size;
+        DCFlushRange(cb->aaBuffer, cb->aaSize);
+        GX2Invalidate((GX2InvalidateMode)(GX2_INVALIDATE_MODE_CPU |
+                                          GX2_INVALIDATE_MODE_COLOR_BUFFER),
+                      cb->aaBuffer, cb->aaSize);
     }
 
-    GX2InitColorBufferRegs(cb);
     return true;
 }
 
@@ -482,7 +497,7 @@ static void resolve_framebuffer_texture_targets(GLFramebuffer *fb) {
         if (texture->surface.aa != GX2_AA_MODE1X) {
             GX2ExpandAAColorBuffer(&fb->cb[i]);
             GX2DrawDone();
-            if (g_gl_context) g_gl_context->dirty_flags = 0xFFFFFFFFu;
+            restore_context_after_surface_op();
         } else if (target->allocated && target->surface.image) {
             uint32_t slice = attachment_view_slice(&fb->color_attachments[i]);
             GX2CopySurface(&target->surface, 0, slice,
@@ -490,6 +505,7 @@ static void resolve_framebuffer_texture_targets(GLFramebuffer *fb) {
                            (uint32_t)fb->color_attachments[i].level,
                            slice);
             GX2DrawDone();
+            restore_context_after_surface_op();
         }
         invalidate_surface_after_color_write(&texture->surface);
         fb->color_needs_resolve[i] = false;
@@ -2595,10 +2611,10 @@ void _gl_BlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
             GX2ResolveAAColorBuffer(source_buffer, destination_storage,
                                     destination_mip, destination_slice);
             GX2DrawDone();
+            restore_context_after_surface_op();
             invalidate_surface_after_color_write(destination_storage);
             gl_framebuffer_mark_bound_color_buffer_dirty(index);
         }
-        g_gl_context->dirty_flags = 0xFFFFFFFFu;
         color_blit_completed = true;
     }
 
@@ -3173,8 +3189,8 @@ void gl_framebuffer_sync_texture_for_sampling(GLuint texture) {
             GX2DrawDone();
             GX2ExpandDepthBuffer(&fb->db);
             GX2DrawDone();
+            restore_context_after_surface_op();
             fb->depth_needs_expand = false;
-            if (g_gl_context) g_gl_context->dirty_flags = 0xFFFFFFFFu;
         }
     }
 }
