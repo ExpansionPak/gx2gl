@@ -1,4 +1,4 @@
-# gx2gl - Translate OpenGL calls to GX2 calls
+# gx2gl - an OpenGL layer over GX2
 
 Work-In-Progress OpenGL implementation for the Nintendo Wii U. 
 
