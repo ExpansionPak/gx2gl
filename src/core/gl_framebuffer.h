@@ -10,6 +10,7 @@ extern "C" {
 #endif
 
 void gl_framebuffer_init(void);
+void gl_framebuffer_shutdown(void);
 
 void _gl_GenFramebuffers(GLsizei n, GLuint *framebuffers);
 void _gl_DeleteFramebuffers(GLsizei n, const GLuint *framebuffers);

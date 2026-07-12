@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "gl/gl.h"
+#include "gx2gl/present.h"
 #include "piglit_manifest.h"
 
 namespace {
@@ -1185,12 +1186,47 @@ static bool run_get_core_profile_queries(PiglitReportFunc report) {
     return passed;
 }
 
+static bool run_gx2gl_context_ownership(PiglitReportFunc report) {
+    clear_gl_errors();
+
+    GX2GL_Context reference = GX2GL_CreateContext();
+    if (!reference) {
+        report("[FAIL] gx2gl could not acquire a second context reference.\n");
+        return false;
+    }
+
+    GX2GL_DeleteContext(reference);
+    return glGetString(GL_VERSION) != NULL &&
+           expect_error(report, "context reference release", GL_NO_ERROR);
+}
+
+static bool run_gx2gl_swap_interval(PiglitReportFunc report) {
+    const int original = GX2GL_GetSwapInterval();
+    bool passed = true;
+
+    passed = GX2GL_SetSwapInterval(0) == 0 &&
+             GX2GL_GetSwapInterval() == 0 && passed;
+    passed = GX2GL_SetSwapInterval(1) == 0 &&
+             GX2GL_GetSwapInterval() == 1 && passed;
+    passed = GX2GL_SetSwapInterval(-1) == -1 && passed;
+
+    if (original == 0 || original == 1) {
+        passed = GX2GL_SetSwapInterval(original) == 0 && passed;
+    }
+    if (!passed) {
+        report("[FAIL] gx2gl swap interval did not round-trip through GX2.\n");
+    }
+    return passed;
+}
+
 struct PiglitApiCase {
     const char *name;
     bool (*run)(PiglitReportFunc report);
 };
 
 static const PiglitApiCase kApiCases[] = {
+    {"gx2gl/integration/context-ownership", run_gx2gl_context_ownership},
+    {"gx2gl/integration/swap-interval", run_gx2gl_swap_interval},
     {"spec/gl-3.3/get-core-profile-identity", run_get_core_profile_queries},
     {"spec/glsl-1.30/link-name-varying", run_unqualified_varying_link},
     {"spec/arb_framebuffer_object/framebuffer-texture-layer-2d-array",

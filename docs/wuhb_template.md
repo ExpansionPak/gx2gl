@@ -5,7 +5,7 @@ optional `.wuhb` for content:
 
 ```cmake
 add_executable(my_app source/main.cpp)
-target_link_libraries(my_app PRIVATE gx2gl33 wut)
+target_link_libraries(my_app PRIVATE gx2gl33)
 
 wut_create_rpx(my_app)
 wut_create_wuhb(my_app

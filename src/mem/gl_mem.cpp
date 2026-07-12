@@ -1,8 +1,6 @@
 #include "gl_mem.h"
 #include "Platform/WiiU_Log.hpp"
 
-#include <gx2r/mem.h>
-#include <gx2r/resource.h>
 #include <malloc.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -67,26 +65,8 @@ static const char *mem_type_name(gl_mem_type_t type) {
     }
 }
 
-static gl_mem_type_t mem_type_from_gx2r_flags(GX2RResourceFlags flags) {
-    return (flags & GX2R_RESOURCE_USAGE_FORCE_MEM1) ? GL_MEM_TYPE_MEM1
-                                                    : GL_MEM_TYPE_MEM2;
-}
-
-static void *gx2gl_gx2r_alloc(GX2RResourceFlags flags,
-                              uint32_t size,
-                              uint32_t alignment) {
-    return gl_mem_alloc(mem_type_from_gx2r_flags(flags), size, alignment);
-}
-
-static void gx2gl_gx2r_free(GX2RResourceFlags flags, void *ptr) {
-    gl_mem_free(mem_type_from_gx2r_flags(flags), ptr);
-}
-
 void gl_mem_init(void) {
     g_mem_state.init_count++;
-    if (g_mem_state.init_count == 1) {
-        GX2RSetAllocator(gx2gl_gx2r_alloc, gx2gl_gx2r_free);
-    }
     log_mem_step("gl_mem_init: count=%u", (unsigned int)g_mem_state.init_count);
 }
 

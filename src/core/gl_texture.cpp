@@ -2561,6 +2561,41 @@ void _gl_ActiveTexture(GLenum texture) {
   g_gl_context->active_texture = texture - GL_TEXTURE0;
 }
 
+void gl_texture_shutdown(void) {
+  GLTexture *defaults[] = {
+      &g_default_texture_1d,
+      &g_default_texture_2d,
+      &g_default_texture_3d,
+      &g_default_texture_cube,
+      &g_default_texture_1d_array,
+      &g_default_texture_2d_array,
+      &g_default_texture_2d_multisample,
+      &g_default_texture_2d_multisample_array,
+  };
+
+  for (uint32_t i = 1; i < MAX_TEXTURES; ++i) {
+    free_texture_storage(&g_textures[i]);
+  }
+  for (uint32_t i = 0; i < sizeof(defaults) / sizeof(defaults[0]); ++i) {
+    free_texture_storage(defaults[i]);
+  }
+
+  memset(g_textures, 0, sizeof(g_textures));
+  memset(g_samplers, 0, sizeof(g_samplers));
+  memset(&g_default_texture_1d, 0, sizeof(g_default_texture_1d));
+  memset(&g_default_texture_2d, 0, sizeof(g_default_texture_2d));
+  memset(&g_default_texture_3d, 0, sizeof(g_default_texture_3d));
+  memset(&g_default_texture_cube, 0, sizeof(g_default_texture_cube));
+  memset(&g_default_texture_1d_array, 0, sizeof(g_default_texture_1d_array));
+  memset(&g_default_texture_2d_array, 0, sizeof(g_default_texture_2d_array));
+  memset(&g_default_texture_2d_multisample, 0,
+         sizeof(g_default_texture_2d_multisample));
+  memset(&g_default_texture_2d_multisample_array, 0,
+         sizeof(g_default_texture_2d_multisample_array));
+  memset(&g_proxy_multisample_2d, 0, sizeof(g_proxy_multisample_2d));
+  memset(&g_proxy_multisample_array, 0, sizeof(g_proxy_multisample_array));
+}
+
 static void set_proxy_multisample_image(GLProxyMultisampleImage *proxy,
                                         GLsizei width, GLsizei height,
                                         GLsizei depth, GLsizei samples,

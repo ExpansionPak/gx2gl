@@ -82,7 +82,14 @@ set(SOURCES
 
 # Build library
 add_library(gl33_gx2_core STATIC ${SOURCES})
-target_include_directories(gl33_gx2_core PRIVATE "${GX2GL_GENERATED_DIR}")
+target_include_directories(gl33_gx2_core
+    PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${GX2GL_GENERATED_DIR}"
+)
+target_link_libraries(gl33_gx2_core PUBLIC wut)
+add_library(gx2gl33 ALIAS gl33_gx2_core)
 
 # Build RPX
 add_executable(gl33_test
@@ -90,5 +97,5 @@ add_executable(gl33_test
     tests/piglit_lite.cpp
     tests/piglit_manifest.cpp
 )
-target_link_libraries(gl33_test gl33_gx2_core wut)
+target_link_libraries(gl33_test gl33_gx2_core)
 wut_create_rpx(gl33_test)

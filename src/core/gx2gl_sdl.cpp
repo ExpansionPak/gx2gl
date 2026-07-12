@@ -7,6 +7,7 @@
 #include "mem/gl_mem.h"
 
 #include <gx2/event.h>
+#include <gx2/swap.h>
 #include <proc_ui/procui.h>
 #include <whb/gfx.h>
 #include <whb/proc.h>
@@ -37,6 +38,28 @@ typedef struct {
 
 static GX2GLSdlState g_gx2gl_sdl;
 
+static int gx2gl_whb_graphics_initialized(void)
+{
+    return WHBGfxGetTVContextState() != NULL ||
+           WHBGfxGetDRCContextState() != NULL;
+}
+
+static int gx2gl_tv_target_ready(void)
+{
+    GX2ColorBuffer *color = WHBGfxGetTVColourBuffer();
+    return WHBGfxGetTVContextState() != NULL && color != NULL &&
+           color->surface.image != NULL && color->surface.width > 0 &&
+           color->surface.height > 0;
+}
+
+static int gx2gl_drc_target_ready(void)
+{
+    GX2ColorBuffer *color = WHBGfxGetDRCColourBuffer();
+    return WHBGfxGetDRCContextState() != NULL && color != NULL &&
+           color->surface.image != NULL && color->surface.width > 0 &&
+           color->surface.height > 0;
+}
+
 static void gx2gl_init_defaults(void)
 {
     if (g_gx2gl_sdl.defaults_ready) return;
@@ -52,13 +75,13 @@ static GX2GLRenderTarget gx2gl_default_render_target(void)
     gx2gl_init_defaults();
 
     if (g_gx2gl_sdl.default_target_drc) {
-        if (WHBGfxGetDRCColourBuffer()) return GX2GL_RENDER_TARGET_DRC;
-        if (WHBGfxGetTVColourBuffer()) return GX2GL_RENDER_TARGET_TV;
+        if (gx2gl_drc_target_ready()) return GX2GL_RENDER_TARGET_DRC;
+        if (gx2gl_tv_target_ready()) return GX2GL_RENDER_TARGET_TV;
         return GX2GL_RENDER_TARGET_NONE;
     }
 
-    if (WHBGfxGetTVColourBuffer()) return GX2GL_RENDER_TARGET_TV;
-    if (WHBGfxGetDRCColourBuffer()) return GX2GL_RENDER_TARGET_DRC;
+    if (gx2gl_tv_target_ready()) return GX2GL_RENDER_TARGET_TV;
+    if (gx2gl_drc_target_ready()) return GX2GL_RENDER_TARGET_DRC;
     return GX2GL_RENDER_TARGET_NONE;
 }
 
@@ -81,13 +104,14 @@ static int gx2gl_ensure_graphics_ready(void)
     if (gx2gl_ensure_proc_ready() != 0) return -1;
 
     if (!g_gx2gl_sdl.gfx_ready) {
-        if (!WHBGfxGetTVColourBuffer() && !WHBGfxGetDRCColourBuffer()) {
+        if (!gx2gl_whb_graphics_initialized()) {
             if (!WHBGfxInit()) return -1;
             g_gx2gl_sdl.gfx_owned = 1;
         }
-        if (!WHBGfxGetTVColourBuffer() && !WHBGfxGetDRCColourBuffer()) {
+        if (!gx2gl_whb_graphics_initialized()) {
             return -1;
         }
+        GX2SetSwapInterval((uint32_t)g_gx2gl_sdl.swap_interval);
         g_gx2gl_sdl.gfx_ready = 1;
     }
 
@@ -219,37 +243,36 @@ int GX2GL_MakeCurrent(GX2GL_Context context)
     if (context && g_gx2gl_sdl.library_refs <= 0) return -1;
     if (context && (gl_context_t *)context != g_gx2gl_sdl.context) return -1;
 
-    g_gl_context = (gl_context_t *)context;
-    if (g_gl_context) {
+    if (context) {
+        g_gl_context = (gl_context_t *)context;
         gx2gl_apply_default_framebuffer_target();
         return GX2GL_BeginFrame();
     }
 
-    return GX2GL_EndFrame();
+    {
+        int result = GX2GL_EndFrame();
+        g_gl_context = NULL;
+        return result;
+    }
 }
 
 void GX2GL_DeleteContext(GX2GL_Context context)
 {
-    if ((gl_context_t *)context == g_gx2gl_sdl.context) {
-        if (g_gx2gl_sdl.context_refs > 0) {
-            g_gx2gl_sdl.context_refs -= 1;
-        }
+    gl_context_t *owned_context = g_gx2gl_sdl.context;
 
-        if (g_gl_context == g_gx2gl_sdl.context) {
-            g_gl_context = NULL;
-        }
+    if (!owned_context || (gl_context_t *)context != owned_context ||
+        g_gx2gl_sdl.context_refs <= 0) return;
 
-        if (g_gx2gl_sdl.context_refs == 0) {
-            gx2gl_finish_frame();
-            gl_context_destroy(g_gx2gl_sdl.context);
-            g_gx2gl_sdl.context = NULL;
-            g_gl_context = NULL;
-        }
-    }
-
+    g_gx2gl_sdl.context_refs -= 1;
     if (g_gx2gl_sdl.context_refs == 0) {
-        GX2GL_UnloadLibrary();
+        gl_context_destroy(owned_context);
+        gx2gl_finish_frame();
+        g_gx2gl_sdl.context = NULL;
+        g_gl_context = NULL;
     }
+
+    /* Every successful CreateContext acquires one library reference. */
+    GX2GL_UnloadLibrary();
 }
 
 int GX2GL_Present(void)
@@ -276,14 +299,20 @@ int GX2GL_Present(void)
 int GX2GL_SetSwapInterval(int interval)
 {
     gx2gl_init_defaults();
-    if (interval < -1 || interval > 1) return -1;
+    if (interval < 0 || interval > 1) return -1;
     g_gx2gl_sdl.swap_interval = interval;
+    if (g_gx2gl_sdl.gfx_ready && gx2gl_whb_graphics_initialized()) {
+        GX2SetSwapInterval((uint32_t)interval);
+    }
     return 0;
 }
 
 int GX2GL_GetSwapInterval(void)
 {
     gx2gl_init_defaults();
+    if (g_gx2gl_sdl.gfx_ready && gx2gl_whb_graphics_initialized()) {
+        return (int)GX2GetSwapInterval();
+    }
     return g_gx2gl_sdl.swap_interval;
 }
 

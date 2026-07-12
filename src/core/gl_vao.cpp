@@ -235,6 +235,13 @@ void gl_vao_init(void) {
   }
 }
 
+void gl_vao_shutdown(void) {
+  memset(g_vaos, 0, sizeof(g_vaos));
+  memset(g_current_attrib_i, 0, sizeof(g_current_attrib_i));
+  memset(g_current_attrib_ui, 0, sizeof(g_current_attrib_ui));
+  g_bound_vao = 0;
+}
+
 #ifdef __cplusplus
 extern "C" {
 #endif

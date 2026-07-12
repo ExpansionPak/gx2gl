@@ -10,31 +10,6 @@ def get_env_var(name, default=None):
         return default
     return val
 
-def convert_elf_to_rpx(build_dir, tools_bin, target_name):
-    exe_ext = ".exe" if os.name == "nt" else ""
-    elf2rpl_cmd = os.path.join(tools_bin, f"elf2rpl{exe_ext}")
-    elf_file = f"{target_name}.elf"
-    rpx_file = f"{target_name}.rpx"
-
-    elf2rpl_found = False
-    for ext in ["", ".exe"]:
-        candidate = os.path.join(tools_bin, f"elf2rpl{ext}").replace("\\", "/")
-        if os.path.isfile(candidate):
-            elf2rpl_cmd = candidate
-            elf2rpl_found = True
-            break
-
-    if not elf2rpl_found:
-        print(f"Build completed, but elf2rpl was not found in: {tools_bin}")
-        return None
-
-    elf2rpl_run = subprocess.run([elf2rpl_cmd, elf_file, rpx_file], cwd=build_dir)
-    if elf2rpl_run.returncode != 0:
-        print(f"RPX conversion FAILED for {target_name} via: {elf2rpl_cmd}")
-        return None
-
-    return rpx_file
-
 def main():
     print("Starting Universal Build...")
 
@@ -111,33 +86,21 @@ def main():
     # Compile
     print("Compiling...")
     cores = str(multiprocessing.cpu_count())
-    build_cmd = ["cmake", "--build", build_dir, "--parallel", cores, "--target", "gx2vk_test"]
+    build_cmd = ["cmake", "--build", build_dir, "--parallel", cores, "--target", "gl33_test"]
     result = subprocess.run(build_cmd)
     if result.returncode != 0:
         print("Build FAILED during compilation.")
         sys.exit(1)
 
-    # Convert to RPX
-    print("Converting to RPX...")
-    converted = []
-    for target_name in ["gx2vk_test"]:
-        elf_path = os.path.join(build_dir, f"{target_name}.elf")
-        if not os.path.isfile(elf_path):
-            continue
-
-        rpx_file = convert_elf_to_rpx(build_dir, tools_bin, target_name)
-        if not rpx_file:
-            sys.exit(1)
-        converted.append(rpx_file)
-
-    if not converted:
-        print("No ELF outputs were found to convert.")
+    # wut_create_rpx performs the ELF-to-RPX conversion as a post-build step.
+    rpx_file = "gl33_test.rpx"
+    if not os.path.isfile(os.path.join(build_dir, rpx_file)):
+        print(f"Build completed, but {rpx_file} was not produced.")
         sys.exit(1)
 
     print("-" * 48)
     print("Build Successful!")
-    for rpx_file in converted:
-        print(f"Output located in: {build_dir}/{rpx_file}")
+    print(f"Output located in: {build_dir}/{rpx_file}")
     print("-" * 48)
 
 if __name__ == "__main__":

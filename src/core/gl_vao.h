@@ -21,6 +21,7 @@ typedef struct {
 } gl_vao_attrib_state_t;
 
 void gl_vao_init(void);
+void gl_vao_shutdown(void);
 
 void _gl_GenVertexArrays(GLsizei n, GLuint *arrays);
 void _gl_DeleteVertexArrays(GLsizei n, const GLuint *arrays);

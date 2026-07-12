@@ -2271,6 +2271,24 @@ void gl_shader_init(void) {
   g_shader_mode_valid = false;
   g_shader_mode = GX2_SHADER_MODE_UNIFORM_REGISTER;
 }
+
+void gl_shader_shutdown(void) {
+  for (uint32_t i = 1; i < MAX_PROGRAMS; ++i) {
+    if (g_programs[i].in_use) {
+      destroy_program_object(&g_programs[i]);
+    }
+  }
+  for (uint32_t i = 1; i < MAX_SHADERS; ++i) {
+    if (g_shaders[i].in_use) {
+      destroy_shader_object(i);
+    }
+  }
+  memset(g_programs, 0, sizeof(g_programs));
+  memset(g_shaders, 0, sizeof(g_shaders));
+  g_shader_mode_valid = false;
+  g_shader_mode = GX2_SHADER_MODE_UNIFORM_REGISTER;
+  gx2gl_cafeglsl_shutdown();
+}
 GLuint _gl_CreateShader(GLenum type) {
     if (!is_supported_shader_type(type)) {
       _gl_set_error(GL_INVALID_ENUM);

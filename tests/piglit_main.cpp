@@ -351,22 +351,16 @@ static void present_demo_frame(DemoRenderer *renderer) {
     GX2ColorBuffer *tv = WHBGfxGetTVColourBuffer();
     GX2ColorBuffer *drc = WHBGfxGetDRCColourBuffer();
 
-    WHBGfxBeginRender();
-    if (tv) {
-        WHBGfxBeginRenderTV();
+    if (tv && tv->surface.image) {
         draw_demo_target(renderer, GL_FALSE,
                          (GLsizei)tv->surface.width,
                          (GLsizei)tv->surface.height);
-        WHBGfxFinishRenderTV();
-        GX2GL_MirrorTVToGamePad();
-    } else if (drc) {
-        WHBGfxBeginRenderDRC();
+    } else if (drc && drc->surface.image) {
         draw_demo_target(renderer, GL_TRUE,
                          (GLsizei)drc->surface.width,
                          (GLsizei)drc->surface.height);
-        WHBGfxFinishRenderDRC();
     }
-    WHBGfxFinishRender();
+    GX2GL_Present();
 }
 
 static void show_final_result(const char *status, const RunnerState &state) {
@@ -385,7 +379,6 @@ static void show_final_result(const char *status, const RunnerState &state) {
     while (WHBProcIsRunning()) {
         update_demo_fps(&demo);
         present_demo_frame(&demo);
-        GX2WaitForVsync();
     }
 
     shutdown_demo_renderer(&demo);
@@ -404,25 +397,21 @@ int main(int argc, char **argv) {
     remove(kDonePath);
 
     WHBProcInit();
-    WHBGfxInit();
     g_report_log = fopen(kReportLogPath, "wb");
     report("PIGLIT: booting gx2gl hardware runner\n");
-    gl_mem_init();
-    g_gl_context = gl_context_create();
+    GX2GL_Context context = GX2GL_CreateContext();
 
-    if (!g_gl_context) {
+    if (!context) {
         RunnerState failed_state = {};
         PiglitRunStats empty = {};
         report("PIGLIT: context creation failed\n");
         write_summary(kResultsPath, "failed", empty);
         write_done_flag();
         show_final_result("failed", failed_state);
-        gl_mem_shutdown();
         if (g_report_log) {
             fclose(g_report_log);
             g_report_log = NULL;
         }
-        WHBGfxShutdown();
         WHBProcShutdown();
         return 1;
     }
@@ -460,10 +449,7 @@ int main(int argc, char **argv) {
         g_report_log = NULL;
     }
 
-    gl_context_destroy(g_gl_context);
-    g_gl_context = NULL;
-    gl_mem_shutdown();
-    WHBGfxShutdown();
+    GX2GL_DeleteContext(context);
     WHBProcShutdown();
     return state.exit_requested || state.stats.fail == 0 ? 0 : 1;
 }

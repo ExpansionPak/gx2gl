@@ -12,7 +12,9 @@ int GX2GL_MirrorTVToDRC(void)
     GX2ColorBuffer *tv_color = WHBGfxGetTVColourBuffer();
     GX2ColorBuffer *drc_color = WHBGfxGetDRCColourBuffer();
 
-    if (!tv_color || !drc_color) {
+    if (!tv_color || !drc_color ||
+        !WHBGfxGetTVContextState() || !WHBGfxGetDRCContextState() ||
+        !tv_color->surface.image || !drc_color->surface.image) {
         return -1;
     }
 

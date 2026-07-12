@@ -8,6 +8,7 @@ extern "C" {
 #endif
 
 void gl_shader_init(void);
+void gl_shader_shutdown(void);
 
 GLuint _gl_CreateShader(GLenum type);
 void _gl_DeleteShader(GLuint shader);

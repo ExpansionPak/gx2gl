@@ -1228,21 +1228,25 @@ static GLint get_read_color_internal_format(void) {
 static GX2ColorBuffer *get_default_color_buffer(void) {
     GX2ColorBuffer *preferred = g_default_framebuffer_uses_drc ? WHBGfxGetDRCColourBuffer()
                                                                : WHBGfxGetTVColourBuffer();
-    if (preferred) {
+    if (preferred && preferred->surface.image && preferred->surface.width > 0 &&
+        preferred->surface.height > 0) {
         return preferred;
     }
-    return g_default_framebuffer_uses_drc ? WHBGfxGetTVColourBuffer()
-                                          : WHBGfxGetDRCColourBuffer();
+    preferred = g_default_framebuffer_uses_drc ? WHBGfxGetTVColourBuffer()
+                                               : WHBGfxGetDRCColourBuffer();
+    return preferred && preferred->surface.image ? preferred : NULL;
 }
 
 static GX2DepthBuffer *get_default_depth_buffer(void) {
     GX2DepthBuffer *preferred = g_default_framebuffer_uses_drc ? WHBGfxGetDRCDepthBuffer()
                                                                : WHBGfxGetTVDepthBuffer();
-    if (preferred) {
+    if (preferred && preferred->surface.image && preferred->surface.width > 0 &&
+        preferred->surface.height > 0) {
         return preferred;
     }
-    return g_default_framebuffer_uses_drc ? WHBGfxGetTVDepthBuffer()
-                                          : WHBGfxGetDRCDepthBuffer();
+    preferred = g_default_framebuffer_uses_drc ? WHBGfxGetTVDepthBuffer()
+                                               : WHBGfxGetDRCDepthBuffer();
+    return preferred && preferred->surface.image ? preferred : NULL;
 }
 
 void gl_framebuffer_init(void) {
@@ -1250,6 +1254,30 @@ void gl_framebuffer_init(void) {
     memset(g_renderbuffers, 0, sizeof(g_renderbuffers));
     g_default_framebuffer_uses_drc = false;
     init_framebuffer_object(&g_framebuffers[0], true);
+}
+
+void gl_framebuffer_shutdown(void) {
+    for (uint32_t i = 1; i < MAX_FRAMEBUFFERS; ++i) {
+        GLFramebuffer *fb = &g_framebuffers[i];
+        if (!fb->reserved && !fb->in_use) continue;
+        if (fb->in_use) {
+            resolve_framebuffer_texture_targets(fb);
+            for (uint32_t j = 0; j < 8; ++j) {
+                free_framebuffer_texture_target(fb, j);
+            }
+        }
+    }
+    for (uint32_t i = 1; i < MAX_RENDERBUFFERS; ++i) {
+        GLRenderbuffer *rb = &g_renderbuffers[i];
+        if (!rb->reserved && !rb->in_use) continue;
+        if (rb->in_use) {
+            free_color_buffer_aux(&rb->color_buffer);
+            free_surface_storage(&rb->surface);
+        }
+    }
+    memset(g_framebuffers, 0, sizeof(g_framebuffers));
+    memset(g_renderbuffers, 0, sizeof(g_renderbuffers));
+    g_default_framebuffer_uses_drc = false;
 }
 
 #ifdef __cplusplus

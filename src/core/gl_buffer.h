@@ -10,6 +10,7 @@
 extern "C" {
 #endif
 void gl_buffer_init(void);
+void gl_buffer_shutdown(void);
 
 
 void gl_buffer_end_frame(void);

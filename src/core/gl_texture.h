@@ -13,6 +13,7 @@ extern "C" {
 #endif
 
 void gl_texture_init(void);
+void gl_texture_shutdown(void);
 
 void _gl_GenTextures(GLsizei n, GLuint *textures);
 void _gl_DeleteTextures(GLsizei n, const GLuint *textures);

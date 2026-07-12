@@ -35,3 +35,9 @@ GX2GL_DeleteContext(ctx);
 and mirrors that image to the GamePad/DRC. Use `GX2GL_SetAutomaticDRCEnabled(0)`
 to disable the mirror, or `GX2GL_SetDefaultFramebufferTargetDRC(1)` to draw the
 default framebuffer directly to the GamePad instead.
+
+`GX2GL_CreateContext()` initializes WHBGfx when no WHBGfx context state exists.
+If the application initialized WHBGfx first, gx2gl borrows it and leaves its
+lifetime and GX2R allocator under the application's control. A context created
+by gx2gl owns one library reference; each successful create must be paired with
+`GX2GL_DeleteContext()`.

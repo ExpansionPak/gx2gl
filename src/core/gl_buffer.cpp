@@ -35,6 +35,7 @@ typedef struct {
 
 static GLBuffer g_buffers[MAX_BUFFERS];
 static uint8_t g_empty_mapping_byte;
+static void release_buffer_storage(GLBuffer *buf);
 
 static const GX2RResourceFlags kRawBufferFlags =
     (GX2RResourceFlags)(GX2R_RESOURCE_BIND_VERTEX_BUFFER |
@@ -65,6 +66,13 @@ void gl_buffer_init(void) {
     reset_mapping_state(&g_buffers[i]);
     g_buffers[i].usage = GL_STATIC_DRAW;
   }
+}
+
+void gl_buffer_shutdown(void) {
+  for (uint32_t i = 1; i < MAX_BUFFERS; ++i) {
+    release_buffer_storage(&g_buffers[i]);
+  }
+  memset(g_buffers, 0, sizeof(g_buffers));
 }
 
 static bool is_buffer_target(GLenum target) {

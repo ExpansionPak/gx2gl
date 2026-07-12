@@ -47,7 +47,8 @@ static void gl_context_default_framebuffer_size(GLsizei *width,
   if (height) *height = 0;
 
   tv_color = WHBGfxGetTVColourBuffer();
-  if (!tv_color) return;
+  if (!tv_color || !WHBGfxGetTVContextState() ||
+      !tv_color->surface.image) return;
 
   if (width) *width = (GLsizei)tv_color->surface.width;
   if (height) *height = (GLsizei)tv_color->surface.height;
@@ -211,12 +212,19 @@ void gl_context_destroy(gl_context_t *ctx) {
 
   if (g_gl_context == ctx) {
     _gl_Finish();
-    g_gl_context = NULL;
   }
 
   gl_sync_shutdown();
   gl_query_shutdown();
   gl_transform_feedback_shutdown();
+  gl_framebuffer_shutdown();
+  gl_shader_shutdown();
+  gl_texture_shutdown();
+  gl_buffer_shutdown();
+  gl_vao_shutdown();
+  if (g_gl_context == ctx) {
+    g_gl_context = NULL;
+  }
   gl_mem_free(GL_MEM_TYPE_MEM2, ctx);
 }
 
