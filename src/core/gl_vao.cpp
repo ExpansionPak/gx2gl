@@ -57,7 +57,7 @@ static GLVAO *current_vao(bool require_live) {
   if (!g_gl_context) return NULL;
 
   id = g_bound_vao;
-  if (id == 0 || id >= MAX_VAOS || !g_vaos[id].in_use) {
+  if (id >= MAX_VAOS || !g_vaos[id].in_use) {
     if (require_live) _gl_set_error(GL_INVALID_OPERATION);
     return NULL;
   }
@@ -225,7 +225,7 @@ static bool store_pointer(GLuint index, GLint size, GLenum type,
 void gl_vao_init(void) {
   memset(g_vaos, 0, sizeof(g_vaos));
   g_bound_vao = 0;
-  init_vao(&g_vaos[0], false);
+  init_vao(&g_vaos[0], true);
 
   memset(g_current_attrib_i, 0, sizeof(g_current_attrib_i));
   memset(g_current_attrib_ui, 0, sizeof(g_current_attrib_ui));
@@ -691,7 +691,7 @@ void gl_vao_set_element_array_buffer(GLuint buffer) {
 void gl_vao_unbind_buffer(GLuint buffer) {
   if (buffer == 0) return;
 
-  for (GLuint vao_id = 1; vao_id < MAX_VAOS; ++vao_id) {
+  for (GLuint vao_id = 0; vao_id < MAX_VAOS; ++vao_id) {
     GLVAO *vao = &g_vaos[vao_id];
     if (!vao->in_use) continue;
     if (vao->element_array_buffer == buffer) {

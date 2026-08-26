@@ -2117,7 +2117,6 @@ void gl_bind_program_fetch_shader(void) {
     uint32_t offset;
     uint32_t stride;
     uint32_t buffer_index = UINT32_MAX;
-    bool reuse_conflict = false;
 
     if (!gl_vao_get_attrib_state(slot, &state) || !state.enabled) continue;
 
@@ -2158,18 +2157,10 @@ void gl_bind_program_fetch_shader(void) {
 
     for (uint32_t i = 0; i < buffer_count; ++i) {
       if (!buffers[i].in_use || buffers[i].buffer_id != state.buffer) continue;
-      if (buffers[i].stride != stride) {
-        WiiU_Log("gx2gl: attribute %u (%s) reuses buffer %u with mismatched stride (%u vs %u); skipping.",
-                 slot, reflection->name ? reflection->name : "<unnamed>", state.buffer,
-                 buffers[i].stride, stride);
-        reuse_conflict = true;
-        break;
-      }
+      if (buffers[i].stride != stride) continue;
       buffer_index = buffers[i].gx2_index;
       break;
     }
-
-    if (reuse_conflict) continue;
 
     if (buffer_index == UINT32_MAX) {
       if (buffer_count >= GL33_MAX_VERTEX_ATTRIBS) {
