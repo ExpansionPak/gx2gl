@@ -109,6 +109,15 @@ static uint32_t texture_level_extent(uint32_t extent, GLint level);
 static uint32_t attachment_view_slice(const GLAttachmentRef *attachment);
 static uint32_t texture_level_depth_for_attachment(const GLAttachmentRef *attachment,
                                                    const GX2Surface *surface);
+#ifdef __cplusplus
+extern "C" {
+#endif
+GLboolean gl_read_color_pixels_red32(GLint x, GLint y,
+                                            GLsizei width, GLsizei height,
+                                            GLenum type, void *pixels);
+#ifdef __cplusplus
+}
+#endif
 
 static void detach_renderbuffer_from_framebuffer(GLuint framebuffer,
                                                 GLuint renderbuffer) {
@@ -321,25 +330,20 @@ static bool stage_surface_for_cpu_access(const GX2Surface *source,
                                          GLint internal_format,
                                          bool depth,
                                          GX2Surface *staging_surface) {
-    GX2RResourceFlags surface_flags;
-
     if (!source || !source->image || !staging_surface) return false;
 
-    memset(staging_surface, 0, sizeof(*staging_surface));
-    staging_surface->dim = source->dim;
-    staging_surface->width = source->width;
-    staging_surface->height = source->height;
-    staging_surface->depth = source->depth ? source->depth : 1;
-    staging_surface->mipLevels = 1;
-    staging_surface->format = source->format;
+    *staging_surface = *source;
     staging_surface->aa = GX2_AA_MODE1X;
-    staging_surface->use = (GX2SurfaceUse)(GX2_SURFACE_USE_TEXTURE |
-        (depth ? GX2_SURFACE_USE_DEPTH_BUFFER : GX2_SURFACE_USE_COLOR_BUFFER));
-    staging_surface->tileMode = GX2_TILE_MODE_LINEAR_ALIGNED;
+    staging_surface->use = GX2_SURFACE_USE_TEXTURE;
+    staging_surface->tileMode = GX2_TILE_MODE_LINEAR_SPECIAL;
+    staging_surface->image = NULL;
+    staging_surface->mipmaps = NULL;
+    staging_surface->resourceFlags = (GX2RResourceFlags)0;
     GX2CalcSurfaceSizeAndAlignment(staging_surface);
-    surface_flags = build_framebuffer_surface_flags(internal_format, depth, true);
-
-    if (!GX2RCreateSurface(staging_surface, surface_flags)) {
+    staging_surface->image = gl_mem_alloc(
+        GL_MEM_TYPE_MEM2, staging_surface->imageSize,
+        staging_surface->alignment > 64 ? staging_surface->alignment : 64);
+    if (!staging_surface->image) {
         memset(staging_surface, 0, sizeof(*staging_surface));
         return false;
     }
@@ -347,8 +351,11 @@ static bool stage_surface_for_cpu_access(const GX2Surface *source,
     GX2CopySurface(source, 0, 0, staging_surface, 0, 0);
     GX2DrawDone();
     restore_context_after_surface_op();
-    invalidate_surface_after_write(staging_surface, depth);
+    GX2Invalidate(GX2_INVALIDATE_MODE_CPU_TEXTURE,
+                  staging_surface->image, staging_surface->imageSize);
     DCInvalidateRange(staging_surface->image, staging_surface->imageSize);
+    (void)internal_format;
+    (void)depth;
     return true;
 }
 
@@ -789,6 +796,10 @@ static GLint renderbuffer_component_bits(GLint internal_format, GLenum component
     case GL_RG8:
         return (component == GL_RENDERBUFFER_RED_SIZE ||
                 component == GL_RENDERBUFFER_GREEN_SIZE) ? 8 : 0;
+    case GL_R3_G3_B2:
+        return component == GL_RENDERBUFFER_RED_SIZE ||
+               component == GL_RENDERBUFFER_GREEN_SIZE ? 3 :
+               component == GL_RENDERBUFFER_BLUE_SIZE ? 2 : 0;
     case 3:
     case GL_RGB:
     case GL_RGB8:
@@ -802,6 +813,8 @@ static GLint renderbuffer_component_bits(GLint internal_format, GLenum component
                 component == GL_RENDERBUFFER_GREEN_SIZE ||
                 component == GL_RENDERBUFFER_BLUE_SIZE ||
                 component == GL_RENDERBUFFER_ALPHA_SIZE) ? 8 : 0;
+    case GL_R32F:
+        return component == GL_RENDERBUFFER_RED_SIZE ? 32 : 0;
     case GL_RGBA16F:
         return (component == GL_RENDERBUFFER_RED_SIZE ||
                 component == GL_RENDERBUFFER_GREEN_SIZE ||
@@ -846,6 +859,7 @@ static GLint attachment_component_bits(GLint internal_format, GLenum pname) {
 
 static GLenum attachment_component_type(GLint internal_format) {
     switch (internal_format) {
+    case GL_R32F:
     case GL_RGBA16F:
     case GL_RGBA32F:
     case GL_DEPTH_COMPONENT:
@@ -862,6 +876,7 @@ static GLenum attachment_component_type(GLint internal_format) {
     case GL_R8:
     case GL_RG8:
     case GL_RGB8:
+    case GL_R3_G3_B2:
     case GL_RGBA8:
     case GL_DEPTH_STENCIL:
     case GL_DEPTH24_STENCIL8:
@@ -904,9 +919,13 @@ static bool get_renderbuffer_format_info(GLenum internalformat, GX2SurfaceFormat
         *gx2_format = GX2_SURFACE_FORMAT_UNORM_R8_G8;
         *surface_use = (GX2SurfaceUse)(GX2_SURFACE_USE_TEXTURE | GX2_SURFACE_USE_COLOR_BUFFER);
         *is_depth = false; return true;
-    case 3: case GL_RGB: case GL_RGB8:
+    case 3: case GL_RGB: case GL_RGB8: case GL_R3_G3_B2:
     case 4: case GL_RGBA: case GL_RGBA8:
         *gx2_format = GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8;
+        *surface_use = (GX2SurfaceUse)(GX2_SURFACE_USE_TEXTURE | GX2_SURFACE_USE_COLOR_BUFFER);
+        *is_depth = false; return true;
+    case GL_R32F:
+        *gx2_format = GX2_SURFACE_FORMAT_FLOAT_R32;
         *surface_use = (GX2SurfaceUse)(GX2_SURFACE_USE_TEXTURE | GX2_SURFACE_USE_COLOR_BUFFER);
         *is_depth = false; return true;
     case GL_RGBA16F:
@@ -958,9 +977,17 @@ static void apply_framebuffer_output_state(GLFramebuffer *fb, bool is_default) {
             ++active_target_count;
         }
     }
-    GX2SetTargetChannelMasks(masks[0], masks[1], masks[2], masks[3], masks[4], masks[5], masks[6], masks[7]);
-    GX2SetColorControl(map_framebuffer_logic_op(g_gl_context->logic_op),
-                       g_gl_context->blend_enabled ? active_target_mask : 0,
+    GX2LogicOp logic_op = g_gl_context->color_logic_op_enabled
+                              ? map_framebuffer_logic_op(g_gl_context->logic_op)
+                              : GX2_LOGIC_OP_COPY;
+    uint8_t blend_enable = (g_gl_context->blend_enabled &&
+                            !g_gl_context->color_logic_op_enabled)
+                               ? active_target_mask
+                               : 0;
+
+    GX2SetTargetChannelMasks(masks[0], masks[1], masks[2], masks[3],
+                             masks[4], masks[5], masks[6], masks[7]);
+    GX2SetColorControl(logic_op, blend_enable,
                        active_target_count > 1 ? GX2_ENABLE : GX2_DISABLE,
                        active_target_mask != 0 ? GX2_ENABLE : GX2_DISABLE);
 }
@@ -1632,7 +1659,7 @@ static void renderbuffer_storage(GLenum target,
 
     new_surface.dim = GX2_SURFACE_DIM_TEXTURE_2D; new_surface.width = width; new_surface.height = height;
     new_surface.depth = 1; new_surface.mipLevels = 1; new_surface.format = fmt; new_surface.aa = aa_mode; new_surface.use = use;
-    new_surface.tileMode = GX2_TILE_MODE_DEFAULT;
+    new_surface.tileMode = is_depth ? GX2_TILE_MODE_DEFAULT : GX2_TILE_MODE_LINEAR_ALIGNED;
     GX2CalcSurfaceSizeAndAlignment(&new_surface);
     surface_flags = build_framebuffer_surface_flags(internalformat, is_depth, false);
     if (!GX2RCreateSurface(&new_surface, surface_flags)) {
@@ -1668,6 +1695,478 @@ static void renderbuffer_storage(GLenum target,
 
 void _gl_RenderbufferStorage(GLenum target, GLenum internalformat, GLsizei width, GLsizei height) {
     renderbuffer_storage(target, 0, internalformat, width, height);
+}
+
+static uint16_t encode_half_float_bits(float value);
+static uint16_t read_gpu_u16(const uint8_t *ptr);
+
+static GLboolean ReadNormalizedColor16(GLint x, GLint y, GLsizei width,
+                                        GLsizei height, void *pixels);
+
+static void WriteNormalizedColor16(uint8_t *Output, uint16_t Input, GLenum Type) {
+    switch (Type) {
+    case GL_UNSIGNED_BYTE: {
+        uint8_t Value = (uint8_t)(((uint32_t)Input * 255u + 32767u) / 65535u);
+        memcpy(Output, &Value, sizeof(Value));
+        break;
+    }
+    case GL_BYTE: {
+        int8_t Value = (int8_t)(((uint32_t)Input * 127u + 32767u) / 65535u);
+        memcpy(Output, &Value, sizeof(Value));
+        break;
+    }
+    case GL_UNSIGNED_SHORT:
+        memcpy(Output, &Input, sizeof(Input));
+        break;
+    case GL_SHORT: {
+        int16_t Value = (int16_t)(((uint32_t)Input * 32767u + 32767u) / 65535u);
+        memcpy(Output, &Value, sizeof(Value));
+        break;
+    }
+    case GL_UNSIGNED_INT: {
+        uint32_t Value = (uint32_t)Input * 65537u;
+        memcpy(Output, &Value, sizeof(Value));
+        break;
+    }
+    case GL_INT: {
+        int32_t Value = (int32_t)(((uint64_t)Input * 2147483647u + 32767u) / 65535u);
+        memcpy(Output, &Value, sizeof(Value));
+        break;
+    }
+    case GL_HALF_FLOAT: {
+        uint16_t Value = encode_half_float_bits((float)Input / 65535.0f);
+        memcpy(Output, &Value, sizeof(Value));
+        break;
+    }
+    case GL_FLOAT: {
+        float Value = (float)Input / 65535.0f;
+        memcpy(Output, &Value, sizeof(Value));
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+static void write_color_component(uint8_t *output, uint8_t input, GLenum type) {
+    switch (type) {
+    case GL_UNSIGNED_BYTE: output[0] = input; break;
+    case GL_BYTE: {
+        int8_t v = (int8_t)(((uint32_t)input * 127u + 127u) / 255u);
+        memcpy(output, &v, sizeof(v)); break;
+    }
+    case GL_UNSIGNED_SHORT: {
+        uint16_t v = (uint16_t)((uint32_t)input * 257u);
+        memcpy(output, &v, sizeof(v)); break;
+    }
+    case GL_SHORT: {
+        int16_t v = (int16_t)(((uint32_t)input * 32767u + 127u) / 255u);
+        memcpy(output, &v, sizeof(v)); break;
+    }
+    case GL_UNSIGNED_INT: {
+        uint32_t v = (uint32_t)input * 0x01010101u;
+        memcpy(output, &v, sizeof(v)); break;
+    }
+    case GL_INT: {
+        int32_t v = (int32_t)(((uint64_t)input * 2147483647u + 127u) / 255u);
+        memcpy(output, &v, sizeof(v)); break;
+    }
+    case GL_FLOAT: {
+        float v = (float)input / 255.0f;
+        memcpy(output, &v, sizeof(v)); break;
+    }
+    case GL_HALF_FLOAT: {
+        uint16_t v = encode_half_float_bits((float)input / 255.0f);
+        memcpy(output, &v, sizeof(v)); break;
+    }
+    default: break;
+    }
+}
+
+static void WriteSignedReadColor(uint8_t *Destination, float Value, GLenum Type) {
+    if (Value < -1.0f) Value = -1.0f;
+    if (Value > 1.0f) Value = 1.0f;
+    float Positive = Value < 0.0f ? 0.0f : Value;
+    switch (Type) {
+    case GL_BYTE: {
+        float Scaled = Value * 127.0f;
+        int8_t Result = (int8_t)(Scaled + (Scaled < 0.0f ? -0.5f : 0.5f));
+        memcpy(Destination, &Result, sizeof(Result));
+        break;
+    }
+    case GL_SHORT: {
+        float Scaled = Value * 32767.0f;
+        int16_t Result = (int16_t)(Scaled + (Scaled < 0.0f ? -0.5f : 0.5f));
+        memcpy(Destination, &Result, sizeof(Result));
+        break;
+    }
+    case GL_INT: {
+        double Scaled = (double)Value * 2147483647.0;
+        int32_t Result = (int32_t)(Scaled + (Scaled < 0.0 ? -0.5 : 0.5));
+        memcpy(Destination, &Result, sizeof(Result));
+        break;
+    }
+    case GL_UNSIGNED_BYTE: {
+        uint8_t Result = (uint8_t)(Positive * 255.0f + 0.5f);
+        memcpy(Destination, &Result, sizeof(Result));
+        break;
+    }
+    case GL_UNSIGNED_SHORT: {
+        uint16_t Result = (uint16_t)(Positive * 65535.0f + 0.5f);
+        memcpy(Destination, &Result, sizeof(Result));
+        break;
+    }
+    case GL_UNSIGNED_INT: {
+        uint32_t Result = (uint32_t)((double)Positive * 4294967295.0 + 0.5);
+        memcpy(Destination, &Result, sizeof(Result));
+        break;
+    }
+    case GL_FLOAT:
+        memcpy(Destination, &Value, sizeof(Value));
+        break;
+    case GL_HALF_FLOAT: {
+        uint16_t Result = encode_half_float_bits(Value);
+        memcpy(Destination, &Result, sizeof(Result));
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+static GLboolean ReadSignedNormalizedColor(GLint x, GLint y,
+                                              GLsizei width, GLsizei height,
+                                              float *Destination) {
+    if (!g_gl_context || !Destination || width < 0 || height < 0) return GL_FALSE;
+    if (width == 0 || height == 0) return GL_TRUE;
+    GX2ColorBuffer *ColorBuffer = get_read_color_buffer();
+    if (!ColorBuffer || !ColorBuffer->surface.image) return GL_FALSE;
+
+    GX2Surface *Surface = &ColorBuffer->surface;
+    GX2Surface TextureSurface;
+    memset(&TextureSurface, 0, sizeof(TextureSurface));
+    GLuint Framebuffer = g_gl_context->bound_read_framebuffer;
+    uint32_t AttachmentIndex = 0;
+    if (Framebuffer > 0 && Framebuffer < MAX_FRAMEBUFFERS &&
+        get_color_attachment_index(g_framebuffers[Framebuffer].read_buffer,
+                                   &AttachmentIndex) &&
+        g_framebuffers[Framebuffer].color_attachments[AttachmentIndex].kind ==
+            GL_ATTACHMENT_KIND_TEXTURE) {
+        GLAttachmentRef *Attachment =
+            &g_framebuffers[Framebuffer].color_attachments[AttachmentIndex];
+        GX2Texture *Texture = gl_get_gx2_texture(Attachment->object);
+        if (Texture && build_texture_attachment_read_surface(
+                           Attachment, &Texture->surface, &TextureSurface))
+            Surface = &TextureSurface;
+    }
+
+    GX2DrawDone();
+    GX2Surface StagingSurface;
+    memset(&StagingSurface, 0, sizeof(StagingSurface));
+    bool Staged = stage_surface_for_cpu_access(
+        Surface, get_read_color_internal_format(), false, &StagingSurface);
+    GX2Surface *Source = Staged ? &StagingSurface : Surface;
+    if (!Staged) {
+        invalidate_surface_after_color_write(Source);
+        DCInvalidateRange(Source->image, Source->imageSize);
+    }
+    const bool TwoComponents =
+        Source->format == GX2_SURFACE_FORMAT_SNORM_R8_G8 ||
+        Source->format == GX2_SURFACE_FORMAT_SNORM_R16_G16;
+    const bool FourComponents =
+        Source->format == GX2_SURFACE_FORMAT_SNORM_R8_G8_B8_A8 ||
+        Source->format == GX2_SURFACE_FORMAT_SNORM_R16_G16_B16_A16;
+    const bool SixteenBit =
+        Source->format == GX2_SURFACE_FORMAT_SNORM_R16 ||
+        Source->format == GX2_SURFACE_FORMAT_SNORM_R16_G16 ||
+        Source->format == GX2_SURFACE_FORMAT_SNORM_R16_G16_B16_A16;
+    GLboolean Success = Source->format == GX2_SURFACE_FORMAT_SNORM_R8 ||
+                        Source->format == GX2_SURFACE_FORMAT_SNORM_R8_G8 ||
+                        Source->format == GX2_SURFACE_FORMAT_SNORM_R8_G8_B8_A8 ||
+                        Source->format == GX2_SURFACE_FORMAT_SNORM_R16 ||
+                        Source->format == GX2_SURFACE_FORMAT_SNORM_R16_G16 ||
+                        Source->format == GX2_SURFACE_FORMAT_SNORM_R16_G16_B16_A16;
+    if (Success) {
+        for (GLsizei Row = 0; Row < height; ++Row) {
+            GLint SourceY = (GLint)Source->height - 1 - (y + Row);
+            for (GLsizei Column = 0; Column < width; ++Column) {
+                GLint SourceX = x + Column;
+                size_t DestinationIndex = ((size_t)Row * (size_t)width +
+                                           (size_t)Column) * 4u;
+                float *Color = Destination + DestinationIndex;
+                Color[0] = Color[1] = Color[2] = 0.0f;
+                Color[3] = 1.0f;
+                if (SourceX < 0 || SourceY < 0 ||
+                    SourceX >= (GLint)Source->width ||
+                    SourceY >= (GLint)Source->height) continue;
+                size_t SourceIndex = (size_t)SourceY * (size_t)Source->pitch +
+                                     (size_t)SourceX;
+                const uint32_t Components = FourComponents ? 4u :
+                                            TwoComponents ? 2u : 1u;
+                const uint8_t *Texel = (const uint8_t *)Source->image +
+                    SourceIndex * Components * (SixteenBit ? 2u : 1u);
+                for (uint32_t Component = 0; Component < Components; ++Component) {
+                    if (SixteenBit) {
+                        int16_t Raw = (int16_t)read_gpu_u16(Texel + Component * 2u);
+                        Color[Component] = Raw == INT16_MIN ? -1.0f :
+                            (float)Raw / 32767.0f;
+                    } else {
+                        int8_t Raw = (int8_t)Texel[Component];
+                        Color[Component] = Raw == INT8_MIN ? -1.0f :
+                            (float)Raw / 127.0f;
+                    }
+                }
+            }
+        }
+    }
+    if (Staged) free_surface_storage(&StagingSurface);
+    return Success;
+}
+
+static bool IsFloatFramebufferFormat(GLint Format) {
+    switch (Format) {
+    case GL_R16F: case GL_RG16F: case GL_RGB16F: case GL_RGBA16F:
+    case GL_R32F: case GL_RG32F: case GL_RGB32F: case GL_RGBA32F:
+    case GL_R11F_G11F_B10F: case GL_RGB9_E5:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static GLboolean ReadFloatingColor(GLint X, GLint Y, GLsizei Width,
+                                   GLsizei Height, float *Destination) {
+    if (!g_gl_context || !Destination) return GL_FALSE;
+    GX2ColorBuffer *Color = get_read_color_buffer();
+    if (!Color || !Color->surface.image) return GL_FALSE;
+    GX2Surface *Surface = &Color->surface;
+    GX2Surface TextureSurface = {};
+    const GLuint Framebuffer = g_gl_context->bound_read_framebuffer;
+    uint32_t AttachmentIndex = 0;
+    if (Framebuffer > 0 && Framebuffer < MAX_FRAMEBUFFERS &&
+        get_color_attachment_index(g_framebuffers[Framebuffer].read_buffer,
+                                   &AttachmentIndex) &&
+        g_framebuffers[Framebuffer].color_attachments[AttachmentIndex].kind ==
+            GL_ATTACHMENT_KIND_TEXTURE) {
+        GLAttachmentRef *Attachment =
+            &g_framebuffers[Framebuffer].color_attachments[AttachmentIndex];
+        GX2Texture *Texture = gl_get_gx2_texture(Attachment->object);
+        if (Texture && build_texture_attachment_read_surface(
+                Attachment, &Texture->surface, &TextureSurface)) {
+            Surface = &TextureSurface;
+        }
+    }
+    GX2DrawDone();
+    GX2Surface StagingSurface = {};
+    const bool Staged = stage_surface_for_cpu_access(
+        Surface, get_read_color_internal_format(), false, &StagingSurface);
+    GX2Surface *Source = Staged ? &StagingSurface : Surface;
+    if (!Staged) {
+        invalidate_surface_after_color_write(Source);
+        DCInvalidateRange(Source->image, Source->imageSize);
+    }
+    uint32_t Components = 0;
+    uint32_t Bytes = 0;
+    switch (Source->format) {
+    case GX2_SURFACE_FORMAT_FLOAT_R16: Components = 1; Bytes = 2; break;
+    case GX2_SURFACE_FORMAT_FLOAT_R16_G16: Components = 2; Bytes = 2; break;
+    case GX2_SURFACE_FORMAT_FLOAT_R16_G16_B16_A16: Components = 4; Bytes = 2; break;
+    case GX2_SURFACE_FORMAT_FLOAT_R32: Components = 1; Bytes = 4; break;
+    case GX2_SURFACE_FORMAT_FLOAT_R32_G32: Components = 2; Bytes = 4; break;
+    case GX2_SURFACE_FORMAT_FLOAT_R32_G32_B32_A32: Components = 4; Bytes = 4; break;
+    default:
+        if (Staged) free_surface_storage(&StagingSurface);
+        return GL_FALSE;
+    }
+    const GLint InternalFormat = get_read_color_internal_format();
+    const bool OpaqueAlpha = InternalFormat == GL_RGB16F ||
+                             InternalFormat == GL_RGB32F;
+    for (GLsizei Row = 0; Row < Height; ++Row) {
+        const GLint SourceY = (GLint)Source->height - 1 - (Y + Row);
+        for (GLsizei Column = 0; Column < Width; ++Column) {
+            float *Pixel = Destination +
+                ((size_t)Row * (size_t)Width + (size_t)Column) * 4u;
+            Pixel[0] = Pixel[1] = Pixel[2] = 0.0f;
+            Pixel[3] = 1.0f;
+            const GLint SourceX = X + Column;
+            if (SourceX < 0 || SourceY < 0 ||
+                SourceX >= (GLint)Source->width ||
+                SourceY >= (GLint)Source->height) continue;
+            const size_t Index = (size_t)SourceY * Source->pitch + (size_t)SourceX;
+            const uint8_t *Texel = (const uint8_t *)Source->image +
+                                    Index * Components * Bytes;
+            for (uint32_t Component = 0; Component < Components; ++Component) {
+                const uint8_t *Input = Texel + (size_t)Component * Bytes;
+                Pixel[Component] = Bytes == 2 ? decode_gpu_half_float(Input) :
+                                              decode_gpu_float32(Input);
+            }
+            if (OpaqueAlpha) Pixel[3] = 1.0f;
+        }
+    }
+    if (Staged) free_surface_storage(&StagingSurface);
+    return GL_TRUE;
+}
+
+static bool IsIntegerReadbackInternalFormat(GLint Format) {
+    switch (Format) {
+    case GL_R8I: case GL_RG8I: case GL_RGB8I: case GL_RGBA8I:
+    case GL_R16I: case GL_RG16I: case GL_RGB16I: case GL_RGBA16I:
+    case GL_R32I: case GL_RG32I: case GL_RGB32I: case GL_RGBA32I:
+    case GL_R8UI: case GL_RG8UI: case GL_RGB8UI: case GL_RGBA8UI:
+    case GL_R16UI: case GL_RG16UI: case GL_RGB16UI: case GL_RGBA16UI:
+    case GL_R32UI: case GL_RG32UI: case GL_RGB32UI: case GL_RGBA32UI:
+    case GL_RGB10_A2UI:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static uint32_t IntegerReadbackComponents(GLenum Format) {
+    switch (Format) {
+    case GL_RED_INTEGER: case GL_GREEN_INTEGER: case GL_BLUE_INTEGER:
+        return 1u;
+    case GL_RG_INTEGER:
+        return 2u;
+    case GL_RGB_INTEGER: case GL_BGR_INTEGER:
+        return 3u;
+    case GL_RGBA_INTEGER: case GL_BGRA_INTEGER:
+        return 4u;
+    default:
+        return 0u;
+    }
+}
+
+static uint32_t IntegerReadbackChannel(GLenum Format, uint32_t Component) {
+    if (Format == GL_GREEN_INTEGER) return 1u;
+    if (Format == GL_BLUE_INTEGER) return 2u;
+    if ((Format == GL_BGR_INTEGER || Format == GL_BGRA_INTEGER) && Component < 3u)
+        return 2u - Component;
+    return Component;
+}
+
+static void StoreIntegerReadbackComponent(uint8_t *Destination, int64_t Value,
+                                          GLenum Type) {
+    const bool Signed = Type == GL_BYTE || Type == GL_SHORT || Type == GL_INT;
+    const uint32_t Bytes = (Type == GL_BYTE || Type == GL_UNSIGNED_BYTE) ? 1u :
+        (Type == GL_SHORT || Type == GL_UNSIGNED_SHORT) ? 2u : 4u;
+    const uint32_t Bits = Bytes * 8u;
+    const int64_t Minimum = Signed ? -(1LL << (Bits - 1u)) : 0;
+    const int64_t Maximum = Signed ? (1LL << (Bits - 1u)) - 1LL :
+                                     (1LL << Bits) - 1LL;
+    if (Value < Minimum) Value = Minimum;
+    if (Value > Maximum) Value = Maximum;
+    if (Bytes == 1u) {
+        Destination[0] = (uint8_t)Value;
+    } else if (Bytes == 2u) {
+        uint16_t Word = (uint16_t)Value;
+        memcpy(Destination, &Word, sizeof(Word));
+    } else {
+        uint32_t Word = (uint32_t)Value;
+        memcpy(Destination, &Word, sizeof(Word));
+    }
+}
+
+static GLboolean ReadIntegerColor(GLint X, GLint Y, GLsizei Width,
+                                  GLsizei Height, int64_t *Destination) {
+    if (!g_gl_context || !Destination) return GL_FALSE;
+    GX2ColorBuffer *Color = get_read_color_buffer();
+    if (!Color || !Color->surface.image) return GL_FALSE;
+    GX2Surface *Surface = &Color->surface;
+    GX2Surface TextureSurface = {};
+    const GLuint Framebuffer = g_gl_context->bound_read_framebuffer;
+    uint32_t AttachmentIndex = 0;
+    if (Framebuffer > 0 && Framebuffer < MAX_FRAMEBUFFERS &&
+        get_color_attachment_index(g_framebuffers[Framebuffer].read_buffer,
+                                   &AttachmentIndex) &&
+        g_framebuffers[Framebuffer].color_attachments[AttachmentIndex].kind ==
+            GL_ATTACHMENT_KIND_TEXTURE) {
+        GLAttachmentRef *Attachment =
+            &g_framebuffers[Framebuffer].color_attachments[AttachmentIndex];
+        GX2Texture *Texture = gl_get_gx2_texture(Attachment->object);
+        if (Texture && build_texture_attachment_read_surface(
+                Attachment, &Texture->surface, &TextureSurface)) {
+            Surface = &TextureSurface;
+        }
+    }
+    GX2DrawDone();
+    GX2Surface StagingSurface = {};
+    const bool Staged = stage_surface_for_cpu_access(
+        Surface, get_read_color_internal_format(), false, &StagingSurface);
+    GX2Surface *Source = Staged ? &StagingSurface : Surface;
+    if (!Staged) {
+        invalidate_surface_after_color_write(Source);
+        DCInvalidateRange(Source->image, Source->imageSize);
+    }
+    uint32_t Components = 0;
+    uint32_t Bytes = 0;
+    bool Signed = false;
+    switch (Source->format) {
+    case GX2_SURFACE_FORMAT_SINT_R8: Components = 1; Bytes = 1; Signed = true; break;
+    case GX2_SURFACE_FORMAT_SINT_R8_G8: Components = 2; Bytes = 1; Signed = true; break;
+    case GX2_SURFACE_FORMAT_SINT_R8_G8_B8_A8: Components = 4; Bytes = 1; Signed = true; break;
+    case GX2_SURFACE_FORMAT_SINT_R16: Components = 1; Bytes = 2; Signed = true; break;
+    case GX2_SURFACE_FORMAT_SINT_R16_G16: Components = 2; Bytes = 2; Signed = true; break;
+    case GX2_SURFACE_FORMAT_SINT_R16_G16_B16_A16: Components = 4; Bytes = 2; Signed = true; break;
+    case GX2_SURFACE_FORMAT_SINT_R32: Components = 1; Bytes = 4; Signed = true; break;
+    case GX2_SURFACE_FORMAT_SINT_R32_G32: Components = 2; Bytes = 4; Signed = true; break;
+    case GX2_SURFACE_FORMAT_SINT_R32_G32_B32_A32: Components = 4; Bytes = 4; Signed = true; break;
+    case GX2_SURFACE_FORMAT_UINT_R8: Components = 1; Bytes = 1; break;
+    case GX2_SURFACE_FORMAT_UINT_R8_G8: Components = 2; Bytes = 1; break;
+    case GX2_SURFACE_FORMAT_UINT_R8_G8_B8_A8: Components = 4; Bytes = 1; break;
+    case GX2_SURFACE_FORMAT_UINT_R16: Components = 1; Bytes = 2; break;
+    case GX2_SURFACE_FORMAT_UINT_R16_G16: Components = 2; Bytes = 2; break;
+    case GX2_SURFACE_FORMAT_UINT_R16_G16_B16_A16: Components = 4; Bytes = 2; break;
+    case GX2_SURFACE_FORMAT_UINT_R32: Components = 1; Bytes = 4; break;
+    case GX2_SURFACE_FORMAT_UINT_R32_G32: Components = 2; Bytes = 4; break;
+    case GX2_SURFACE_FORMAT_UINT_R32_G32_B32_A32: Components = 4; Bytes = 4; break;
+    default:
+        if (Staged) free_surface_storage(&StagingSurface);
+        return GL_FALSE;
+    }
+    GLboolean Success = GL_TRUE;
+    const GLint InternalFormat = get_read_color_internal_format();
+    const bool ForceOpaqueAlpha =
+        InternalFormat == GL_RGB8I || InternalFormat == GL_RGB16I ||
+        InternalFormat == GL_RGB32I || InternalFormat == GL_RGB8UI ||
+        InternalFormat == GL_RGB16UI || InternalFormat == GL_RGB32UI;
+    for (GLsizei Row = 0; Row < Height; ++Row) {
+        const GLint SourceY = (GLint)Source->height - 1 - (Y + Row);
+        for (GLsizei Column = 0; Column < Width; ++Column) {
+            const GLint SourceX = X + Column;
+            int64_t *Pixel = Destination +
+                ((size_t)Row * (size_t)Width + (size_t)Column) * 4u;
+            Pixel[0] = Pixel[1] = Pixel[2] = 0;
+            Pixel[3] = 1;
+            if (SourceX < 0 || SourceY < 0 ||
+                SourceX >= (GLint)Source->width ||
+                SourceY >= (GLint)Source->height) continue;
+            const size_t Index = (size_t)SourceY * Source->pitch + (size_t)SourceX;
+            const uint8_t *Texel = (const uint8_t *)Source->image +
+                                    Index * Components * Bytes;
+            for (uint32_t Component = 0; Component < Components; ++Component) {
+                const uint8_t *Input = Texel + Component * Bytes;
+                int64_t Value = 0;
+                if (Bytes == 1u) {
+                    Value = Signed ? (int8_t)Input[0] : Input[0];
+                } else if (Bytes == 2u) {
+                    uint16_t Word;
+                    memcpy(&Word, Input, sizeof(Word));
+                    Word = GPU_TO_CPU_16(Word);
+                    Value = Signed ? (int16_t)Word : Word;
+                } else {
+                    uint32_t Word;
+                    memcpy(&Word, Input, sizeof(Word));
+                    Word = GPU_TO_CPU_32(Word);
+                    Value = Signed ? (int32_t)Word : Word;
+                }
+                Pixel[Component] = Value;
+            }
+            if (ForceOpaqueAlpha) Pixel[3] = 1;
+        }
+    }
+    if (Staged) free_surface_storage(&StagingSurface);
+    return Success;
 }
 
 void _gl_ReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, GLvoid *pixels) {
