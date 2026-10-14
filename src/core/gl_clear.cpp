@@ -106,7 +106,7 @@ static void clear_stencil_buffer(GLint stencil_value) {
   }
 }
 
-} // namespace
+}
 
 void glClearBufferiv(GLenum buffer, GLint drawbuffer, const GLint *value) {
   GLfloat color[4];
