@@ -115,34 +115,63 @@ void glPixelStoref(GLenum pname, GLfloat param) {
 }
 
 void glPointParameterf(GLenum pname, GLfloat param) {
-  (void)param;
-  if (pname != GL_POINT_SIZE_MIN &&
-      pname != GL_POINT_SIZE_MAX &&
-      pname != GL_POINT_FADE_THRESHOLD_SIZE) {
+  if (!g_gl_context) return;
+
+  switch (pname) {
+  case GL_POINT_FADE_THRESHOLD_SIZE:
+    if (param < 0.0f) {
+      _gl_set_error(GL_INVALID_VALUE);
+      return;
+    }
+    g_gl_context->point_fade_threshold_size = param;
+    return;
+
+  case GL_POINT_SPRITE_COORD_ORIGIN:
+    if (param != (GLfloat)GL_LOWER_LEFT && param != (GLfloat)GL_UPPER_LEFT) {
+      _gl_set_error(GL_INVALID_VALUE);
+      return;
+    }
+    g_gl_context->point_sprite_coord_origin = (GLenum)(GLint)param;
+    return;
+
+  default:
     _gl_set_error(GL_INVALID_ENUM);
     return;
   }
-  _gl_set_error(GL_INVALID_OPERATION);
 }
 
 void glPointParameterfv(GLenum pname, const GLfloat *params) {
-  (void)params;
-  if (pname != GL_POINT_DISTANCE_ATTENUATION) {
-    _gl_set_error(GL_INVALID_ENUM);
-    return;
-  }
-  _gl_set_error(GL_INVALID_OPERATION);
+  if (!params) return;
+  glPointParameterf(pname, params[0]);
 }
 
 void glPointParameteri(GLenum pname, GLint param) {
-  glPointParameterf(pname, (GLfloat)param);
-}
+  if (!g_gl_context) return;
 
-void glPointParameteriv(GLenum pname, const GLint *params) {
-  (void)params;
-  if (pname != GL_POINT_DISTANCE_ATTENUATION) {
+  switch (pname) {
+  case GL_POINT_FADE_THRESHOLD_SIZE:
+    if (param < 0) {
+      _gl_set_error(GL_INVALID_VALUE);
+      return;
+    }
+    g_gl_context->point_fade_threshold_size = (GLfloat)param;
+    return;
+
+  case GL_POINT_SPRITE_COORD_ORIGIN:
+    if (param != (GLint)GL_LOWER_LEFT && param != (GLint)GL_UPPER_LEFT) {
+      _gl_set_error(GL_INVALID_VALUE);
+      return;
+    }
+    g_gl_context->point_sprite_coord_origin = (GLenum)param;
+    return;
+
+  default:
     _gl_set_error(GL_INVALID_ENUM);
     return;
   }
-  _gl_set_error(GL_INVALID_OPERATION);
+}
+
+void glPointParameteriv(GLenum pname, const GLint *params) {
+  if (!params) return;
+  glPointParameteri(pname, params[0]);
 }
