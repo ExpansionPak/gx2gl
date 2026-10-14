@@ -107,9 +107,16 @@ static void gl_context_init_raster_state(gl_context_t *ctx) {
   ctx->line_width = 1.0f;
   ctx->logic_op = GL_COPY;
   ctx->point_size = 1.0f;
+  ctx->point_fade_threshold_size = 1.0f;
+  ctx->point_sprite_coord_origin = GL_UPPER_LEFT;
   ctx->sample_coverage_value = 1.0f;
   ctx->sample_mask_value = 0xFFFFFFFFu;
   ctx->multisample_enabled = GL_TRUE;
+  ctx->dither_enabled = GL_TRUE;
+  ctx->line_smooth_hint = GL_DONT_CARE;
+  ctx->polygon_smooth_hint = GL_DONT_CARE;
+  ctx->texture_compression_hint = GL_DONT_CARE;
+  ctx->fragment_shader_derivative_hint = GL_DONT_CARE;
   ctx->generate_mipmap_hint = GL_DONT_CARE;
   ctx->primitive_restart_index = 0;
   ctx->color_mask[0] = GL_TRUE;
@@ -144,16 +151,10 @@ static void gl_context_init_defaults(gl_context_t *ctx) {
 }
 
 void _gl_set_error(GLenum error) {
-  uint32_t next;
-
   if (!g_gl_context || error == GL_NO_ERROR) return;
 
   OSLockMutex(&g_gl_context->error_mutex);
-  next = (g_gl_context->error_head + 1) % GL_ERROR_QUEUE_SIZE;
-  if (next != g_gl_context->error_tail) {
-    g_gl_context->error_queue[g_gl_context->error_head] = error;
-    g_gl_context->error_head = next;
-  }
+  if (g_gl_context->error == GL_NO_ERROR) g_gl_context->error = error;
   OSUnlockMutex(&g_gl_context->error_mutex);
 }
 
@@ -163,15 +164,14 @@ GLenum glGetError(void) {
   if (!g_gl_context) return GL_NO_ERROR;
 
   OSLockMutex(&g_gl_context->error_mutex);
-  if (g_gl_context->error_head == g_gl_context->error_tail) {
-    OSUnlockMutex(&g_gl_context->error_mutex);
-    return GL_NO_ERROR;
-  }
-
-  error = g_gl_context->error_queue[g_gl_context->error_tail];
-  g_gl_context->error_tail = (g_gl_context->error_tail + 1) % GL_ERROR_QUEUE_SIZE;
+  error = g_gl_context->error;
+  g_gl_context->error = GL_NO_ERROR;
   OSUnlockMutex(&g_gl_context->error_mutex);
   return error;
+}
+
+GLenum glGetGraphicsResetStatus(void) {
+  return GL_NO_ERROR;
 }
 
 void _gl_Flush(void) {
