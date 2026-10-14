@@ -3114,6 +3114,585 @@ static void copy_texture_row_unswapped(uint8_t *dst, const uint8_t *src,
 static bool copy_texture_row(uint8_t *dst, const uint8_t *src,
                              uint32_t texel_count,
                              const TextureFormatInfo *info) {
+  uint32_t component_size = info->src_bytes_per_component;
+  if (!g_gl_context || !g_gl_context->unpack_swap_bytes ||
+      component_size <= 1 || texel_count == 0) {
+    copy_texture_row_unswapped(dst, src, texel_count, info);
+    return true;
+  }
+
+  if ((size_t)texel_count > SIZE_MAX / info->src_bytes_per_texel) {
+    _gl_set_error(GL_OUT_OF_MEMORY);
+    return false;
+  }
+  size_t bytes = (size_t)texel_count * info->src_bytes_per_texel;
+  uint8_t *swapped = (uint8_t *)malloc(bytes);
+  if (!swapped) {
+    _gl_set_error(GL_OUT_OF_MEMORY);
+    return false;
+  }
+  memcpy(swapped, src, bytes);
+  for (size_t offset = 0; offset + component_size <= bytes;
+       offset += component_size) {
+    for (uint32_t i = 0; i < component_size / 2u; ++i) {
+      uint8_t value = swapped[offset + i];
+      swapped[offset + i] = swapped[offset + component_size - 1u - i];
+      swapped[offset + component_size - 1u - i] = value;
+    }
+  }
+  copy_texture_row_unswapped(dst, swapped, texel_count, info);
+  free(swapped);
+  return true;
+}
+
+static void write_normalized_pixel_component(uint8_t *output,
+                                             uint8_t channel,
+                                             GLenum type) {
+  switch (type) {
+  case GL_UNSIGNED_BYTE:
+    output[0] = channel;
+    break;
+  case GL_BYTE:
+    output[0] = (uint8_t)((channel * 127u + 127u) / 255u);
+    break;
+  case GL_UNSIGNED_SHORT: {
+    uint16_t value = (uint16_t)((uint32_t)channel * 257u);
+    memcpy(output, &value, sizeof(value));
+    break;
+  }
+  case GL_SHORT: {
+    int16_t value = (int16_t)(((uint32_t)channel * 32767u + 127u) / 255u);
+    memcpy(output, &value, sizeof(value));
+    break;
+  }
+  case GL_UNSIGNED_INT: {
+    uint32_t value = (uint32_t)channel * 0x01010101u;
+    memcpy(output, &value, sizeof(value));
+    break;
+  }
+  case GL_INT: {
+    int32_t value = (int32_t)(((uint64_t)channel * 2147483647u + 127u) / 255u);
+    memcpy(output, &value, sizeof(value));
+    break;
+  }
+  case GL_FLOAT: {
+    float value = (float)channel / 255.0f;
+    memcpy(output, &value, sizeof(value));
+    break;
+  }
+  case GL_HALF_FLOAT: {
+    uint16_t value = 0;
+    if (channel != 0) {
+      float normalized = (float)channel / 255.0f;
+      uint32_t bits;
+      memcpy(&bits, &normalized, sizeof(bits));
+      uint32_t exponent = ((bits >> 23) & 255u) - 112u;
+      uint32_t mantissa = bits & 0x7fffffu;
+      value = (uint16_t)((exponent << 10) | ((mantissa + 0x1000u) >> 13));
+    }
+    memcpy(output, &value, sizeof(value));
+    break;
+  }
+  default:
+    break;
+  }
+}
+
+static uint32_t encode_unsigned_float_component(float value,
+                                               uint32_t mantissa_bits) {
+  if (value <= 0.0f) return 0;
+  uint32_t ieee;
+  memcpy(&ieee, &value, sizeof(ieee));
+  int32_t exponent = (int32_t)((ieee >> 23) & 255u) - 112;
+  uint32_t mantissa = ieee & 0x7fffffu;
+  if (exponent >= 31) return 31u << mantissa_bits;
+  if (exponent <= 0) {
+    uint32_t shift = (uint32_t)(1 - exponent) + 23u - mantissa_bits;
+    if (shift >= 32u) return 0;
+    return ((0x800000u | mantissa) + (1u << (shift - 1u))) >> shift;
+  }
+  uint32_t shift = 23u - mantissa_bits;
+  uint32_t fraction = (mantissa + (1u << (shift - 1u))) >> shift;
+  if (fraction >> mantissa_bits) {
+    fraction = 0;
+    ++exponent;
+  }
+  return (uint32_t)exponent << mantissa_bits | fraction;
+}
+
+static bool pack_normalized_color_values(uint8_t *dst, const float rgba[4],
+                                         GLenum format, GLenum type) {
+  uint8_t size = compressed_red_packed_pixel_size(format, type);
+  if (!size) return false;
+  float values[4] = {rgba[0], rgba[1], rgba[2], rgba[3]};
+  if (format == GL_BGRA) {
+    values[0] = rgba[2];
+    values[2] = rgba[0];
+  }
+  uint32_t bits[4] = {};
+  bool reverse = false;
+  switch (type) {
+  case GL_UNSIGNED_BYTE_3_3_2: bits[0]=3; bits[1]=3; bits[2]=2; break;
+  case GL_UNSIGNED_BYTE_2_3_3_REV:
+    bits[0]=3; bits[1]=3; bits[2]=2; reverse=true; break;
+  case GL_UNSIGNED_SHORT_5_6_5: bits[0]=5; bits[1]=6; bits[2]=5; break;
+  case GL_UNSIGNED_SHORT_5_6_5_REV:
+    bits[0]=5; bits[1]=6; bits[2]=5; reverse=true; break;
+  case GL_UNSIGNED_SHORT_4_4_4_4:
+    bits[0]=bits[1]=bits[2]=bits[3]=4; break;
+  case GL_UNSIGNED_SHORT_4_4_4_4_REV:
+    bits[0]=bits[1]=bits[2]=bits[3]=4; reverse=true; break;
+  case GL_UNSIGNED_SHORT_5_5_5_1:
+    bits[0]=bits[1]=bits[2]=5; bits[3]=1; break;
+  case GL_UNSIGNED_SHORT_1_5_5_5_REV:
+    bits[0]=bits[1]=bits[2]=5; bits[3]=1; reverse=true; break;
+  case GL_UNSIGNED_INT_8_8_8_8:
+    bits[0]=bits[1]=bits[2]=bits[3]=8; break;
+  case GL_UNSIGNED_INT_8_8_8_8_REV:
+    bits[0]=bits[1]=bits[2]=bits[3]=8; reverse=true; break;
+  case GL_UNSIGNED_INT_10_10_10_2:
+    bits[0]=bits[1]=bits[2]=10; bits[3]=2; break;
+  case GL_UNSIGNED_INT_2_10_10_10_REV:
+    bits[0]=bits[1]=bits[2]=10; bits[3]=2; reverse=true; break;
+  case GL_UNSIGNED_INT_10F_11F_11F_REV: {
+    uint32_t packed = encode_unsigned_float_component(rgba[0], 6u) |
+        (encode_unsigned_float_component(rgba[1], 6u) << 11u) |
+        (encode_unsigned_float_component(rgba[2], 5u) << 22u);
+    memcpy(dst, &packed, sizeof(packed));
+    return true;
+  }
+  case GL_UNSIGNED_INT_5_9_9_9_REV: {
+    uint32_t exponent = 0;
+    float scale = 0.000030517578125f;
+    for (; exponent < 31; ++exponent) {
+      if (rgba[0] / scale <= 511.0f / 512.0f &&
+          rgba[1] / scale <= 511.0f / 512.0f &&
+          rgba[2] / scale <= 511.0f / 512.0f) break;
+      scale *= 2.0f;
+    }
+    uint32_t red = (uint32_t)(rgba[0] / scale * 512.0f + 0.5f);
+    uint32_t green = (uint32_t)(rgba[1] / scale * 512.0f + 0.5f);
+    uint32_t blue = (uint32_t)(rgba[2] / scale * 512.0f + 0.5f);
+    if (red > 511u) red = 511u;
+    if (green > 511u) green = 511u;
+    if (blue > 511u) blue = 511u;
+    uint32_t packed = red | green << 9u | blue << 18u | exponent << 27u;
+    memcpy(dst, &packed, sizeof(packed));
+    return true;
+  }
+  default: return false;
+  }
+  uint32_t packed = 0;
+  uint32_t position = 0;
+  for (uint32_t c = 0; c < 4 && bits[c]; ++c) {
+    uint32_t width = bits[c];
+    uint32_t max_component = (1u << width) - 1u;
+    uint32_t quantized = (uint32_t)(values[c] * max_component + 0.5f);
+    if (quantized > max_component) quantized = max_component;
+    uint32_t shift = reverse ? position : (uint32_t)size * 8u - position - width;
+    packed |= quantized << shift;
+    position += width;
+  }
+  if (size == 1u) {
+    dst[0] = (uint8_t)packed;
+  } else if (size == 2u) {
+    uint16_t word = (uint16_t)packed;
+    memcpy(dst, &word, sizeof(word));
+  } else {
+    memcpy(dst, &packed, sizeof(packed));
+  }
+  return true;
+}
+
+static bool pack_normalized_color_pixel(uint8_t *dst, const uint8_t *source,
+                                       uint8_t source_components,
+                                       GLenum format, GLenum type) {
+  float rgba[4] = {source[0] / 255.0f, 0.0f, 0.0f, 1.0f};
+  if (source_components > 1) rgba[1] = source[1] / 255.0f;
+  if (source_components > 2) rgba[2] = source[2] / 255.0f;
+  if (source_components > 3) rgba[3] = source[3] / 255.0f;
+  return pack_normalized_color_values(dst, rgba, format, type);
+}
+
+static bool PackNormalizedColorPixel16(uint8_t *Destination, const uint16_t *Source,
+                                       uint8_t Components, GLenum Format,
+                                       GLenum Type) {
+  float Rgba[4] = {Source[0] / 65535.0f, 0.0f, 0.0f, 1.0f};
+  if (Components > 1) Rgba[1] = Source[1] / 65535.0f;
+  if (Components > 2) Rgba[2] = Source[2] / 65535.0f;
+  if (Components > 3) Rgba[3] = Source[3] / 65535.0f;
+  return pack_normalized_color_values(Destination, Rgba, Format, Type);
+}
+
+GLsizei gl_texture_packed_pixel_size(GLenum format, GLenum type) {
+  uint8_t Size = compressed_red_packed_pixel_size(format, type);
+  return (GLsizei)(Size ? Size : IntegerPackedTextureSize(format, type));
+}
+
+GLboolean gl_texture_pack_float_pixel(uint8_t *Destination,
+                                       const float Channels[4],
+                                       GLenum Format, GLenum Type) {
+  return pack_normalized_color_values(Destination, Channels, Format, Type)
+      ? GL_TRUE : GL_FALSE;
+}
+
+GLboolean gl_texture_pack_normalized_pixel(uint8_t *dst, const uint8_t *rgba,
+                                           GLenum format, GLenum type) {
+  return pack_normalized_color_pixel(dst, rgba, 4u, format, type)
+             ? GL_TRUE : GL_FALSE;
+}
+
+GLboolean gl_texture_pack_normalized_pixel16(uint8_t *dst, const uint16_t *rgba,
+                                             GLenum format, GLenum type) {
+  return PackNormalizedColorPixel16(dst, rgba, 4u, format, type)
+             ? GL_TRUE : GL_FALSE;
+}
+
+static void WriteNormalizedComponent16(uint8_t *destination, uint16_t source,
+                                       GLenum type) {
+  switch (type) {
+  case GL_UNSIGNED_BYTE: {
+    uint8_t value = (uint8_t)(((uint32_t)source * 255u + 32767u) / 65535u);
+    memcpy(destination, &value, sizeof(value));
+    break;
+  }
+  case GL_BYTE: {
+    int8_t value = (int8_t)(((uint32_t)source * 127u + 32767u) / 65535u);
+    memcpy(destination, &value, sizeof(value));
+    break;
+  }
+  case GL_UNSIGNED_SHORT:
+    memcpy(destination, &source, sizeof(source));
+    break;
+  case GL_SHORT: {
+    int16_t value = (int16_t)(((uint32_t)source * 32767u + 32767u) / 65535u);
+    memcpy(destination, &value, sizeof(value));
+    break;
+  }
+  case GL_UNSIGNED_INT: {
+    uint32_t value = (uint32_t)source * 65537u;
+    memcpy(destination, &value, sizeof(value));
+    break;
+  }
+  case GL_INT: {
+    int32_t value = (int32_t)(((uint64_t)source * 2147483647u + 32767u) / 65535u);
+    memcpy(destination, &value, sizeof(value));
+    break;
+  }
+  case GL_FLOAT: {
+    float value = (float)source / 65535.0f;
+    memcpy(destination, &value, sizeof(value));
+    break;
+  }
+  case GL_HALF_FLOAT: {
+    float value = (float)source / 65535.0f;
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    int32_t exponent = (int32_t)((bits >> 23) & 255u) - 112;
+    uint32_t mantissa = bits & 0x7fffffu;
+    uint16_t half = 0;
+    if (source != 0 && exponent > -10) {
+      if (exponent <= 0) {
+        mantissa = (mantissa | 0x800000u) >> (1 - exponent);
+        half = (uint16_t)((mantissa + 0x1000u) >> 13);
+      } else if (exponent >= 31) {
+        half = 0x7c00u;
+      } else {
+        uint32_t rounded = (mantissa + 0x1000u) >> 13;
+        if (rounded >= 1024u) {
+          rounded = 0;
+          ++exponent;
+        }
+        half = (uint16_t)((exponent << 10) | rounded);
+      }
+    }
+    memcpy(destination, &half, sizeof(half));
+    break;
+  }
+  default:
+    break;
+  }
+}
+
+static void read_texture_row_unswapped(uint8_t *dst, const uint8_t *src,
+                             uint32_t texel_count,
+                             const TextureFormatInfo *info) {
+  if (IsFloatTextureStorage(info->internal_format)) {
+    const bool Packed = compressed_red_packed_pixel_size(
+        info->src_format, info->src_type) != 0;
+    for (uint32_t Texel = 0; Texel < texel_count; ++Texel) {
+      const uint8_t *Source = src + (size_t)Texel * info->dst_bytes_per_texel;
+      uint8_t *Destination = dst + (size_t)Texel * info->src_bytes_per_texel;
+      float Components[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+      for (uint32_t Component = 0; Component < info->dst_components; ++Component) {
+        Components[Component] = ReadFloatTextureStorage(
+            Source + (size_t)Component * info->bytes_per_component,
+            info->bytes_per_component);
+      }
+      if (Packed) {
+        pack_normalized_color_values(Destination, Components,
+                                     info->src_format, info->src_type);
+        continue;
+      }
+      for (uint32_t Component = 0; Component < info->src_components; ++Component) {
+        const uint32_t Channel = IntegerTextureChannel(info->src_format, Component);
+        WriteFloatTextureOutput(
+            Destination + (size_t)Component * info->src_bytes_per_component,
+            Components[Channel], info->src_type);
+      }
+    }
+    return;
+  }
+  if (sized_texture_is_signed_integer(info->internal_format) ||
+      sized_texture_is_unsigned_integer(info->internal_format)) {
+    const bool SignedStorage = sized_texture_is_signed_integer(info->internal_format);
+    const bool SignedOutput = IsSignedIntegerTextureType(info->src_type);
+    const GLenum StorageType = info->bytes_per_component == 1u ?
+        (SignedStorage ? GL_BYTE : GL_UNSIGNED_BYTE) :
+        info->bytes_per_component == 2u ?
+        (SignedStorage ? GL_SHORT : GL_UNSIGNED_SHORT) :
+        (SignedStorage ? GL_INT : GL_UNSIGNED_INT);
+    for (uint32_t Texel = 0; Texel < texel_count; ++Texel) {
+      const uint8_t *Source = src + (size_t)Texel * info->dst_bytes_per_texel;
+      uint8_t *Destination = dst + (size_t)Texel * info->src_bytes_per_texel;
+      int64_t Components[4] = {0, 0, 0, 1};
+      for (uint32_t Component = 0; Component < info->dst_components; ++Component) {
+        Components[Component] = ReadIntegerTextureComponent(
+            Source + (size_t)Component * info->bytes_per_component,
+            StorageType, true);
+      }
+      if (IntegerPackedTextureSize(info->src_format, info->src_type)) {
+        PackIntegerTexturePixel(Destination, Components, info->src_format,
+                                info->src_type);
+      } else for (uint32_t Component = 0; Component < info->src_components; ++Component) {
+        uint32_t Channel = IntegerTextureChannel(info->src_format, Component);
+        WriteIntegerTextureComponent(
+            Destination + (size_t)Component * info->src_bytes_per_component,
+            Components[Channel], info->src_bytes_per_component,
+            SignedOutput, false);
+      }
+    }
+    return;
+  }
+  if (IsLegacyPrecisionTexture(info->internal_format)) {
+    const bool Packed = compressed_red_packed_pixel_size(
+        info->src_format, info->src_type) != 0;
+    for (uint32_t Texel = 0; Texel < texel_count; ++Texel) {
+      const uint8_t *Source = src + (size_t)Texel * info->dst_bytes_per_texel;
+      uint8_t *Destination = dst + (size_t)Texel * info->src_bytes_per_texel;
+      float Channels[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+      for (uint32_t Component = 0; Component < info->dst_components; ++Component) {
+        const uint32_t Stored = info->bytes_per_component == 1 ?
+            Source[Component] :
+            GPU_TO_CPU_16(load_unaligned_u16(Source + Component * 2u));
+        Channels[Component] = (float)Stored /
+            (info->bytes_per_component == 1 ? 255.0f : 65535.0f);
+      }
+      if (Packed) {
+        pack_normalized_color_values(Destination, Channels,
+                                     info->src_format, info->src_type);
+      } else {
+        for (uint32_t Component = 0; Component < info->src_components; ++Component) {
+          const uint32_t Channel = IntegerTextureChannel(info->src_format,
+                                                         Component);
+          WriteFloatTextureOutput(
+              Destination + (size_t)Component * info->src_bytes_per_component,
+              Channels[Channel], info->src_type);
+        }
+      }
+    }
+    return;
+  }
+  if (info->internal_format == GL_R8_SNORM ||
+      info->internal_format == GL_RG8_SNORM ||
+      info->internal_format == GL_RGB8_SNORM ||
+      info->internal_format == GL_RGBA8_SNORM ||
+      info->internal_format == GL_R16_SNORM ||
+      info->internal_format == GL_RG16_SNORM ||
+      info->internal_format == GL_RGB16_SNORM ||
+      info->internal_format == GL_RGBA16_SNORM) {
+    for (uint32_t Texel = 0; Texel < texel_count; ++Texel) {
+      const uint8_t *Source = src + (size_t)Texel * info->dst_bytes_per_texel;
+      uint8_t *Destination = dst + (size_t)Texel * info->src_bytes_per_texel;
+      float Components[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+      for (uint32_t Component = 0; Component < info->dst_components; ++Component) {
+        if (info->bytes_per_component == 1) {
+          int8_t Raw = (int8_t)Source[Component];
+          Components[Component] = Raw == INT8_MIN ? -1.0f : (float)Raw / 127.0f;
+        } else {
+          int16_t Raw = (int16_t)GPU_TO_CPU_16(
+              load_unaligned_u16(Source + Component * 2u));
+          Components[Component] = Raw == INT16_MIN ? -1.0f : (float)Raw / 32767.0f;
+        }
+      }
+      if (compressed_red_packed_pixel_size(info->src_format, info->src_type)) {
+        float Values[4] = {Components[0], Components[1],
+                           Components[2], Components[3]};
+        for (float &Value : Values) {
+          if (Value < 0.0f) Value = 0.0f;
+          if (Value > 1.0f) Value = 1.0f;
+        }
+        pack_normalized_color_values(Destination, Values,
+                                     info->src_format, info->src_type);
+        continue;
+      }
+      float Values[4] = {};
+      switch (info->src_format) {
+      case GL_RED: Values[0] = Components[0]; break;
+      case GL_GREEN: Values[0] = Components[1]; break;
+      case GL_BLUE: Values[0] = Components[2]; break;
+      case GL_RG: Values[0] = Components[0]; Values[1] = Components[1]; break;
+      case GL_RGB: case GL_RGBA:
+        memcpy(Values, Components, sizeof(Values)); break;
+      case GL_BGR: case GL_BGRA:
+        Values[0] = Components[2]; Values[1] = Components[1];
+        Values[2] = Components[0]; Values[3] = Components[3]; break;
+      default: break;
+      }
+      for (uint32_t Component = 0; Component < info->src_components; ++Component) {
+        WriteSignedNormalizedOutput(
+            Destination + (size_t)Component * info->src_bytes_per_component,
+            Values[Component], info->src_type);
+      }
+    }
+    return;
+  }
+  if (info->internal_format == GL_R16 || info->internal_format == GL_RG16 ||
+      info->internal_format == GL_RGB16 || info->internal_format == GL_RGBA16 ||
+      info->internal_format == GL_RGB10_A2) {
+    const bool packed = compressed_red_packed_pixel_size(info->src_format, info->src_type) != 0;
+    for (uint32_t i = 0; i < texel_count; ++i) {
+      const uint8_t *source = src + (size_t)i * info->dst_bytes_per_texel;
+      uint8_t *destination = dst + (size_t)i * info->src_bytes_per_texel;
+      uint16_t rgba[4] = {0, 0, 0, 65535};
+      for (uint32_t c = 0; c < info->dst_components && c < 4u; ++c) {
+        rgba[c] = GPU_TO_CPU_16(load_unaligned_u16(source + c * 2u));
+      }
+      if (info->internal_format == GL_RGB16) rgba[3] = 65535;
+      if (packed) {
+        PackNormalizedColorPixel16(destination, rgba, 4u,
+                                   info->src_format, info->src_type);
+        continue;
+      }
+      uint16_t components[4] = {};
+      switch (info->src_format) {
+      case GL_RED: components[0] = rgba[0]; break;
+      case GL_GREEN: components[0] = rgba[1]; break;
+      case GL_BLUE: components[0] = rgba[2]; break;
+      case GL_RG: components[0] = rgba[0]; components[1] = rgba[1]; break;
+      case GL_RGB: case GL_RGBA:
+        components[0] = rgba[0]; components[1] = rgba[1];
+        components[2] = rgba[2]; components[3] = rgba[3]; break;
+      case GL_BGR: case GL_BGRA:
+        components[0] = rgba[2]; components[1] = rgba[1];
+        components[2] = rgba[0]; components[3] = rgba[3]; break;
+      default: break;
+      }
+      for (uint32_t c = 0; c < info->src_components; ++c)
+        WriteNormalizedComponent16(destination + (size_t)c * info->src_bytes_per_component,
+                                   components[c], info->src_type);
+    }
+    return;
+  }
+  if ((info->internal_format == GL_COMPRESSED_RED ||
+       info->internal_format == GL_COMPRESSED_RG ||
+       info->internal_format == GL_COMPRESSED_RGB ||
+       info->internal_format == GL_COMPRESSED_RGBA ||
+       info->internal_format == GL_COMPRESSED_SRGB ||
+       info->internal_format == GL_COMPRESSED_SRGB_ALPHA ||
+       info->internal_format == GL_R8 || info->internal_format == GL_RG8 ||
+       info->internal_format == GL_RG ||
+       info->internal_format == GL_RGB8 || info->internal_format == GL_RGBA8 ||
+       info->internal_format == GL_SRGB8 || info->internal_format == GL_SRGB8_ALPHA8 ||
+       info->internal_format == GL_R3_G3_B2) &&
+      compressed_red_packed_pixel_size(info->src_format, info->src_type)) {
+    for (uint32_t i = 0; i < texel_count; ++i) {
+      pack_normalized_color_pixel(
+          dst + (size_t)i * info->src_bytes_per_texel,
+          src + (size_t)i * info->dst_bytes_per_texel,
+          info->dst_components, info->src_format, info->src_type);
+    }
+    return;
+  }
+  if ((info->internal_format == GL_COMPRESSED_RED ||
+       info->internal_format == GL_COMPRESSED_RG ||
+       info->internal_format == GL_COMPRESSED_RGB ||
+       info->internal_format == GL_COMPRESSED_RGBA ||
+       info->internal_format == GL_COMPRESSED_SRGB ||
+       info->internal_format == GL_COMPRESSED_SRGB_ALPHA ||
+       info->internal_format == GL_R8 || info->internal_format == GL_RG8 ||
+       info->internal_format == GL_RG ||
+       info->internal_format == GL_RGB8 || info->internal_format == GL_RGBA8 ||
+       info->internal_format == GL_SRGB8 || info->internal_format == GL_SRGB8_ALPHA8 ||
+       info->internal_format == GL_R3_G3_B2) &&
+      info->bytes_per_component == 1 &&
+      info->src_bytes_per_component != 0 &&
+      !compressed_red_packed_pixel_size(info->src_format, info->src_type) &&
+      (info->src_format == GL_RED || info->src_format == GL_GREEN ||
+       info->src_format == GL_BLUE || info->src_format == GL_RG ||
+       info->src_format == GL_RGB || info->src_format == GL_BGR ||
+       info->src_format == GL_RGBA || info->src_format == GL_BGRA)) {
+    for (uint32_t i = 0; i < texel_count; ++i) {
+      const uint8_t *input = src + (size_t)i * info->dst_bytes_per_texel;
+      uint8_t *output = dst + (size_t)i * info->src_bytes_per_texel;
+      uint8_t rgba[4] = {input[0], 0, 0, 255};
+      if (info->dst_components > 1) rgba[1] = input[1];
+      if (info->dst_components > 2) rgba[2] = input[2];
+      if (info->internal_format == GL_RGBA8 ||
+          info->internal_format == GL_SRGB8_ALPHA8 ||
+          info->internal_format == GL_COMPRESSED_RGBA ||
+          info->internal_format == GL_COMPRESSED_SRGB_ALPHA) rgba[3] = input[3];
+      uint8_t components[4] = {};
+      switch (info->src_format) {
+      case GL_RED: components[0] = rgba[0]; break;
+      case GL_GREEN: components[0] = rgba[1]; break;
+      case GL_BLUE: components[0] = rgba[2]; break;
+      case GL_RG: components[0] = rgba[0]; components[1] = rgba[1]; break;
+      case GL_RGB:
+        components[0] = rgba[0]; components[1] = rgba[1];
+        components[2] = rgba[2]; break;
+      case GL_BGR:
+        components[0] = rgba[2]; components[1] = rgba[1];
+        components[2] = rgba[0]; break;
+      case GL_RGBA:
+        memcpy(components, rgba, sizeof(rgba)); break;
+      case GL_BGRA:
+        components[0] = rgba[2]; components[1] = rgba[1];
+        components[2] = rgba[0]; components[3] = rgba[3]; break;
+      default: break;
+      }
+      for (uint32_t channel = 0; channel < info->src_components; ++channel) {
+        write_normalized_pixel_component(
+            output + (size_t)channel * info->src_bytes_per_component,
+            components[channel], info->src_type);
+      }
+    }
+    return;
+  }
+  if ((info->internal_format == GL_RGB10_A2 ||
+       info->internal_format == GL_RGB10_A2UI) &&
+      (info->src_type == GL_UNSIGNED_INT_2_10_10_10_REV ||
+       info->src_type == GL_UNSIGNED_INT_10_10_10_2)) {
+    const bool Integer = info->internal_format == GL_RGB10_A2UI;
+    const bool Reverse = info->src_type == GL_UNSIGNED_INT_2_10_10_10_REV;
+    for (uint32_t Texel = 0; Texel < texel_count; ++Texel) {
+      uint32_t Packed = 0;
+      for (uint32_t Component = 0; Component < 4; ++Component) {
+        const uint32_t Bits = Component == 3 ? 2u : 10u;
+        const uint32_t Max = (1u << Bits) - 1u;
+        const uint32_t Offset = (Texel * 4u + Component) * 2u;
+        const uint32_t Stored = GPU_TO_CPU_16(
+            load_unaligned_u16(src + Offset));
+        const uint32_t Value = Integer ? (Stored > Max ? Max : Stored) :
+            (Stored * Max + 32767u) / 65535u;
+        const uint32_t Shift = Reverse ? Component * 10u :
+            (Component == 3 ? 0u : 22u - Component * 10u);
+        Packed |= Value << Shift;
+      }
+      store_unaligned_u32(dst + Texel * 4u, Packed);
+    }
+    return;
+  }
   if (info->packed_u32) {
     for (uint32_t i = 0; i < texel_count; ++i) {
       uint32_t word = load_unaligned_u32(src + i * sizeof(uint32_t));
