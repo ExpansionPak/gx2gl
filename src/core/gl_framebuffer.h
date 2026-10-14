@@ -41,6 +41,8 @@ GLboolean gl_is_draw_color_buffer_enabled(GLuint index);
 GX2ColorBuffer *gl_get_draw_color_buffer(GLuint index);
 GX2DepthBuffer *gl_get_draw_depth_buffer(void);
 GLsizei gl_get_draw_sample_count(void);
+GLenum gl_get_draw_buffer(GLuint index);
+GLenum gl_get_read_buffer(void);
 void gl_framebuffer_mark_bound_color_dirty(void);
 void gl_framebuffer_mark_bound_color_buffer_dirty(GLuint index);
 void gl_framebuffer_sync_bound_color_targets(void);
