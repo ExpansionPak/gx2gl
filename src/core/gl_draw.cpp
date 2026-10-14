@@ -8,6 +8,7 @@
 #include <gx2/enum.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -21,7 +22,7 @@ typedef struct {
 
 typedef struct {
   const void *indices;
-  uint16_t *owned_indices;
+  void *owned_indices;
   GX2IndexType gx2_type;
 } PreparedIndices;
 
@@ -298,6 +299,177 @@ static void release_indices(PreparedIndices *prepared) {
   prepared->indices = NULL;
 }
 
+static uint32_t GetFixedRestartGroupSize(GX2PrimitiveMode prim) {
+  switch (prim) {
+  case GX2_PRIMITIVE_MODE_POINTS:
+    return 1;
+  case GX2_PRIMITIVE_MODE_LINES:
+    return 2;
+  case GX2_PRIMITIVE_MODE_TRIANGLES:
+    return 3;
+  case GX2_PRIMITIVE_MODE_LINES_ADJACENCY:
+    return 4;
+  case GX2_PRIMITIVE_MODE_TRIANGLES_ADJACENCY:
+    return 6;
+  default:
+    return 0;
+  }
+}
+
+static size_t GetPreparedIndexSize(const PreparedIndices *prepared) {
+  return prepared && prepared->gx2_type == GX2_INDEX_TYPE_U32
+             ? sizeof(uint32_t)
+             : sizeof(uint16_t);
+}
+
+static uint32_t GetPreparedIndexValue(const PreparedIndices *prepared,
+                                      GLsizei index) {
+  if (prepared->gx2_type == GX2_INDEX_TYPE_U32) {
+    return ((const uint32_t *)prepared->indices)[index];
+  }
+  return ((const uint16_t *)prepared->indices)[index];
+}
+
+static bool CompactRestartListIndices(GX2PrimitiveMode prim, GLsizei count,
+                                      PreparedIndices *prepared,
+                                      GLsizei *prepared_count) {
+  uint32_t group_size;
+  uint32_t restart_index;
+  size_t index_size;
+  bool saw_restart = false;
+  uint8_t *compacted;
+  GLsizei segment_start = 0;
+  GLsizei output_count = 0;
+
+  if (!prepared || !prepared_count) return false;
+  *prepared_count = count;
+  if (!g_gl_context || !g_gl_context->primitive_restart_enabled) return true;
+
+  group_size = GetFixedRestartGroupSize(prim);
+  if (group_size == 0) return true;
+
+  restart_index = g_gl_context->primitive_restart_index;
+  for (GLsizei i = 0; i < count; ++i) {
+    if (GetPreparedIndexValue(prepared, i) == restart_index) {
+      saw_restart = true;
+      break;
+    }
+  }
+  if (!saw_restart) return true;
+
+  index_size = GetPreparedIndexSize(prepared);
+  compacted = (uint8_t *)malloc((size_t)count * index_size);
+  if (!compacted) {
+    _gl_set_error(GL_OUT_OF_MEMORY);
+    return false;
+  }
+
+  for (GLsizei i = 0; i <= count; ++i) {
+    bool boundary =
+        i == count || GetPreparedIndexValue(prepared, i) == restart_index;
+    if (!boundary) continue;
+
+    GLsizei segment_count = i - segment_start;
+    GLsizei complete_count =
+        segment_count - (segment_count % (GLsizei)group_size);
+    if (complete_count > 0) {
+      memcpy(compacted + (size_t)output_count * index_size,
+             (const uint8_t *)prepared->indices +
+                 (size_t)segment_start * index_size,
+             (size_t)complete_count * index_size);
+      output_count += complete_count;
+    }
+    segment_start = i + 1;
+  }
+
+  free(prepared->owned_indices);
+  prepared->indices = compacted;
+  prepared->owned_indices = compacted;
+  *prepared_count = output_count;
+  return true;
+}
+
+static bool DrawAdjacencyWithoutGeometryShader(GX2PrimitiveMode prim,
+                                               GLsizei count,
+                                               const PreparedIndices *prepared,
+                                               GLsizei instancecount,
+                                               GLint basevertex,
+                                               bool use_restart) {
+  GX2PrimitiveMode raster_prim;
+  uint32_t minimum;
+  const size_t index_size = GetPreparedIndexSize(prepared);
+  uint8_t *output = (uint8_t *)malloc((size_t)count * index_size);
+  GLsizei segment_start = 0;
+  if (!output) {
+    _gl_set_error(GL_OUT_OF_MEMORY);
+    return false;
+  }
+
+  switch (prim) {
+  case GX2_PRIMITIVE_MODE_LINES_ADJACENCY:
+  case GX2_PRIMITIVE_MODE_LINE_STRIP_ADJACENCY:
+    raster_prim = prim == GX2_PRIMITIVE_MODE_LINES_ADJACENCY
+                      ? GX2_PRIMITIVE_MODE_LINES
+                      : GX2_PRIMITIVE_MODE_LINE_STRIP;
+    minimum = 2;
+    break;
+  default:
+    raster_prim = prim == GX2_PRIMITIVE_MODE_TRIANGLES_ADJACENCY
+                      ? GX2_PRIMITIVE_MODE_TRIANGLES
+                      : GX2_PRIMITIVE_MODE_TRIANGLE_STRIP;
+    minimum = 3;
+    break;
+  }
+
+  GX2SetPrimitiveRestartIndex(0xFFFFFFFFu);
+  for (GLsizei i = 0; i <= count; ++i) {
+    if (i != count &&
+        (!use_restart ||
+         GetPreparedIndexValue(prepared, i) !=
+             g_gl_context->primitive_restart_index)) {
+      continue;
+    }
+
+    const GLsizei length = i - segment_start;
+    GLsizei output_count = 0;
+    for (GLsizei k = 0; k < length; ++k) {
+      bool keep = false;
+      switch (prim) {
+      case GX2_PRIMITIVE_MODE_LINES_ADJACENCY:
+        keep = (k % 4 == 1 || k % 4 == 2) && k / 4 < length / 4;
+        break;
+      case GX2_PRIMITIVE_MODE_LINE_STRIP_ADJACENCY:
+        keep = k > 0 && k < length - 1;
+        break;
+      case GX2_PRIMITIVE_MODE_TRIANGLES_ADJACENCY:
+        keep = k % 2 == 0 && k / 6 < length / 6;
+        break;
+      case GX2_PRIMITIVE_MODE_TRIANGLE_STRIP_ADJACENCY:
+        keep = k % 2 == 0;
+        break;
+      default:
+        break;
+      }
+      if (keep) {
+        const uint32_t value = GetPreparedIndexValue(prepared, segment_start + k);
+        if (index_size == sizeof(uint32_t))
+          ((uint32_t *)output)[output_count] = value;
+        else
+          ((uint16_t *)output)[output_count] = (uint16_t)value;
+        ++output_count;
+      }
+    }
+    if ((uint32_t)output_count >= minimum) {
+      GX2DrawIndexedImmediateEx(raster_prim, (uint32_t)output_count,
+                                prepared->gx2_type, output,
+                                (uint32_t)basevertex, (uint32_t)instancecount);
+    }
+    segment_start = i + 1;
+  }
+  free(output);
+  return true;
+}
+
 static void set_restart_index_for_draw(void) {
   GX2SetPrimitiveRestartIndex(g_gl_context && g_gl_context->primitive_restart_enabled
                                   ? g_gl_context->primitive_restart_index
@@ -307,6 +479,25 @@ static void set_restart_index_for_draw(void) {
 static void draw_arrays_checked(GX2PrimitiveMode prim, GLint first,
                                 GLsizei count, GLsizei instancecount) {
   if (count == 0 || instancecount == 0) return;
+  if (prim == GX2_PRIMITIVE_MODE_LINES_ADJACENCY ||
+      prim == GX2_PRIMITIVE_MODE_LINE_STRIP_ADJACENCY ||
+      prim == GX2_PRIMITIVE_MODE_TRIANGLES_ADJACENCY ||
+      prim == GX2_PRIMITIVE_MODE_TRIANGLE_STRIP_ADJACENCY) {
+    uint32_t byte_count;
+    if (!multiply_u32(count, sizeof(uint32_t), &byte_count)) {
+      _gl_set_error(GL_OUT_OF_MEMORY);
+      return;
+    }
+    uint32_t *indices = (uint32_t *)malloc(byte_count);
+    if (!indices) { _gl_set_error(GL_OUT_OF_MEMORY); return; }
+    for (GLsizei i = 0; i < count; ++i) indices[i] = (uint32_t)first + (uint32_t)i;
+    PreparedIndices prepared = {indices, indices, GX2_INDEX_TYPE_U32};
+    bool ok = DrawAdjacencyWithoutGeometryShader(
+        prim, count, &prepared, instancecount, 0, false);
+    free(indices);
+    if (ok) gl_framebuffer_mark_bound_color_dirty();
+    return;
+  }
   set_restart_index_for_draw();
   GX2DrawEx(prim, (uint32_t)count, (uint32_t)first, (uint32_t)instancecount);
   gl_framebuffer_mark_bound_color_dirty();
@@ -318,19 +509,48 @@ static bool draw_elements_checked(GX2PrimitiveMode prim, GLsizei count,
                                   GLsizei instancecount,
                                   GLint basevertex) {
   PreparedIndices prepared;
+  GLsizei prepared_count;
 
   if (count == 0 || instancecount == 0) return true;
   if (!prepare_indices(count, indices, index_info, &prepared)) return false;
+  if (prim == GX2_PRIMITIVE_MODE_LINES_ADJACENCY ||
+      prim == GX2_PRIMITIVE_MODE_LINE_STRIP_ADJACENCY ||
+      prim == GX2_PRIMITIVE_MODE_TRIANGLES_ADJACENCY ||
+      prim == GX2_PRIMITIVE_MODE_TRIANGLE_STRIP_ADJACENCY) {
+    const bool ok = DrawAdjacencyWithoutGeometryShader(
+        prim, count, &prepared, instancecount, basevertex,
+        g_gl_context->primitive_restart_enabled);
+    release_indices(&prepared);
+    if (ok) gl_framebuffer_mark_bound_color_dirty();
+    return ok;
+  }
+  if (!CompactRestartListIndices(prim, count, &prepared, &prepared_count)) {
+    release_indices(&prepared);
+    return false;
+  }
 
-  set_restart_index_for_draw();
-  if (index_info->widen_u8) {
-    GX2DrawIndexedImmediateEx(prim, (uint32_t)count, prepared.gx2_type,
-                              prepared.indices, (uint32_t)basevertex,
-                              (uint32_t)instancecount);
-  } else {
-    GX2DrawIndexedEx(prim, (uint32_t)count, prepared.gx2_type,
-                     prepared.indices, (uint32_t)basevertex,
-                     (uint32_t)instancecount);
+  if (prepared_count > 0) {
+    set_restart_index_for_draw();
+    if (prim == GX2_PRIMITIVE_MODE_TRIANGLES && prepared_count > 12288) {
+      const size_t IndexBytes = GetPreparedIndexSize(&prepared);
+      for (uint32_t Start = 0; Start < (uint32_t)prepared_count; Start += 3072) {
+        uint32_t Count = (uint32_t)prepared_count - Start;
+        if (Count > 3072) Count = 3072;
+        const uint8_t *Data = (const uint8_t *)prepared.indices +
+                              (size_t)Start * IndexBytes;
+        GX2DrawIndexedImmediateEx(prim, Count, prepared.gx2_type, Data,
+                                  (uint32_t)basevertex, (uint32_t)instancecount);
+      }
+    } else if (index_info->widen_u8 || prepared.owned_indices) {
+      GX2DrawIndexedImmediateEx(prim, (uint32_t)prepared_count,
+                                prepared.gx2_type, prepared.indices,
+                                (uint32_t)basevertex,
+                                (uint32_t)instancecount);
+    } else {
+      GX2DrawIndexedEx(prim, (uint32_t)prepared_count, prepared.gx2_type,
+                       prepared.indices, (uint32_t)basevertex,
+                       (uint32_t)instancecount);
+    }
   }
   release_indices(&prepared);
   gl_framebuffer_mark_bound_color_dirty();
