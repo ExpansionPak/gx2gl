@@ -2186,12 +2186,93 @@ void _gl_ReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum form
     size_t dst_row_bytes;
     size_t dst_stride;
     uint64_t required_size;
+    bool read_rgba8;
+    bool read_color_u8;
+    bool read_color_typed;
+    bool read_color_16;
+    GLsizei read_color_packed_size;
+    bool read_red_normalized;
+    bool read_red_float;
+    bool read_red_sint;
+    bool read_red_uint;
+    bool read_color_snorm;
+    bool read_color_integer;
+    bool read_color_float;
+    bool ReadSrgbRedFloat;
 
     if (!g_gl_context) return;
     pack_buffer = g_gl_context->bound_pixel_pack_buffer;
     if (width < 0 || height < 0) { _gl_set_error(GL_INVALID_VALUE); return; }
     if (!pixels && pack_buffer == 0) { _gl_set_error(GL_INVALID_OPERATION); return; }
-    if (format != GL_RGBA || type != GL_UNSIGNED_BYTE) { _gl_set_error(GL_INVALID_ENUM); return; }
+
+    read_rgba8 = format == GL_RGBA && type == GL_UNSIGNED_BYTE;
+    read_color_u8 = type == GL_UNSIGNED_BYTE &&
+        (format == GL_RGB || format == GL_BGR || format == GL_BGRA ||
+         format == GL_RG || format == GL_GREEN || format == GL_BLUE);
+    read_red_normalized = format == GL_RED &&
+        (type == GL_UNSIGNED_BYTE || type == GL_BYTE ||
+         type == GL_UNSIGNED_SHORT || type == GL_SHORT ||
+         type == GL_UNSIGNED_INT || type == GL_INT ||
+         type == GL_HALF_FLOAT || type == GL_FLOAT);
+    read_color_typed = (format == GL_GREEN || format == GL_BLUE ||
+        format == GL_RG || format == GL_RGB || format == GL_BGR ||
+        format == GL_RGBA || format == GL_BGRA) &&
+        (type == GL_UNSIGNED_BYTE || type == GL_BYTE ||
+         type == GL_UNSIGNED_SHORT || type == GL_SHORT ||
+         type == GL_UNSIGNED_INT || type == GL_INT ||
+         type == GL_HALF_FLOAT || type == GL_FLOAT);
+    read_color_packed_size = gl_texture_packed_pixel_size(format, type);
+    read_red_float = format == GL_RED && type == GL_FLOAT;
+    read_color_16 = (get_read_color_internal_format() == GL_R16 ||
+                     get_read_color_internal_format() == GL_RG16 ||
+                     get_read_color_internal_format() == GL_RGB16 ||
+                     get_read_color_internal_format() == GL_RGBA16 ||
+                     get_read_color_internal_format() == GL_RGB10 ||
+                     get_read_color_internal_format() == GL_RGB12 ||
+                     get_read_color_internal_format() == GL_RGBA12 ||
+                     get_read_color_internal_format() == GL_RGB10_A2) &&
+                    (read_red_normalized || read_color_typed ||
+                     read_color_packed_size > 0);
+    GLint ReadInternalFormat = get_read_color_internal_format();
+    read_color_float = IsFloatFramebufferFormat(ReadInternalFormat) &&
+        (read_rgba8 || read_color_u8 || read_color_typed ||
+         read_red_normalized || read_red_float || read_color_packed_size > 0);
+    ReadSrgbRedFloat = read_red_float &&
+        (ReadInternalFormat == GL_SRGB8 ||
+         ReadInternalFormat == GL_SRGB8_ALPHA8 ||
+         ReadInternalFormat == GL_COMPRESSED_SRGB ||
+         ReadInternalFormat == GL_COMPRESSED_SRGB_ALPHA);
+    read_color_snorm =
+        (ReadInternalFormat == GL_R8_SNORM ||
+         ReadInternalFormat == GL_RG8_SNORM ||
+         ReadInternalFormat == GL_RGB8_SNORM ||
+         ReadInternalFormat == GL_RGBA8_SNORM ||
+         ReadInternalFormat == GL_R16_SNORM ||
+         ReadInternalFormat == GL_RG16_SNORM ||
+         ReadInternalFormat == GL_RGB16_SNORM ||
+         ReadInternalFormat == GL_RGBA16_SNORM) &&
+        (read_red_normalized || read_red_float || read_color_typed ||
+         read_color_packed_size > 0);
+    read_red_sint = format == GL_RED_INTEGER && type == GL_INT;
+    read_red_uint = format == GL_RED_INTEGER && type == GL_UNSIGNED_INT;
+    const uint32_t IntegerComponents = IntegerReadbackComponents(format);
+    read_color_integer = IntegerComponents > 0u &&
+        (type == GL_BYTE || type == GL_UNSIGNED_BYTE ||
+         type == GL_SHORT || type == GL_UNSIGNED_SHORT ||
+         type == GL_INT || type == GL_UNSIGNED_INT ||
+         gl_texture_packed_pixel_size(format, type) > 0);
+    if (IntegerComponents > 0u && !read_color_integer) {
+        _gl_set_error(GL_INVALID_ENUM);
+        return;
+    }
+    if (read_color_integer != IsIntegerReadbackInternalFormat(ReadInternalFormat)) {
+        _gl_set_error(GL_INVALID_OPERATION);
+        return;
+    }
+    if (!read_rgba8 && !read_color_u8 && !read_color_typed && read_color_packed_size == 0 && !read_red_normalized && !read_red_float && !read_red_sint && !read_red_uint && !read_color_integer) {
+        _gl_set_error(GL_INVALID_ENUM);
+        return;
+    }
     if (_gl_CheckFramebufferStatus(GL_READ_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
         _gl_set_error(GL_INVALID_FRAMEBUFFER_OPERATION);
         return;
@@ -2204,15 +2285,74 @@ void _gl_ReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum form
     if (width == 0 || height == 0) return;
     if (!get_read_color_buffer()) { _gl_set_error(GL_INVALID_OPERATION); return; }
 
-    tight_row_bytes = (size_t)width * 4u;
-    tight_size = tight_row_bytes * (size_t)height;
+    size_t transfer_pixel_bytes = read_red_normalized
+        ? ((type == GL_UNSIGNED_BYTE || type == GL_BYTE) ? 1u :
+           (type == GL_UNSIGNED_SHORT || type == GL_SHORT || type == GL_HALF_FLOAT) ? 2u : 4u)
+        : read_color_u8 ? (format == GL_RGB || format == GL_BGR ? 3u :
+                          format == GL_BGRA ? 4u :
+                          format == GL_RG ? 2u : 1u)
+        : 4u;
+    if (read_color_integer) {
+        const size_t Bytes = type == GL_BYTE || type == GL_UNSIGNED_BYTE ? 1u :
+            type == GL_SHORT || type == GL_UNSIGNED_SHORT ? 2u : 4u;
+        transfer_pixel_bytes = read_color_packed_size > 0 ?
+            (size_t)read_color_packed_size : IntegerComponents * Bytes;
+    }
+    if (read_color_typed) {
+        size_t components = format == GL_RGB || format == GL_BGR ? 3u :
+            format == GL_RGBA || format == GL_BGRA ? 4u :
+            format == GL_RG ? 2u : 1u;
+        size_t component_bytes = type == GL_UNSIGNED_BYTE || type == GL_BYTE ? 1u :
+            type == GL_UNSIGNED_SHORT || type == GL_SHORT || type == GL_HALF_FLOAT ? 2u : 4u;
+        transfer_pixel_bytes = components * component_bytes;
+    }
+    if (read_color_packed_size > 0) transfer_pixel_bytes = (size_t)read_color_packed_size;
+    tight_row_bytes = (size_t)width * transfer_pixel_bytes;
+    tight_size = (size_t)width * (size_t)height *
+        (read_color_integer ? 4u * sizeof(int64_t) :
+         (read_color_float || read_color_snorm) ? 4u * sizeof(float) :
+         read_color_16 ? 8u : 4u);
     tight_pixels = (uint8_t *)gl_mem_alloc(GL_MEM_TYPE_MEM2, tight_size, 64);
     if (!tight_pixels) {
         _gl_set_error(GL_OUT_OF_MEMORY);
         return;
     }
 
-    if (!gl_read_color_pixels_rgba8(x, y, width, height, tight_pixels)) {
+    if (read_color_float) {
+        if (!ReadFloatingColor(x, y, width, height,
+                               (float *)tight_pixels)) {
+            gl_mem_free(GL_MEM_TYPE_MEM2, tight_pixels);
+            _gl_set_error(GL_INVALID_OPERATION);
+            return;
+        }
+    } else if (read_color_integer) {
+        if (!ReadIntegerColor(x, y, width, height,
+                              (int64_t *)tight_pixels)) {
+            gl_mem_free(GL_MEM_TYPE_MEM2, tight_pixels);
+            _gl_set_error(GL_INVALID_OPERATION);
+            return;
+        }
+    } else if (read_color_snorm) {
+        if (!ReadSignedNormalizedColor(x, y, width, height,
+                                       (float *)tight_pixels)) {
+            gl_mem_free(GL_MEM_TYPE_MEM2, tight_pixels);
+            _gl_set_error(GL_INVALID_OPERATION);
+            return;
+        }
+    } else if (read_color_16) {
+        if (!ReadNormalizedColor16(x, y, width, height, tight_pixels)) {
+            gl_mem_free(GL_MEM_TYPE_MEM2, tight_pixels);
+            _gl_set_error(GL_INVALID_OPERATION);
+            return;
+        }
+    } else if (read_rgba8 || read_red_normalized || ReadSrgbRedFloat || read_color_u8 || read_color_typed || read_color_packed_size > 0) {
+        if (!gl_read_color_pixels_rgba8(x, y, width, height, tight_pixels)) {
+            gl_mem_free(GL_MEM_TYPE_MEM2, tight_pixels);
+            _gl_set_error(GL_INVALID_OPERATION);
+            return;
+        }
+    } else if (!gl_read_color_pixels_red32(x, y, width, height, type,
+                                            tight_pixels)) {
         gl_mem_free(GL_MEM_TYPE_MEM2, tight_pixels);
         _gl_set_error(GL_INVALID_OPERATION);
         return;
@@ -2222,16 +2362,11 @@ void _gl_ReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum form
     pack_skip_rows = g_gl_context->pack_skip_rows > 0 ? g_gl_context->pack_skip_rows : 0;
     pack_skip_pixels = g_gl_context->pack_skip_pixels > 0 ? g_gl_context->pack_skip_pixels : 0;
     pack_alignment = g_gl_context->pack_alignment > 0 ? g_gl_context->pack_alignment : 1;
-    if (pack_row_length < width) {
-        gl_mem_free(GL_MEM_TYPE_MEM2, tight_pixels);
-        _gl_set_error(GL_INVALID_OPERATION);
-        return;
-    }
     dst_row_pixels = (size_t)pack_row_length;
-    dst_row_bytes = dst_row_pixels * 4u;
+    dst_row_bytes = dst_row_pixels * transfer_pixel_bytes;
     dst_stride = ((dst_row_bytes + (size_t)pack_alignment - 1u) / (size_t)pack_alignment) * (size_t)pack_alignment;
     required_size = (uint64_t)pack_skip_rows * dst_stride +
-                    (uint64_t)pack_skip_pixels * 4u +
+                    (uint64_t)pack_skip_pixels * transfer_pixel_bytes +
                     (uint64_t)(height - 1) * dst_stride +
                     (uint64_t)tight_row_bytes;
     if (required_size > (uint64_t)PTRDIFF_MAX) {
@@ -2251,7 +2386,7 @@ void _gl_ReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum form
     }
     dst_base = (uint8_t *)resolved_pixels +
                (size_t)pack_skip_rows * dst_stride +
-               (size_t)pack_skip_pixels * 4u;
+               (size_t)pack_skip_pixels * transfer_pixel_bytes;
 
     for (GLsizei row = 0; row < height; ++row) {
         memcpy(dst_base + (size_t)row * dst_stride,
