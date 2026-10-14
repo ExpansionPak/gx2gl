@@ -7256,11 +7256,22 @@ void _gl_GetTexLevelParameteriv(GLenum target, GLint level, GLenum pname,
     tex = get_bound_texture(GL_TEXTURE_CUBE_MAP);
   } else if (is_valid_texture_target(target)) {
     tex = get_bound_texture(target);
+  } else if (target == GL_PROXY_TEXTURE_1D ||
+             target == GL_PROXY_TEXTURE_2D ||
+             target == GL_PROXY_TEXTURE_3D ||
+             target == GL_PROXY_TEXTURE_1D_ARRAY ||
+             target == GL_PROXY_TEXTURE_2D_ARRAY ||
+             target == GL_PROXY_TEXTURE_RECTANGLE ||
+             target == GL_PROXY_TEXTURE_CUBE_MAP ||
+             target == GL_PROXY_TEXTURE_CUBE_MAP_ARRAY ||
+             target == GL_TEXTURE_CUBE_MAP_ARRAY) {
+    tex = NULL;
+    empty_image_target = true;
   } else {
     _gl_set_error(GL_INVALID_ENUM);
     return;
   }
-  if (!tex && !proxy) {
+  if (!tex && !proxy && !empty_image_target) {
     _gl_set_error(GL_INVALID_OPERATION);
     return;
   }
@@ -7290,6 +7301,11 @@ void _gl_GetTexLevelParameteriv(GLenum target, GLint level, GLenum pname,
     break;
   default:
     _gl_set_error(GL_INVALID_ENUM);
+    return;
+  }
+
+  if (empty_image_target) {
+    *params = 0;
     return;
   }
 
@@ -7328,11 +7344,24 @@ void _gl_GetTexLevelParameteriv(GLenum target, GLint level, GLenum pname,
     case GL_TEXTURE_STENCIL_SIZE: *params = stencil_bits; break;
     case GL_TEXTURE_SHARED_SIZE: *params = 0; break;
     case GL_TEXTURE_RED_TYPE:
+      *params = red_bits ? (GLint)texture_component_type(internal_format)
+                         : GL_NONE;
+      break;
     case GL_TEXTURE_GREEN_TYPE:
+      *params = green_bits ? (GLint)texture_component_type(internal_format)
+                           : GL_NONE;
+      break;
     case GL_TEXTURE_BLUE_TYPE:
+      *params = blue_bits ? (GLint)texture_component_type(internal_format)
+                          : GL_NONE;
+      break;
     case GL_TEXTURE_ALPHA_TYPE:
+      *params = alpha_bits ? (GLint)texture_component_type(internal_format)
+                           : GL_NONE;
+      break;
     case GL_TEXTURE_DEPTH_TYPE:
-      *params = (GLint)texture_component_type(internal_format);
+      *params = depth_bits ? (GLint)texture_component_type(internal_format)
+                           : GL_NONE;
       break;
     case GL_TEXTURE_COMPRESSED: *params = GL_FALSE; break;
     case GL_TEXTURE_SAMPLES: *params = samples; break;
@@ -7418,11 +7447,24 @@ void _gl_GetTexLevelParameteriv(GLenum target, GLint level, GLenum pname,
     break;
   }
   case GL_TEXTURE_RED_TYPE:
+    *params = red_bits ? (GLint)texture_component_type(tex->internal_format)
+                       : GL_NONE;
+    break;
   case GL_TEXTURE_GREEN_TYPE:
+    *params = green_bits ? (GLint)texture_component_type(tex->internal_format)
+                         : GL_NONE;
+    break;
   case GL_TEXTURE_BLUE_TYPE:
+    *params = blue_bits ? (GLint)texture_component_type(tex->internal_format)
+                        : GL_NONE;
+    break;
   case GL_TEXTURE_ALPHA_TYPE:
+    *params = alpha_bits ? (GLint)texture_component_type(tex->internal_format)
+                         : GL_NONE;
+    break;
   case GL_TEXTURE_DEPTH_TYPE:
-    *params = (GLint)texture_component_type(tex->internal_format);
+    *params = depth_bits ? (GLint)texture_component_type(tex->internal_format)
+                         : GL_NONE;
     break;
   case GL_TEXTURE_COMPRESSED:
     {
@@ -7445,9 +7487,10 @@ void _gl_GetTexLevelParameteriv(GLenum target, GLint level, GLenum pname,
 }
 
 void _gl_GetTexLevelParameterfv(GLenum target, GLint level, GLenum pname, GLfloat *params) {
-    GLint iparams;
+    if (!params) return;
+    GLint iparams = 0;
     _gl_GetTexLevelParameteriv(target, level, pname, &iparams);
-    if (params) *params = (GLfloat)iparams;
+    *params = (GLfloat)iparams;
 }
 
 void _gl_GetTexImage(GLenum target, GLint level, GLenum format, GLenum type,
@@ -7480,8 +7523,8 @@ void _gl_GetTexImage(GLenum target, GLint level, GLenum format, GLenum type,
   }
 
   if (target == GL_TEXTURE_1D || target == GL_TEXTURE_2D ||
-      target == GL_TEXTURE_3D || target == GL_TEXTURE_1D_ARRAY ||
-      target == GL_TEXTURE_2D_ARRAY) {
+      target == GL_TEXTURE_RECTANGLE || target == GL_TEXTURE_3D ||
+      target == GL_TEXTURE_1D_ARRAY || target == GL_TEXTURE_2D_ARRAY) {
     texture_name = get_bound_tex(target);
     tex = get_bound_texture(target);
   } else if (is_cube_map_face_target(target)) {
@@ -7518,8 +7561,6 @@ void _gl_GetTexImage(GLenum target, GLint level, GLenum format, GLenum type,
   }
   if (!get_texture_format_info(tex->internal_format, format, type, true,
                                &info)) {
-    /* gx2gl currently supports readback only for the texture's native upload
-     * format/type pair, not arbitrary GL conversion targets. */
     _gl_set_error(GL_INVALID_OPERATION);
     return;
   }
@@ -7568,8 +7609,86 @@ void _gl_GetTexImage(GLenum target, GLint level, GLenum format, GLenum type,
   GX2DrawDone();
   DCInvalidateRange(src_level, layout.image_size);
 
+  GX2Surface StagingSurface = {};
+  bool StagedReadback = false;
+  if (target == GL_TEXTURE_2D && level == 0 &&
+      !IsRgtcTextureFormat(tex->internal_format) &&
+      tex->internal_format != GL_R32UI &&
+      tex->internal_format != GL_RG32UI &&
+      tex->internal_format != GL_RGB32UI &&
+      tex->internal_format != GL_RGBA32UI &&
+      tex->internal_format != GL_RGBA32F &&
+      tex->internal_format != GL_R32F &&
+      tex->internal_format != GL_DEPTH_COMPONENT32F) {
+    StagingSurface = tex->gx2_texture.surface;
+    StagingSurface.mipLevels = 1;
+    StagingSurface.tileMode = GX2_TILE_MODE_LINEAR_SPECIAL;
+    StagingSurface.use = GX2_SURFACE_USE_TEXTURE;
+    StagingSurface.image = NULL;
+    StagingSurface.mipmaps = NULL;
+    StagingSurface.mipmapSize = 0;
+    GX2CalcSurfaceSizeAndAlignment(&StagingSurface);
+    StagingSurface.image = gl_mem_alloc(
+        GL_MEM_TYPE_MEM2, StagingSurface.imageSize,
+        StagingSurface.alignment > 64 ? StagingSurface.alignment : 64);
+    if (!StagingSurface.image) {
+      _gl_set_error(GL_OUT_OF_MEMORY);
+      return;
+    }
+    GX2CopySurface(&tex->gx2_texture.surface, 0, 0, &StagingSurface, 0, 0);
+    GX2DrawDone();
+    GX2Invalidate(GX2_INVALIDATE_MODE_CPU_TEXTURE,
+                  StagingSurface.image, StagingSurface.imageSize);
+    DCInvalidateRange(StagingSurface.image, StagingSurface.imageSize);
+    src_level = (uint8_t *)StagingSurface.image;
+    StagedReadback = true;
+    GX2ContextState *State = WHBGfxGetTVContextState();
+    if (!State) State = WHBGfxGetDRCContextState();
+    if (State) GX2SetContextState(State);
+    g_gl_context->dirty_flags = 0xFFFFFFFFu;
+  }
+
   dst_base = (uint8_t *)resolved_pixels + dst_base_offset;
-  src_row_bytes = layout.pitch * info.dst_bytes_per_texel;
+  if (IsRgtcTextureFormat(tex->internal_format)) {
+    const bool Signed = IsSignedRgtcTextureFormat(tex->internal_format);
+    const uint32_t Channels = RgtcTextureChannels(tex->internal_format);
+    TextureFormatInfo Decode = info;
+    Decode.internal_format = Signed ?
+        (Channels == 2u ? GL_RG8_SNORM : GL_R8_SNORM) :
+        (Channels == 2u ? GL_RG8 : GL_R8);
+    Decode.dst_components = Channels;
+    Decode.dst_bytes_per_texel = Channels;
+    Decode.bytes_per_component = 1;
+    uint8_t *Row = (uint8_t *)malloc((size_t)layout.width * Channels);
+    if (!Row) {
+      _gl_set_error(GL_OUT_OF_MEMORY);
+      return;
+    }
+    for (uint32_t Z = 0; Z < slice_count; ++Z) {
+      const uint8_t *Slice = src_level +
+          (size_t)(start_slice + Z) * layout.slice_size;
+      const uint32_t Height = target == GL_TEXTURE_1D_ARRAY ?
+          1u : (uint32_t)layout.height;
+      uint8_t *Destination = target == GL_TEXTURE_1D_ARRAY ?
+          dst_base + (size_t)Z * dst_row_bytes :
+          dst_base + (size_t)Z * dst_image_bytes;
+      for (uint32_t Y = 0; Y < Height; ++Y) {
+        for (uint32_t X = 0; X < (uint32_t)layout.width; ++X) {
+          const uint8_t *Block = Slice +
+              ((size_t)(Y / 4u) * layout.pitch + X / 4u) * info.block_bytes;
+          const uint32_t Index = (Y % 4u) * 4u + X % 4u;
+          for (uint32_t Component = 0; Component < Channels; ++Component)
+            Row[(size_t)X * Channels + Component] = (uint8_t)
+                DecodeRgtcComponent(Block + Component * 8u, Index, Signed);
+        }
+        read_texture_row(Destination + (size_t)Y * dst_row_bytes,
+                         Row, (uint32_t)layout.width, &Decode);
+      }
+    }
+    free(Row);
+  } else {
+  src_row_bytes = (StagedReadback ? StagingSurface.pitch : layout.pitch) *
+                  info.dst_bytes_per_texel;
   for (uint32_t z = 0; z < slice_count; ++z) {
     const uint8_t *src_slice =
         src_level + (start_slice + z) * layout.slice_size;
@@ -7586,6 +7705,8 @@ void _gl_GetTexImage(GLenum target, GLint level, GLenum format, GLenum type,
     }
   }
 
+  }
+  if (StagedReadback) gl_mem_free(GL_MEM_TYPE_MEM2, StagingSurface.image);
   if (g_gl_context->bound_pixel_pack_buffer != 0 &&
       gl_buffer_flush_range(g_gl_context->bound_pixel_pack_buffer,
                             pack_buffer_offset, pack_byte_count) != GL_TRUE) {
@@ -7748,6 +7869,15 @@ GX2Texture *gl_get_gx2_texture(GLuint id) {
     return &g_textures[id].gx2_texture;
   }
   return NULL;
+}
+
+GLboolean gl_get_texture_swizzle(GLuint id, GLenum components[4]) {
+  if (!components || id == 0 || id >= MAX_TEXTURES ||
+      !g_textures[id].in_use) return GL_FALSE;
+  for (uint32_t i = 0; i < 4; ++i) {
+    components[i] = g_textures[id].swizzle[i];
+  }
+  return GL_TRUE;
 }
 
 GLint gl_get_texture_internal_format(GLuint id) {
