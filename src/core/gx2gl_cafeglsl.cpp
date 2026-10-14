@@ -2,6 +2,110 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
+
+#ifdef GX2GL_CAFEGLSL_STATIC
+
+#include <CafeGLSLCompiler.h>
+
+extern "C" {
+#include <coreinit/debug.h>
+}
+
+typedef struct {
+    uint32_t vertex_shader_count;
+    uint32_t pixel_shader_count;
+    bool release_requested;
+    bool available;
+} GX2GLCafeGLSLState;
+
+static GX2GLCafeGLSLState g_cafeglsl_state = {0};
+
+static void gx2gl_cafeglsl_unload(void) {
+    if (!g_cafeglsl_state.available) return;
+    DestroyGLSLCompiler();
+    g_cafeglsl_state = (GX2GLCafeGLSLState){0};
+}
+
+static void gx2gl_cafeglsl_finish_deferred_release(void) {
+    if (g_cafeglsl_state.release_requested &&
+        g_cafeglsl_state.vertex_shader_count == 0 &&
+        g_cafeglsl_state.pixel_shader_count == 0) {
+        gx2gl_cafeglsl_unload();
+    }
+}
+
+bool gx2gl_cafeglsl_init(void) {
+    if (g_cafeglsl_state.available) {
+        g_cafeglsl_state.release_requested = false;
+        return true;
+    }
+
+    InitGLSLCompiler();
+    g_cafeglsl_state.available = true;
+    OSReport("[gx2gl] CafeGLSL static compiler initialized (%s)\n",
+             GetGLSLCompilerVersion());
+    return true;
+}
+
+void gx2gl_cafeglsl_shutdown(void) {
+    if (!g_cafeglsl_state.available) return;
+    g_cafeglsl_state.release_requested = true;
+    gx2gl_cafeglsl_finish_deferred_release();
+}
+
+bool gx2gl_cafeglsl_is_available(void) {
+    return g_cafeglsl_state.available;
+}
+
+GX2VertexShader *gx2gl_cafeglsl_compile_vertex_shader(
+    const char *shader_source, char *info_log_out, int info_log_max_length,
+    gx2gl_cafeglsl_flag_t flags) {
+    if (!gx2gl_cafeglsl_init()) return NULL;
+
+    GX2VertexShader *shader = NULL;
+    GX2ShaderMode mode = CompileVertexShader(
+        shader_source, GLSL_COMPILE_BLOCK, &shader, info_log_out,
+        info_log_max_length, static_cast<GLSL_COMPILER_FLAG>(flags));
+
+    if (mode == GLSL_SHADER_MODE_ERROR || !shader) return NULL;
+    ++g_cafeglsl_state.vertex_shader_count;
+    return shader;
+}
+
+GX2PixelShader *gx2gl_cafeglsl_compile_pixel_shader(
+    const char *shader_source, char *info_log_out, int info_log_max_length,
+    gx2gl_cafeglsl_flag_t flags) {
+    if (!gx2gl_cafeglsl_init()) return NULL;
+
+    GX2PixelShader *shader = NULL;
+    GX2ShaderMode mode = CompilePixelShader(
+        shader_source, GLSL_COMPILE_BLOCK, &shader, info_log_out,
+        info_log_max_length, static_cast<GLSL_COMPILER_FLAG>(flags));
+
+    if (mode == GLSL_SHADER_MODE_ERROR || !shader) return NULL;
+
+    ++g_cafeglsl_state.pixel_shader_count;
+    return shader;
+}
+
+void gx2gl_cafeglsl_free_vertex_shader(GX2VertexShader *shader) {
+    if (!g_cafeglsl_state.available || !shader) return;
+    FreeVertexShader(shader);
+    if (g_cafeglsl_state.vertex_shader_count > 0)
+        --g_cafeglsl_state.vertex_shader_count;
+    gx2gl_cafeglsl_finish_deferred_release();
+}
+
+void gx2gl_cafeglsl_free_pixel_shader(GX2PixelShader *shader) {
+    if (!g_cafeglsl_state.available || !shader) return;
+    FreePixelShader(shader);
+    if (g_cafeglsl_state.pixel_shader_count > 0)
+        --g_cafeglsl_state.pixel_shader_count;
+    gx2gl_cafeglsl_finish_deferred_release();
+}
+
+#else
 
 extern "C" {
 #include <coreinit/dynload.h>
@@ -9,8 +113,18 @@ extern "C" {
 }
 
 typedef void (*gx2gl_cafeglsl_init_fn)(void);
-typedef GX2VertexShader *(*gx2gl_cafeglsl_compile_vs_fn)(const char *, char *, int, gx2gl_cafeglsl_flag_t);
-typedef GX2PixelShader *(*gx2gl_cafeglsl_compile_ps_fn)(const char *, char *, int, gx2gl_cafeglsl_flag_t);
+typedef const char *(*gx2gl_cafeglsl_version_fn)(void);
+enum {
+    GX2GL_CAFEGLSL_COMPILE_BLOCK = 2,
+};
+typedef GX2VertexShader *(*gx2gl_cafeglsl_compile_vs_v2_fn)(
+    const char *, char *, int, gx2gl_cafeglsl_flag_t);
+typedef GX2PixelShader *(*gx2gl_cafeglsl_compile_ps_v2_fn)(
+    const char *, char *, int, gx2gl_cafeglsl_flag_t);
+typedef GX2ShaderMode (*gx2gl_cafeglsl_compile_vs_v3_fn)(
+    const char *, int, GX2VertexShader **, char *, int, gx2gl_cafeglsl_flag_t);
+typedef GX2ShaderMode (*gx2gl_cafeglsl_compile_ps_v3_fn)(
+    const char *, int, GX2PixelShader **, char *, int, gx2gl_cafeglsl_flag_t);
 typedef void (*gx2gl_cafeglsl_free_vs_fn)(GX2VertexShader *);
 typedef void (*gx2gl_cafeglsl_free_ps_fn)(GX2PixelShader *);
 typedef void (*gx2gl_cafeglsl_destroy_fn)(void);
@@ -18,11 +132,15 @@ typedef void (*gx2gl_cafeglsl_destroy_fn)(void);
 typedef struct {
     OSDynLoad_Module module;
     gx2gl_cafeglsl_init_fn init;
-    gx2gl_cafeglsl_compile_vs_fn compile_vertex_shader;
-    gx2gl_cafeglsl_compile_ps_fn compile_pixel_shader;
+    gx2gl_cafeglsl_version_fn get_version;
+    gx2gl_cafeglsl_compile_vs_v2_fn compile_vertex_shader_v2;
+    gx2gl_cafeglsl_compile_ps_v2_fn compile_pixel_shader_v2;
+    gx2gl_cafeglsl_compile_vs_v3_fn compile_vertex_shader_v3;
+    gx2gl_cafeglsl_compile_ps_v3_fn compile_pixel_shader_v3;
     gx2gl_cafeglsl_free_vs_fn free_vertex_shader;
     gx2gl_cafeglsl_free_ps_fn free_pixel_shader;
     gx2gl_cafeglsl_destroy_fn destroy;
+    uint32_t api_version;
     uint32_t vertex_shader_count;
     uint32_t pixel_shader_count;
     bool release_requested;
@@ -51,16 +169,19 @@ static void gx2gl_cafeglsl_finish_deferred_release(void) {
 }
 
 static bool gx2gl_cafeglsl_load_exports(OSDynLoad_Module module) {
+    void *compile_vertex_shader = NULL;
+    void *compile_pixel_shader = NULL;
+
     if (OSDynLoad_FindExport(module, OS_DYNLOAD_EXPORT_FUNC, "InitGLSLCompiler",
                              (void **)&g_cafeglsl_state.init) != OS_DYNLOAD_OK) {
         return false;
     }
     if (OSDynLoad_FindExport(module, OS_DYNLOAD_EXPORT_FUNC, "CompileVertexShader",
-                             (void **)&g_cafeglsl_state.compile_vertex_shader) != OS_DYNLOAD_OK) {
+                             &compile_vertex_shader) != OS_DYNLOAD_OK) {
         return false;
     }
     if (OSDynLoad_FindExport(module, OS_DYNLOAD_EXPORT_FUNC, "CompilePixelShader",
-                             (void **)&g_cafeglsl_state.compile_pixel_shader) != OS_DYNLOAD_OK) {
+                             &compile_pixel_shader) != OS_DYNLOAD_OK) {
         return false;
     }
     if (OSDynLoad_FindExport(module, OS_DYNLOAD_EXPORT_FUNC, "FreeVertexShader",
@@ -74,6 +195,27 @@ static bool gx2gl_cafeglsl_load_exports(OSDynLoad_Module module) {
     if (OSDynLoad_FindExport(module, OS_DYNLOAD_EXPORT_FUNC, "DestroyGLSLCompiler",
                              (void **)&g_cafeglsl_state.destroy) != OS_DYNLOAD_OK) {
         return false;
+    }
+
+    if (OSDynLoad_FindExport(module, OS_DYNLOAD_EXPORT_FUNC, "GetGLSLCompilerVersion",
+                             (void **)&g_cafeglsl_state.get_version) == OS_DYNLOAD_OK &&
+        g_cafeglsl_state.get_version) {
+        const char *version = g_cafeglsl_state.get_version();
+        if (version && strncmp(version, "v0.3.", 5) == 0) {
+            g_cafeglsl_state.api_version = 3;
+        }
+    }
+
+    if (g_cafeglsl_state.api_version >= 3) {
+        g_cafeglsl_state.compile_vertex_shader_v3 =
+            (gx2gl_cafeglsl_compile_vs_v3_fn)compile_vertex_shader;
+        g_cafeglsl_state.compile_pixel_shader_v3 =
+            (gx2gl_cafeglsl_compile_ps_v3_fn)compile_pixel_shader;
+    } else {
+        g_cafeglsl_state.compile_vertex_shader_v2 =
+            (gx2gl_cafeglsl_compile_vs_v2_fn)compile_vertex_shader;
+        g_cafeglsl_state.compile_pixel_shader_v2 =
+            (gx2gl_cafeglsl_compile_ps_v2_fn)compile_pixel_shader;
     }
 
     return true;
@@ -144,9 +286,18 @@ GX2VertexShader *gx2gl_cafeglsl_compile_vertex_shader(const char *shader_source,
         return NULL;
     }
 
-    GX2VertexShader *shader =
-        g_cafeglsl_state.compile_vertex_shader(shader_source, info_log_out,
-                                               info_log_max_length, flags);
+    GX2VertexShader *shader = NULL;
+    if (g_cafeglsl_state.api_version >= 3) {
+        GX2ShaderMode mode = g_cafeglsl_state.compile_vertex_shader_v3(
+            shader_source, GX2GL_CAFEGLSL_COMPILE_BLOCK, &shader,
+            info_log_out, info_log_max_length, flags);
+        if ((uint32_t)mode == UINT32_MAX) {
+            shader = NULL;
+        }
+    } else {
+        shader = g_cafeglsl_state.compile_vertex_shader_v2(
+            shader_source, info_log_out, info_log_max_length, flags);
+    }
     if (shader) {
         ++g_cafeglsl_state.vertex_shader_count;
     }
@@ -166,9 +317,18 @@ GX2PixelShader *gx2gl_cafeglsl_compile_pixel_shader(const char *shader_source,
         return NULL;
     }
 
-    GX2PixelShader *shader =
-        g_cafeglsl_state.compile_pixel_shader(shader_source, info_log_out,
-                                              info_log_max_length, flags);
+    GX2PixelShader *shader = NULL;
+    if (g_cafeglsl_state.api_version >= 3) {
+        GX2ShaderMode mode = g_cafeglsl_state.compile_pixel_shader_v3(
+            shader_source, GX2GL_CAFEGLSL_COMPILE_BLOCK, &shader,
+            info_log_out, info_log_max_length, flags);
+        if ((uint32_t)mode == UINT32_MAX) {
+            shader = NULL;
+        }
+    } else {
+        shader = g_cafeglsl_state.compile_pixel_shader_v2(
+            shader_source, info_log_out, info_log_max_length, flags);
+    }
     if (shader) {
         ++g_cafeglsl_state.pixel_shader_count;
     }
@@ -194,3 +354,5 @@ void gx2gl_cafeglsl_free_pixel_shader(GX2PixelShader *shader) {
         gx2gl_cafeglsl_finish_deferred_release();
     }
 }
+
+#endif
