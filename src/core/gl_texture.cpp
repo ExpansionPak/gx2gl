@@ -4655,15 +4655,56 @@ static void texture_component_sizes(GLint internalformat, GLint *red,
   case GL_COMPRESSED_RG_RGTC2: case GL_COMPRESSED_SIGNED_RG_RGTC2:
     *red = *green = 8;
     break;
+  case GL_R3_G3_B2:
+    *red = *green = 3; *blue = 2;
+    break;
+  case GL_RGB4: *red = *green = *blue = 4; break;
+  case GL_RGB5: *red = *green = *blue = 5; break;
+  case GL_RGB10: *red = *green = *blue = 10; break;
+  case GL_RGB12: *red = *green = *blue = 12; break;
+  case GL_RGBA2: *red = *green = *blue = *alpha = 2; break;
+  case GL_RGBA12: *red = *green = *blue = *alpha = 12; break;
   case 3:
   case GL_RGB:
-  case GL_RGB8:
+  case GL_RGB8: case GL_RGB8_SNORM: case GL_RGB8I: case GL_RGB8UI:
+  case GL_SRGB8:
+  case GL_COMPRESSED_SRGB:
     *red = *green = *blue = 8;
     break;
   case 4:
   case GL_RGBA:
-  case GL_RGBA8:
+  case GL_RGBA8: case GL_RGBA8_SNORM: case GL_RGBA8I: case GL_RGBA8UI:
+  case GL_SRGB8_ALPHA8:
+  case GL_COMPRESSED_SRGB_ALPHA:
     *red = *green = *blue = *alpha = 8;
+    break;
+  case GL_R16: case GL_R16_SNORM: case GL_R16I: case GL_R16UI:
+  case GL_R16F:
+    *red = 16;
+    break;
+  case GL_RG16: case GL_RG16_SNORM: case GL_RG16I: case GL_RG16UI:
+  case GL_RG16F:
+    *red = *green = 16;
+    break;
+  case GL_RGB16: case GL_RGB16_SNORM: case GL_RGB16I: case GL_RGB16UI:
+  case GL_RGB16F:
+    *red = *green = *blue = 16;
+    break;
+  case GL_RGBA16: case GL_RGBA16_SNORM: case GL_RGBA16I: case GL_RGBA16UI:
+  case GL_RGBA16F:
+    *red = *green = *blue = *alpha = 16;
+    break;
+  case GL_R32I: case GL_R32UI: case GL_R32F:
+    *red = 32;
+    break;
+  case GL_RG32I: case GL_RG32UI: case GL_RG32F:
+    *red = *green = 32;
+    break;
+  case GL_RGB32I: case GL_RGB32UI: case GL_RGB32F:
+    *red = *green = *blue = 32;
+    break;
+  case GL_RGBA32I: case GL_RGBA32UI: case GL_RGBA32F:
+    *red = *green = *blue = *alpha = 32;
     break;
   case GL_RGBA4:
     *red = *green = *blue = *alpha = 4;
@@ -4676,6 +4717,17 @@ static void texture_component_sizes(GLint internalformat, GLint *red,
     *red = 5;
     *green = 6;
     *blue = 5;
+    break;
+  case GL_RGB10_A2: case GL_RGB10_A2UI:
+    *red = *green = *blue = 10;
+    *alpha = 2;
+    break;
+  case GL_R11F_G11F_B10F:
+    *red = *green = 11;
+    *blue = 10;
+    break;
+  case GL_RGB9_E5:
+    *red = *green = *blue = 9;
     break;
   case GL_COMPRESSED_RGB_S3TC_DXT1_EXT:
     *red = 5;
@@ -4695,19 +4747,24 @@ static void texture_component_sizes(GLint internalformat, GLint *red,
     *blue = 5;
     *alpha = 8;
     break;
-  case GL_RGBA16F:
-    *red = *green = *blue = *alpha = 16;
+  case GL_DEPTH_COMPONENT16:
+    *depth = 16;
     break;
-  case GL_RGBA32F:
-    *red = *green = *blue = *alpha = 32;
+  case GL_DEPTH_COMPONENT24:
+    *depth = 24;
     break;
   case GL_DEPTH_COMPONENT:
+  case GL_DEPTH_COMPONENT32:
   case GL_DEPTH_COMPONENT32F:
     *depth = 32;
     break;
   case GL_DEPTH_STENCIL:
   case GL_DEPTH24_STENCIL8:
     *depth = 24;
+    *stencil = 8;
+    break;
+  case GL_DEPTH32F_STENCIL8:
+    *depth = 32;
     *stencil = 8;
     break;
   default:
@@ -4818,6 +4875,10 @@ void gl_texture_init(void) {
   init_texture_object(&g_default_texture_1d, GL_TEXTURE_1D, false);
   init_texture_object(&g_default_texture_2d, GL_TEXTURE_2D, false);
   init_texture_object(&g_default_texture_3d, GL_TEXTURE_3D, false);
+  init_texture_object(&g_default_texture_rectangle, GL_TEXTURE_RECTANGLE, false);
+  g_default_texture_rectangle.min_filter = GL_LINEAR;
+  g_default_texture_rectangle.wrap_s = GL_CLAMP_TO_EDGE;
+  g_default_texture_rectangle.wrap_t = GL_CLAMP_TO_EDGE;
   init_texture_object(&g_default_texture_cube, GL_TEXTURE_CUBE_MAP, false);
   init_texture_object(&g_default_texture_1d_array, GL_TEXTURE_1D_ARRAY, false);
   init_texture_object(&g_default_texture_2d_array, GL_TEXTURE_2D_ARRAY, false);
@@ -4825,9 +4886,11 @@ void gl_texture_init(void) {
                       GL_TEXTURE_2D_MULTISAMPLE, false);
   init_texture_object(&g_default_texture_2d_multisample_array,
                       GL_TEXTURE_2D_MULTISAMPLE_ARRAY, false);
+  init_texture_object(&g_default_texture_buffer, GL_TEXTURE_BUFFER, false);
   init_texture_sampler(&g_default_texture_1d);
   init_texture_sampler(&g_default_texture_2d);
   init_texture_sampler(&g_default_texture_3d);
+  init_texture_sampler(&g_default_texture_rectangle);
   init_texture_sampler(&g_default_texture_cube);
   init_texture_sampler(&g_default_texture_1d_array);
   init_texture_sampler(&g_default_texture_2d_array);
@@ -4889,6 +4952,9 @@ void _gl_DeleteTextures(GLsizei n, const GLuint *textures) {
         if (g_gl_context->bound_texture_3d[u] == id) {
           g_gl_context->bound_texture_3d[u] = 0;
         }
+        if (g_gl_context->bound_texture_rectangle[u] == id) {
+          g_gl_context->bound_texture_rectangle[u] = 0;
+        }
         if (g_gl_context->bound_texture_cube[u] == id) {
           g_gl_context->bound_texture_cube[u] = 0;
         }
@@ -4903,6 +4969,9 @@ void _gl_DeleteTextures(GLsizei n, const GLuint *textures) {
         }
         if (g_gl_context->bound_texture_2d_multisample_array[u] == id) {
           g_gl_context->bound_texture_2d_multisample_array[u] = 0;
+        }
+        if (g_gl_context->bound_texture_buffer_texture[u] == id) {
+          g_gl_context->bound_texture_buffer_texture[u] = 0;
         }
       }
       free_texture_storage(&g_textures[id]);
@@ -4990,8 +5059,7 @@ void _gl_BindTexture(GLenum target, GLuint texture) {
   if (!g_gl_context) {
     return;
   }
-  if (!is_valid_texture_target(target) &&
-      !is_multisample_texture_target(target)) {
+  if (!is_texture_binding_target(target)) {
     _gl_set_error(GL_INVALID_ENUM);
     return;
   }
@@ -5008,6 +5076,34 @@ void _gl_BindTexture(GLenum target, GLuint texture) {
     gl_framebuffer_sync_texture_for_sampling(texture);
   }
   set_bound_tex(target, texture);
+  g_gl_context->dirty_flags |= GL_DIRTY_TEXTURE_BINDINGS;
+}
+
+void _gl_TexBuffer(GLenum target, GLenum internalformat, GLuint buffer) {
+  GLTexture *tex;
+
+  if (!g_gl_context) {
+    return;
+  }
+  if (target != GL_TEXTURE_BUFFER ||
+      !is_valid_texture_buffer_internal_format(internalformat)) {
+    _gl_set_error(GL_INVALID_ENUM);
+    return;
+  }
+  if (buffer != 0 && !_gl_IsBuffer(buffer)) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
+
+  tex = get_bound_texture(GL_TEXTURE_BUFFER);
+  if (!tex) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
+
+  tex->buffer_object = buffer;
+  tex->internal_format = (GLint)internalformat;
+  tex->complete = buffer != 0;
   g_gl_context->dirty_flags |= GL_DIRTY_TEXTURE_BINDINGS;
 }
 
@@ -5046,11 +5142,13 @@ void gl_texture_shutdown(void) {
       &g_default_texture_1d,
       &g_default_texture_2d,
       &g_default_texture_3d,
+      &g_default_texture_rectangle,
       &g_default_texture_cube,
       &g_default_texture_1d_array,
       &g_default_texture_2d_array,
       &g_default_texture_2d_multisample,
       &g_default_texture_2d_multisample_array,
+      &g_default_texture_buffer,
   };
 
   for (uint32_t i = 1; i < MAX_TEXTURES; ++i) {
@@ -5065,6 +5163,7 @@ void gl_texture_shutdown(void) {
   memset(&g_default_texture_1d, 0, sizeof(g_default_texture_1d));
   memset(&g_default_texture_2d, 0, sizeof(g_default_texture_2d));
   memset(&g_default_texture_3d, 0, sizeof(g_default_texture_3d));
+  memset(&g_default_texture_rectangle, 0, sizeof(g_default_texture_rectangle));
   memset(&g_default_texture_cube, 0, sizeof(g_default_texture_cube));
   memset(&g_default_texture_1d_array, 0, sizeof(g_default_texture_1d_array));
   memset(&g_default_texture_2d_array, 0, sizeof(g_default_texture_2d_array));
@@ -5072,6 +5171,7 @@ void gl_texture_shutdown(void) {
          sizeof(g_default_texture_2d_multisample));
   memset(&g_default_texture_2d_multisample_array, 0,
          sizeof(g_default_texture_2d_multisample_array));
+  memset(&g_default_texture_buffer, 0, sizeof(g_default_texture_buffer));
   memset(&g_proxy_multisample_2d, 0, sizeof(g_proxy_multisample_2d));
   memset(&g_proxy_multisample_array, 0, sizeof(g_proxy_multisample_array));
 }
@@ -5179,6 +5279,25 @@ void _gl_TexImage3DMultisample(GLenum target, GLsizei samples,
                              depth, fixedsamplelocations);
 }
 
+static bool valid_depth_texture_source(GLint internalformat, GLenum format,
+                                       GLenum type) {
+  switch (internalformat) {
+  case GL_DEPTH_COMPONENT:
+  case GL_DEPTH_COMPONENT16:
+  case GL_DEPTH_COMPONENT24:
+  case GL_DEPTH_COMPONENT32:
+  case GL_DEPTH_COMPONENT32F:
+  case GL_DEPTH_STENCIL:
+  case GL_DEPTH24_STENCIL8:
+  case GL_DEPTH32F_STENCIL8:
+    return format == GL_DEPTH_COMPONENT ||
+           (format == GL_DEPTH_STENCIL &&
+            (type == GL_UNSIGNED_INT_24_8 || type == 0x8DAD));
+  default:
+    return true;
+  }
+}
+
 void _gl_TexImage2D(GLenum target, GLint level, GLint internalformat,
                     GLsizei width, GLsizei height, GLint border, GLenum format,
                     GLenum type, const GLvoid *pixels) {
@@ -5204,14 +5323,18 @@ void _gl_TexImage2D(GLenum target, GLint level, GLint internalformat,
                    (unsigned int)target, (int)level, (unsigned int)internalformat,
                    (int)width, (int)height, (int)border, (unsigned int)format,
                    (unsigned int)type, pixels);
-  if (target != GL_TEXTURE_2D && target != GL_TEXTURE_1D_ARRAY &&
-      !is_cube_map_face_target(target)) {
+  if (target != GL_TEXTURE_2D && target != GL_TEXTURE_RECTANGLE &&
+      target != GL_TEXTURE_1D_ARRAY && !is_cube_map_face_target(target)) {
     _gl_set_error(GL_INVALID_ENUM);
     return;
   }
 
   bind_target = is_cube_map_face_target(target) ? GL_TEXTURE_CUBE_MAP : target;
   face_index = is_cube_map_face_target(target) ? cube_map_face_index(target) : 0;
+  if (bind_target == GL_TEXTURE_RECTANGLE && level != 0) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
   tex = get_bound_texture(bind_target);
   if (!tex) {
     _gl_set_error(GL_INVALID_OPERATION);
@@ -5230,6 +5353,10 @@ void _gl_TexImage2D(GLenum target, GLint level, GLint internalformat,
                       : (bind_target == GL_TEXTURE_1D_ARRAY ? height : 1);
   upload_height = bind_target == GL_TEXTURE_1D_ARRAY ? 1 : height;
   upload_depth = bind_target == GL_TEXTURE_1D_ARRAY ? height : 1;
+  if (!valid_depth_texture_source(internalformat, format, type)) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
   has_unpack_pixels = pixels != NULL ||
                       g_gl_context->bound_pixel_unpack_buffer != 0;
   if (!get_texture_format_info(internalformat, format, type,
@@ -5359,6 +5486,11 @@ void _gl_TexImage3D(GLenum target, GLint level, GLint internalformat,
     return;
   }
 
+  if (target == GL_TEXTURE_3D && IsRgtcTextureFormat(internalformat)) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
+
   tex = get_bound_texture(target);
   if (!tex) {
     _gl_set_error(GL_INVALID_OPERATION);
@@ -5367,6 +5499,10 @@ void _gl_TexImage3D(GLenum target, GLint level, GLint internalformat,
   if (!level_index_valid(level) || width < 0 || height < 0 || depth < 0 ||
       border != 0 || width > 8192 || height > 8192 || depth > 2048) {
     _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+  if (!valid_depth_texture_source(internalformat, format, type)) {
+    _gl_set_error(GL_INVALID_OPERATION);
     return;
   }
   has_unpack_pixels = pixels != NULL ||
@@ -5457,7 +5593,8 @@ void _gl_TexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
   if (!g_gl_context) {
     return;
   }
-  if (target != GL_TEXTURE_2D && target != GL_TEXTURE_1D_ARRAY &&
+  if (target != GL_TEXTURE_2D && target != GL_TEXTURE_RECTANGLE &&
+      target != GL_TEXTURE_1D_ARRAY &&
       !is_cube_map_face_target(target)) {
     _gl_set_error(GL_INVALID_ENUM);
     return;
@@ -5587,19 +5724,21 @@ void _gl_CopyTexImage2D(GLenum target, GLint level, GLenum internalformat,
   if (!g_gl_context) {
     return;
   }
-  if (target != GL_TEXTURE_2D && !is_cube_map_face_target(target)) {
+  if (target != GL_TEXTURE_2D && target != GL_TEXTURE_RECTANGLE &&
+      !is_cube_map_face_target(target)) {
     _gl_set_error(GL_INVALID_ENUM);
     return;
   }
 
-  bind_target = target == GL_TEXTURE_2D ? GL_TEXTURE_2D : GL_TEXTURE_CUBE_MAP;
+  bind_target = is_cube_map_face_target(target) ? GL_TEXTURE_CUBE_MAP : target;
   face_index = is_cube_map_face_target(target) ? cube_map_face_index(target) : 0;
   tex = get_bound_texture(bind_target);
   if (!tex) {
     _gl_set_error(GL_INVALID_OPERATION);
     return;
   }
-  if (!level_index_valid(level) || width < 0 || height < 0 || border != 0 ||
+  if (!level_index_valid(level) ||
+      (bind_target == GL_TEXTURE_RECTANGLE && level != 0) || width < 0 || height < 0 || border != 0 ||
       (bind_target == GL_TEXTURE_CUBE_MAP && width != height)) {
     _gl_set_error(GL_INVALID_VALUE);
     return;
@@ -5705,19 +5844,21 @@ void _gl_CopyTexSubImage2D(GLenum target, GLint level, GLint xoffset,
   if (!g_gl_context) {
     return;
   }
-  if (target != GL_TEXTURE_2D && !is_cube_map_face_target(target)) {
+  if (target != GL_TEXTURE_2D && target != GL_TEXTURE_RECTANGLE &&
+      !is_cube_map_face_target(target)) {
     _gl_set_error(GL_INVALID_ENUM);
     return;
   }
 
-  bind_target = target == GL_TEXTURE_2D ? GL_TEXTURE_2D : GL_TEXTURE_CUBE_MAP;
+  bind_target = is_cube_map_face_target(target) ? GL_TEXTURE_CUBE_MAP : target;
   face_index = is_cube_map_face_target(target) ? cube_map_face_index(target) : 0;
   tex = get_bound_texture(bind_target);
   if (!tex) {
     _gl_set_error(GL_INVALID_OPERATION);
     return;
   }
-  if (!level_index_valid(level) || xoffset < 0 || yoffset < 0 ||
+  if (!level_index_valid(level) ||
+      (bind_target == GL_TEXTURE_RECTANGLE && level != 0) || xoffset < 0 || yoffset < 0 ||
       width < 0 || height < 0) {
     _gl_set_error(GL_INVALID_VALUE);
     return;
@@ -6033,6 +6174,18 @@ static bool apply_sampler_integer_parameter(GLenum pname, GLint param,
 
 static bool apply_texture_integer_parameter(GLTexture *tex, GLenum pname,
                                             GLint param, GLenum *error_out) {
+  if (tex && tex->target == GL_TEXTURE_RECTANGLE) {
+    if (pname == GL_TEXTURE_MIN_FILTER && param != GL_NEAREST &&
+        param != GL_LINEAR) {
+      if (error_out) *error_out = GL_INVALID_ENUM;
+      return false;
+    }
+    if ((pname == GL_TEXTURE_WRAP_S || pname == GL_TEXTURE_WRAP_T) &&
+        param != GL_CLAMP_TO_EDGE && param != GL_CLAMP_TO_BORDER) {
+      if (error_out) *error_out = GL_INVALID_ENUM;
+      return false;
+    }
+  }
   if (error_out) {
     *error_out = GL_INVALID_ENUM;
   }
@@ -6124,7 +6277,7 @@ static bool apply_sampler_float_parameter(GLSampler *sampler, GLenum pname,
 }
 
 static GLTexture *texture_for_parameter_target(GLenum target) {
-  if (!is_valid_texture_target(target)) {
+  if (!is_texture_parameter_target(target)) {
     _gl_set_error(GL_INVALID_ENUM);
     return NULL;
   }
@@ -6137,6 +6290,26 @@ static GLTexture *texture_for_parameter_target(GLenum target) {
   return tex;
 }
 
+static bool texture_parameter_allowed_for_target(const GLTexture *tex,
+                                                 GLenum pname) {
+  if (!tex || !is_multisample_texture_target(tex->target)) {
+    return true;
+  }
+
+  switch (pname) {
+  case GL_TEXTURE_BASE_LEVEL:
+  case GL_TEXTURE_MAX_LEVEL:
+  case GL_TEXTURE_SWIZZLE_R:
+  case GL_TEXTURE_SWIZZLE_G:
+  case GL_TEXTURE_SWIZZLE_B:
+  case GL_TEXTURE_SWIZZLE_A:
+  case GL_TEXTURE_SWIZZLE_RGBA:
+    return true;
+  default:
+    return false;
+  }
+}
+
 void _gl_TexParameteri(GLenum target, GLenum pname, GLint param) {
   GLTexture *tex;
   GLenum error = GL_INVALID_ENUM;
@@ -6147,6 +6320,10 @@ void _gl_TexParameteri(GLenum target, GLenum pname, GLint param) {
 
   tex = texture_for_parameter_target(target);
   if (!tex) {
+    return;
+  }
+  if (!texture_parameter_allowed_for_target(tex, pname)) {
+    _gl_set_error(GL_INVALID_ENUM);
     return;
   }
 
@@ -6171,6 +6348,10 @@ void _gl_TexParameterf(GLenum target, GLenum pname, GLfloat param) {
   if (!tex) {
     return;
   }
+  if (!texture_parameter_allowed_for_target(tex, pname)) {
+    _gl_set_error(GL_INVALID_ENUM);
+    return;
+  }
 
   if (!apply_texture_float_parameter(tex, pname, param, &error)) {
     _gl_set_error(error);
@@ -6191,6 +6372,10 @@ void _gl_TexParameteriv(GLenum target, GLenum pname, const GLint *params) {
 
   tex = texture_for_parameter_target(target);
   if (!tex) {
+    return;
+  }
+  if (!texture_parameter_allowed_for_target(tex, pname)) {
+    _gl_set_error(GL_INVALID_ENUM);
     return;
   }
 
@@ -6231,6 +6416,10 @@ void _gl_TexParameterfv(GLenum target, GLenum pname, const GLfloat *params) {
   if (!tex) {
     return;
   }
+  if (!texture_parameter_allowed_for_target(tex, pname)) {
+    _gl_set_error(GL_INVALID_ENUM);
+    return;
+  }
 
   if (pname == GL_TEXTURE_BORDER_COLOR) {
     tex->border_color[0] = params[0];
@@ -6268,6 +6457,10 @@ void _gl_GetTexParameteriv(GLenum target, GLenum pname, GLint *params) {
 
   tex = texture_for_parameter_target(target);
   if (!tex) {
+    return;
+  }
+  if (!texture_parameter_allowed_for_target(tex, pname)) {
+    _gl_set_error(GL_INVALID_ENUM);
     return;
   }
 
@@ -6346,6 +6539,10 @@ void _gl_GetTexParameterfv(GLenum target, GLenum pname, GLfloat *params) {
   }
   tex = texture_for_parameter_target(target);
   if (!tex) {
+    return;
+  }
+  if (!texture_parameter_allowed_for_target(tex, pname)) {
+    _gl_set_error(GL_INVALID_ENUM);
     return;
   }
 
@@ -7031,6 +7228,7 @@ void _gl_GetTexLevelParameteriv(GLenum target, GLint level, GLenum pname,
   uint32_t face = 0;
   bool defined;
   bool multisample_target = false;
+  bool empty_image_target = false;
   TextureLevelLayout layout;
   GLint red_bits, green_bits, blue_bits, alpha_bits, depth_bits, stencil_bits;
 
