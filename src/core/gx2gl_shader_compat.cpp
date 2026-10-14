@@ -1218,6 +1218,10 @@ static char *lower_source_for_cafeglsl(const char *source,
                                        char *info_log_out,
                                        int info_log_max_length) {
   std::string lowered_source(source);
+  size_t Precision = lowered_source.find("precision mediump float;");
+  if (Precision != std::string::npos) {
+    lowered_source.erase(Precision, strlen("precision mediump float;"));
+  }
   std::string rewritten_source;
   bool used_input_locations[kMaxShaderInterfaceLocations] = {};
   bool used_output_locations[kMaxShaderInterfaceLocations] = {};
@@ -1239,50 +1243,59 @@ static char *lower_source_for_cafeglsl(const char *source,
     size_t line_length = has_newline ? line_end - line_start
                                      : lowered_source.size() - line_start;
     std::string original_line = lowered_source.substr(line_start, line_length);
-    std::string parse_line = strip_line_comment(original_line);
-    size_t first = skip_whitespace(parse_line, 0);
-    std::string output_line = original_line;
+    std::string output_line;
+    for (const std::string &Part : SplitShaderStatements(original_line)) {
+      std::string parse_line = strip_line_comment(Part);
+      size_t first = skip_whitespace(parse_line, 0);
+      std::string output_part = Part;
 
-    if (first < parse_line.size() && parse_line[first] != '#') {
-      UniformDecl uniform_decl;
-      InterfaceDecl interface_decl;
+      if (first < parse_line.size() && parse_line[first] != '#') {
+        UniformDecl uniform_decl;
+        InterfaceDecl interface_decl;
 
-      if (parse_uniform_declaration(parse_line, &uniform_decl)) {
-        if ((uniform_decl.is_block || is_sampler_type(uniform_decl.type)) &&
-            !uniform_decl.layout.has_binding) {
-          int binding = assign_binding(used_bindings,
-                                       GL33_MAX_COMBINED_TEXTURE_IMAGE_UNITS);
-          if (binding < 0) {
-            write_info_log(info_log_out, info_log_max_length,
-                           "Shader has too many sampler or uniform block "
-                           "bindings for gx2gl.");
+        if (parse_uniform_declaration(parse_line, &uniform_decl)) {
+          if ((uniform_decl.is_block || is_sampler_type(uniform_decl.type)) &&
+              !uniform_decl.layout.has_binding) {
+            int binding = assign_binding(used_bindings,
+                                         GL33_MAX_COMBINED_TEXTURE_IMAGE_UNITS);
+            if (binding < 0) {
+              write_info_log(info_log_out, info_log_max_length,
+                             "Shader has too many sampler or uniform block "
+                             "bindings for gx2gl.");
+              return NULL;
+            }
+            output_part = with_layout_integer(Part, "binding", binding);
+          }
+        } else if (parse_interface_declaration(parse_line, &interface_decl) &&
+                   !is_builtin_name(interface_decl.name) &&
+                   !interface_decl.layout.has_location) {
+          bool *used_locations =
+              interface_decl.storage == "out" ? used_output_locations
+                                              : used_input_locations;
+          int span = shader_type_location_span(interface_decl.type) *
+                     interface_decl.array_size;
+          int max_locations =
+              shader_type == GL_FRAGMENT_SHADER &&
+                      interface_decl.storage == "out"
+                  ? 8
+                  : kMaxShaderInterfaceLocations;
+          int location = assign_interface_location(
+              used_locations, interface_decl.name, span, max_locations);
+          if (location < 0) {
+            char message[256];
+            snprintf(message, sizeof(message),
+                     "Could not assign a CafeGLSL location for %s shader %s "
+                     "'%s'.",
+                     shader_stage_name(shader_type),
+                     interface_decl.storage.c_str(),
+                     interface_decl.name.c_str());
+            write_info_log(info_log_out, info_log_max_length, message);
             return NULL;
           }
-          output_line = with_layout_integer(original_line, "binding", binding);
+          output_part = with_layout_integer(Part, "location", location);
         }
-      } else if (parse_interface_declaration(parse_line, &interface_decl) &&
-                 !is_builtin_name(interface_decl.name) &&
-                 !interface_decl.layout.has_location) {
-        bool *used_locations =
-            interface_decl.storage == "out" ? used_output_locations
-                                            : used_input_locations;
-        int span = shader_type_location_span(interface_decl.type) *
-                   interface_decl.array_size;
-        int location = assign_interface_location(used_locations,
-                                                 interface_decl.name, span);
-        if (location < 0) {
-          char message[256];
-          snprintf(message, sizeof(message),
-                   "Could not assign a CafeGLSL location for %s shader %s "
-                   "'%s'.",
-                   shader_stage_name(shader_type),
-                   interface_decl.storage.c_str(),
-                   interface_decl.name.c_str());
-          write_info_log(info_log_out, info_log_max_length, message);
-          return NULL;
-        }
-        output_line = with_layout_integer(original_line, "location", location);
       }
+      output_line += output_part;
     }
 
     rewritten_source += output_line;
@@ -1291,14 +1304,23 @@ static char *lower_source_for_cafeglsl(const char *source,
     line_start = line_end + 1u;
   }
 
-  if (shader_type == GL_FRAGMENT_SHADER) {
-    rewritten_source = normalize_fragment_output_channels(rewritten_source);
-  }
+  rewritten_source = LowerDoWhileContinue(rewritten_source);
   rewritten_source = add_cafeglsl_layout_extensions(rewritten_source);
+  if (shader_type == GL_FRAGMENT_SHADER) {
+    rewritten_source = lower_fragment_coordinates(rewritten_source);
+  }
+  bool InvalidConstructor = false;
+  rewritten_source = LowerConstantMatrixVectorConstructors(rewritten_source,
+                                                           &InvalidConstructor);
+  if (InvalidConstructor) {
+    write_info_log(info_log_out, info_log_max_length,
+                   "Vector constructor contains excess arguments.");
+    return NULL;
+  }
   return copy_source(rewritten_source.c_str());
 }
 
-} // namespace
+}
 
 char *gx2gl_prepare_shader_source_for_cafeglsl(const char *source,
                                                GLenum shader_type) {
@@ -1317,6 +1339,19 @@ char *gx2gl_prepare_shader_source_for_cafeglsl_ex(const char *source,
 
   return lower_source_for_cafeglsl(source, shader_type, info_log_out,
                                    info_log_max_length);
+}
+
+GLint gx2gl_explicit_vertex_input_location(const char *source,
+                                            const char *name) {
+  if (!source || !name) return -1;
+  std::vector<CollectedInterfaceDecl> Inputs;
+  if (!collect_interface_declarations(source, GL_VERTEX_SHADER, "in",
+                                      &Inputs, NULL, 0)) return -1;
+  for (const auto &Input : Inputs) {
+    if (Input.decl.name == name && Input.decl.layout.has_location)
+      return Input.decl.layout.location;
+  }
+  return -1;
 }
 
 bool gx2gl_validate_program_shader_interfaces(const char *vertex_source,
