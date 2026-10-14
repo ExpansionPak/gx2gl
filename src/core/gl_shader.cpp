@@ -1987,12 +1987,100 @@ static bool write_uniform_storage_words(GLProgram *prog, GLint location,
   }
 
   uint32_t block_idx = ((uint32_t)location >> 16) & GL_LOCATION_BLOCK_MASK;
-  UniformBlockShadow *block = is_pixel ? (block_idx < prog->ps_block_count ? &prog->ps_blocks[block_idx] : NULL) : (block_idx < prog->vs_block_count ? &prog->vs_blocks[block_idx] : NULL);
+  UniformBlockShadow *block = is_pixel
+                                  ? (block_idx < prog->ps_block_count ? &prog->ps_blocks[block_idx] : NULL)
+                                  : (block_idx < prog->vs_block_count ? &prog->vs_blocks[block_idx] : NULL);
   if (!block || !block->buffer || offset + byte_count > block->size) return false;
   uint32_t *dst = (uint32_t *)((uint8_t *)block->buffer + offset);
-  for (GLsizei i = 0; i < count_words; i++) dst[i] = CPU_TO_GPU_32(data[i]);
+  for (GLsizei i = 0; i < count_words; ++i) dst[i] = CPU_TO_GPU_32(data[i]);
   DCFlushRange(dst, byte_count);
   return true;
+}
+
+static bool update_uniform_words(GLint location, const uint32_t *data,
+                                 GLsizei count_words,
+                                 uint32_t extra_offset_bytes) {
+  if (location == -1 || count_words <= 0 || !data) return true;
+  if (!g_gl_context) return false;
+
+  GLuint prog_id = g_gl_context->bound_program;
+  if (!is_valid_program(prog_id)) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return false;
+  }
+
+  GLProgram *prog = &g_programs[prog_id];
+  location = resolve_uniform_location(prog, location);
+  if (location_is_sampler(location)) return false;
+  set_program_uniform_value_shadow(prog, location, data, (uint32_t)count_words);
+  return write_uniform_storage_words(prog, location, data, count_words,
+                                     extra_offset_bytes);
+}
+
+static bool update_uniform_matrix(GLint location, GLsizei count,
+                                  GLboolean transpose,
+                                  const GLfloat *values,
+                                  uint32_t columns, uint32_t rows) {
+  if (count < 0) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return false;
+  }
+  if (location == -1 || count == 0) return true;
+  if (!values || columns == 0 || rows == 0 || columns > 4 || rows > 4) {
+    return false;
+  }
+  if (!g_gl_context) return false;
+
+  GLuint prog_id = g_gl_context->bound_program;
+  if (!is_valid_program(prog_id)) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return false;
+  }
+
+  GLProgram *prog = &g_programs[prog_id];
+  location = resolve_uniform_location(prog, location);
+  if (location_is_sampler(location)) return false;
+
+  const uint32_t logical_words_per_matrix = columns * rows;
+  const uint32_t storage_words_per_matrix = columns * 4u;
+  const uint32_t logical_word_count = (uint32_t)count * logical_words_per_matrix;
+  const uint32_t storage_word_count = (uint32_t)count * storage_words_per_matrix;
+  uint32_t logical_stack[64];
+  uint32_t storage_stack[64];
+  uint32_t *logical = logical_word_count <= (uint32_t)(sizeof(logical_stack) / sizeof(logical_stack[0]))
+                          ? logical_stack
+                          : (uint32_t *)malloc((size_t)logical_word_count * sizeof(uint32_t));
+  uint32_t *storage = storage_word_count <= (uint32_t)(sizeof(storage_stack) / sizeof(storage_stack[0]))
+                          ? storage_stack
+                          : (uint32_t *)malloc((size_t)storage_word_count * sizeof(uint32_t));
+  if (!logical || !storage) {
+    if (logical && logical != logical_stack) free(logical);
+    if (storage && storage != storage_stack) free(storage);
+    return false;
+  }
+
+  memset(storage, 0, (size_t)storage_word_count * sizeof(uint32_t));
+  const uint32_t *input = (const uint32_t *)values;
+  for (uint32_t matrix = 0; matrix < (uint32_t)count; ++matrix) {
+    for (uint32_t column = 0; column < columns; ++column) {
+      for (uint32_t row = 0; row < rows; ++row) {
+        uint32_t input_index = transpose
+                                   ? matrix * logical_words_per_matrix + row * columns + column
+                                   : matrix * logical_words_per_matrix + column * rows + row;
+        uint32_t logical_index = matrix * logical_words_per_matrix + column * rows + row;
+        uint32_t word = input[input_index];
+        logical[logical_index] = word;
+        storage[matrix * storage_words_per_matrix + column * 4u + row] = word;
+      }
+    }
+  }
+
+  set_program_uniform_value_shadow(prog, location, logical, logical_word_count);
+  bool ok = write_uniform_storage_words(prog, location, storage,
+                                        (GLsizei)storage_word_count, 0);
+  if (logical != logical_stack) free(logical);
+  if (storage != storage_stack) free(storage);
+  return ok;
 }
 
 static bool update_sampler_bindings(GLint location, GLsizei count, const GLint *values) {
@@ -2042,6 +2130,7 @@ static GLuint get_bound_texture_for_unit(GLuint unit, GLenum target) {
   case GL_TEXTURE_1D: return g_gl_context->bound_texture_1d[unit];
   case GL_TEXTURE_2D: return g_gl_context->bound_texture_2d[unit];
   case GL_TEXTURE_3D: return g_gl_context->bound_texture_3d[unit];
+  case GL_TEXTURE_RECTANGLE: return g_gl_context->bound_texture_rectangle[unit];
   case GL_TEXTURE_CUBE_MAP: return g_gl_context->bound_texture_cube[unit];
   case GL_TEXTURE_1D_ARRAY: return g_gl_context->bound_texture_1d_array[unit];
   case GL_TEXTURE_2D_ARRAY: return g_gl_context->bound_texture_2d_array[unit];
@@ -2053,6 +2142,25 @@ static GLuint get_bound_texture_for_unit(GLuint unit, GLenum target) {
   }
 }
 
+static uint32_t ComposeTextureComponentMap(uint32_t CompMap,
+                                           const GLenum Swizzle[4]) {
+  uint32_t Result = 0;
+  for (uint32_t i = 0; i < 4; ++i) {
+    uint32_t Selector;
+    switch (Swizzle[i]) {
+    case GL_RED: Selector = (CompMap >> 24) & 0xFFu; break;
+    case GL_GREEN: Selector = (CompMap >> 16) & 0xFFu; break;
+    case GL_BLUE: Selector = (CompMap >> 8) & 0xFFu; break;
+    case GL_ALPHA: Selector = CompMap & 0xFFu; break;
+    case GL_ZERO: Selector = GX2_SQ_SEL_0; break;
+    case GL_ONE: Selector = GX2_SQ_SEL_1; break;
+    default: Selector = GX2_SQ_SEL_0; break;
+    }
+    Result |= Selector << (24u - i * 8u);
+  }
+  return Result;
+}
+
 static void bind_stage_samplers(const GLint *sampler_units,
                                 const GLint *sampler_bindings,
                                 const GLenum *sampler_targets,
@@ -2062,6 +2170,9 @@ static void bind_stage_samplers(const GLint *sampler_units,
     GLint texture_unit;
     GLuint tex_id;
     GX2Texture *tex;
+    GX2Texture TextureView;
+    const GX2Texture *BoundTexture;
+    GLenum Swizzle[4];
     GLuint sampler_id;
     GX2Sampler *sampler;
 
@@ -2077,17 +2188,44 @@ static void bind_stage_samplers(const GLint *sampler_units,
     gl_framebuffer_sync_texture_for_sampling(tex_id);
 
     tex = gl_get_gx2_texture(tex_id);
+    if (pixel_stage && location == 0) {
+      static int Samples = 0;
+      if (Samples++ < 24) {
+        FILE *Trace = fopen("/vol/external01/gx2gl/texture_format_probe.txt", "a");
+        if (Trace) {
+          fprintf(Trace, "id=%u target=%x texture=%p gx2fmt=%x dim=%u size=%ux%u depth=%u image=%p sampler=%d\n",
+                  tex_id, (unsigned)sampler_targets[shader_slot], (void *)tex,
+                  tex ? (unsigned)tex->surface.format : 0u,
+                  tex ? (unsigned)tex->surface.dim : 0u,
+                  tex ? tex->surface.width : 0u,
+                  tex ? tex->surface.height : 0u,
+                  tex ? tex->surface.depth : 0u,
+                  tex ? tex->surface.image : NULL, shader_slot);
+          fclose(Trace);
+        }
+      }
+    }
     if (!tex) continue;
+    BoundTexture = tex;
+    if (gl_get_texture_swizzle(tex_id, Swizzle)) {
+      uint32_t CompMap = ComposeTextureComponentMap(tex->compMap, Swizzle);
+      if (CompMap != tex->compMap) {
+        TextureView = *tex;
+        TextureView.compMap = CompMap;
+        GX2InitTextureRegs(&TextureView);
+        BoundTexture = &TextureView;
+      }
+    }
 
     sampler_id = g_gl_context->bound_sampler[texture_unit];
     sampler = gl_get_gx2_sampler(sampler_id ? sampler_id : tex_id, sampler_id != 0);
 
     if (pixel_stage) {
-      GX2SetPixelTexture(tex, (uint32_t)shader_slot);
-      if (sampler) GX2SetPixelSampler(sampler, (uint32_t)shader_slot);
+      GX2SetPixelTexture(BoundTexture, location);
+      if (sampler) GX2SetPixelSampler(sampler, location);
     } else {
-      GX2SetVertexTexture(tex, (uint32_t)shader_slot);
-      if (sampler) GX2SetVertexSampler(sampler, (uint32_t)shader_slot);
+      GX2SetVertexTexture(BoundTexture, location);
+      if (sampler) GX2SetVertexSampler(sampler, location);
     }
   }
 }
@@ -2123,7 +2261,7 @@ static void bind_program_uniform_blocks(GLProgram *prog) {
     }
 
     if (block->vertex_block_index >= 0) {
-      uint32_t gx2_location = block->vertex_location;
+      uint32_t gx2_location = (uint32_t)block->vertex_block_index;
       if (binding && binding->buffer != 0) {
         GLsizeiptr total_size = gl_buffer_get_size(binding->buffer);
         uint32_t bind_offset = binding->whole_buffer ? 0u : (uint32_t)binding->offset;
@@ -2142,7 +2280,7 @@ static void bind_program_uniform_blocks(GLProgram *prog) {
     }
 
     if (block->pixel_block_index >= 0) {
-      uint32_t gx2_location = block->pixel_location;
+      uint32_t gx2_location = (uint32_t)block->pixel_block_index;
       if (binding && binding->buffer != 0) {
         GLsizeiptr total_size = gl_buffer_get_size(binding->buffer);
         uint32_t bind_offset = binding->whole_buffer ? 0u : (uint32_t)binding->offset;
@@ -2357,6 +2495,7 @@ typedef struct {
   GX2RBuffer *gx2r;
   uint32_t gx2_index;
   uint32_t stride;
+  uint32_t base_offset;
   uint32_t size;
   const uint8_t *data_ptr;
 } ProgramFetchBufferBinding;
@@ -2420,7 +2559,6 @@ void gl_bind_program_fetch_shader(void) {
     uint32_t offset;
     uint32_t stride;
     uint32_t buffer_index = UINT32_MAX;
-    bool reuse_conflict = false;
 
     if (!gl_vao_get_attrib_state(slot, &state) || !state.enabled) continue;
 
@@ -2453,6 +2591,7 @@ void gl_bind_program_fetch_shader(void) {
     buffer_size = gl_buffer_get_size(state.buffer);
     offset = (uint32_t)(uintptr_t)state.pointer;
     stride = state.stride > 0 ? (uint32_t)state.stride : component_size * (uint32_t)state.size;
+    uint32_t BaseOffset = offset & ~0xFFFFu;
     if ((uint64_t)offset >= (uint64_t)buffer_size) {
       WiiU_Log("gx2gl: attribute %u (%s) offset %u exceeds buffer %u size %u; skipping.", slot,
                reflection->name ? reflection->name : "<unnamed>", offset, state.buffer, (unsigned int)buffer_size);
@@ -2460,19 +2599,11 @@ void gl_bind_program_fetch_shader(void) {
     }
 
     for (uint32_t i = 0; i < buffer_count; ++i) {
-      if (!buffers[i].in_use || buffers[i].buffer_id != state.buffer) continue;
-      if (buffers[i].stride != stride) {
-        WiiU_Log("gx2gl: attribute %u (%s) reuses buffer %u with mismatched stride (%u vs %u); skipping.",
-                 slot, reflection->name ? reflection->name : "<unnamed>", state.buffer,
-                 buffers[i].stride, stride);
-        reuse_conflict = true;
-        break;
-      }
+      if (!buffers[i].in_use || buffers[i].buffer_id != state.buffer ||
+          buffers[i].stride != stride || buffers[i].base_offset != BaseOffset) continue;
       buffer_index = buffers[i].gx2_index;
       break;
     }
-
-    if (reuse_conflict) continue;
 
     if (buffer_index == UINT32_MAX) {
       if (buffer_count >= GL33_MAX_VERTEX_ATTRIBS) {
@@ -2485,15 +2616,16 @@ void gl_bind_program_fetch_shader(void) {
       buffers[buffer_count].gx2r = gx2r;
       buffers[buffer_count].gx2_index = buffer_count;
       buffers[buffer_count].stride = stride;
-      buffers[buffer_count].size = (uint32_t)buffer_size;
-      buffers[buffer_count].data_ptr = (const uint8_t *)gx2r->buffer;
+      buffers[buffer_count].base_offset = BaseOffset;
+      buffers[buffer_count].size = (uint32_t)buffer_size - BaseOffset;
+      buffers[buffer_count].data_ptr = (const uint8_t *)gx2r->buffer + BaseOffset;
       buffer_index = buffers[buffer_count].gx2_index;
       ++buffer_count;
     }
 
-    streams[attrib_count].location = slot;
+    streams[attrib_count].location = reflection->GX2Location;
     streams[attrib_count].buffer = buffer_index;
-    streams[attrib_count].offset = offset;
+    streams[attrib_count].offset = offset - BaseOffset;
     streams[attrib_count].format = format;
     streams[attrib_count].type = state.divisor > 0 ? GX2_ATTRIB_INDEX_PER_INSTANCE : GX2_ATTRIB_INDEX_PER_VERTEX;
     streams[attrib_count].aluDivisor = state.divisor;
@@ -2534,7 +2666,8 @@ void gl_bind_program_fetch_shader(void) {
 }
 
 static bool is_supported_shader_type(GLenum type) {
-  return type == GL_VERTEX_SHADER || type == GL_FRAGMENT_SHADER;
+  return type == GL_VERTEX_SHADER || type == GL_FRAGMENT_SHADER ||
+         type == GL_GEOMETRY_SHADER;
 }
 
 static char *concatenate_shader_source(GLsizei count, const GLchar *const *strings,
@@ -2593,19 +2726,18 @@ void gl_shader_shutdown(void) {
   gx2gl_cafeglsl_shutdown();
 }
 GLuint _gl_CreateShader(GLenum type) {
-    if (!is_supported_shader_type(type)) {
-      _gl_set_error(GL_INVALID_ENUM);
-      return 0;
-    }
-    for (int i = 1; i < MAX_SHADERS; i++) {
-      if (!g_shaders[i].in_use) {
-        memset(&g_shaders[i], 0, sizeof(g_shaders[i]));
-        g_shaders[i].in_use = true;
-        g_shaders[i].type = type;
-        return i;
-      }
-    }
+  if (!is_supported_shader_type(type)) {
+    _gl_set_error(GL_INVALID_ENUM);
     return 0;
+  }
+
+  GLuint name = allocate_shader_program_name();
+  if (name == 0) return 0;
+
+  memset(&g_shaders[name], 0, sizeof(g_shaders[name]));
+  g_shaders[name].in_use = true;
+  g_shaders[name].type = type;
+  return name;
 }
 void _gl_DeleteShader(GLuint s) {
   if (s == 0) return;
@@ -2735,18 +2867,16 @@ void _gl_CompileShader(GLuint s) {
   free(prepared_source);
 }
 GLuint _gl_CreateProgram(void) {
-    for (int i = 1; i < MAX_PROGRAMS; i++) {
-      if (!g_programs[i].in_use) {
-        memset(&g_programs[i], 0, sizeof(g_programs[i]));
-        g_programs[i].in_use = true;
-        g_programs[i].tf_pending_buffer_mode = GL_INTERLEAVED_ATTRIBS;
-        g_programs[i].tf_linked_buffer_mode = GL_INTERLEAVED_ATTRIBS;
-        memset(g_programs[i].vertex_sampler_units, -1, sizeof(g_programs[i].vertex_sampler_units));
-        memset(g_programs[i].pixel_sampler_units, -1, sizeof(g_programs[i].pixel_sampler_units));
-        return i;
-      }
-    }
-    return 0;
+  GLuint name = allocate_shader_program_name();
+  if (name == 0) return 0;
+
+  memset(&g_programs[name], 0, sizeof(g_programs[name]));
+  g_programs[name].in_use = true;
+  g_programs[name].tf_pending_buffer_mode = GL_INTERLEAVED_ATTRIBS;
+  g_programs[name].tf_linked_buffer_mode = GL_INTERLEAVED_ATTRIBS;
+  memset(g_programs[name].vertex_sampler_units, -1, sizeof(g_programs[name].vertex_sampler_units));
+  memset(g_programs[name].pixel_sampler_units, -1, sizeof(g_programs[name].pixel_sampler_units));
+  return name;
 }
 void _gl_DeleteProgram(GLuint p) {
   GLuint attached_vertex_shader = 0;
@@ -2860,6 +2990,13 @@ void _gl_LinkProgram(GLuint p) {
   }
 
   interface_error[0] = '\0';
+  if (!GX2GLValidateUniformBlockLinks(vertex_shader->source,
+                                     pixel_shader->source, interface_error,
+                                     sizeof(interface_error))) {
+    replace_owned_string(&prog->info_log, interface_error);
+    clear_program_runtime_state(prog);
+    return;
+  }
   if (!gx2gl_validate_program_shader_interfaces(
                                                 vertex_shader->compiled_binary->source,
                                                 pixel_shader->compiled_binary->source,
@@ -3076,6 +3213,8 @@ void _gl_GetProgramiv(GLuint p, GLenum n, GLint *v) {
   case GL_ACTIVE_ATTRIBUTES:    *v = (GLint)get_active_attribute_count(prog); break;
   case GL_ACTIVE_UNIFORM_MAX_LENGTH: *v = (GLint)get_active_uniform_max_name_length(prog); break;
   case GL_ACTIVE_ATTRIBUTE_MAX_LENGTH: *v = (GLint)get_active_attribute_max_name_length(prog); break;
+  case GL_ACTIVE_UNIFORM_BLOCKS: *v = (GLint)get_active_uniform_block_count(prog); break;
+  case GL_ACTIVE_UNIFORM_BLOCK_MAX_NAME_LENGTH: *v = (GLint)get_active_uniform_block_max_name_length(prog); break;
   case GL_TRANSFORM_FEEDBACK_BUFFER_MODE: *v = (GLint)prog->tf_linked_buffer_mode; break;
   case GL_TRANSFORM_FEEDBACK_VARYINGS: *v = (GLint)prog->tf_linked_count; break;
   case GL_TRANSFORM_FEEDBACK_VARYING_MAX_LENGTH: *v = (GLint)prog->tf_linked_max_name_length; break;
@@ -3098,7 +3237,8 @@ void _gl_GetUniformfv(GLuint p, GLint l, GLfloat *v) {
   uint32_t words[16];
   uint32_t actual_words = 0;
 
-  if (!is_valid_program(p) || !v) return;
+  if (!v) return;
+  if (!validate_program_object_name(p)) return;
   if (l == -1) {
     _gl_set_error(GL_INVALID_OPERATION);
     return;
