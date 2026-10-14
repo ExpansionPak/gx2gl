@@ -3704,10 +3704,7 @@ static void read_texture_row_unswapped(uint8_t *dst, const uint8_t *src,
   if (info->bytes_per_component == 1) {
     if (info->dst_bytes_per_texel == 4 && info->src_bytes_per_texel == 4 &&
         info->src_components == 4 && info->dst_components == 4) {
-      for (uint32_t i = 0; i < texel_count; ++i) {
-        uint32_t word = load_unaligned_u32(src + i * sizeof(uint32_t));
-        store_unaligned_u32(dst + i * sizeof(uint32_t), GPU_TO_CPU_32(word));
-      }
+      memcpy(dst, src, texel_count * 4u);
       return;
     }
 
@@ -3740,6 +3737,26 @@ static void read_texture_row_unswapped(uint8_t *dst, const uint8_t *src,
       uint32_t byte_offset = i * sizeof(uint32_t);
       uint32_t word = load_unaligned_u32(src + byte_offset);
       store_unaligned_u32(dst + byte_offset, GPU_TO_CPU_32(word));
+    }
+  }
+}
+
+static void read_texture_row(uint8_t *dst, const uint8_t *src,
+                             uint32_t texel_count,
+                             const TextureFormatInfo *info) {
+  read_texture_row_unswapped(dst, src, texel_count, info);
+  uint32_t component_size = info->src_bytes_per_component;
+  if (!g_gl_context || !g_gl_context->pack_swap_bytes ||
+      component_size <= 1 || texel_count == 0) {
+    return;
+  }
+  size_t bytes = (size_t)texel_count * info->src_bytes_per_texel;
+  for (size_t offset = 0; offset + component_size <= bytes;
+       offset += component_size) {
+    for (uint32_t i = 0; i < component_size / 2u; ++i) {
+      uint8_t value = dst[offset + i];
+      dst[offset + i] = dst[offset + component_size - 1u - i];
+      dst[offset + component_size - 1u - i] = value;
     }
   }
 }
@@ -3933,6 +3950,140 @@ static bool resolve_compressed_pack_data(GLvoid *data, GLsizei image_size,
                                    resolved_data) == GL_TRUE;
 }
 
+static void BuildRgtcPalette(const uint8_t *Block, bool Signed,
+                             int32_t Palette[8]) {
+  Palette[0] = Signed ? (int8_t)Block[0] : Block[0];
+  Palette[1] = Signed ? (int8_t)Block[1] : Block[1];
+  if (Signed) {
+    if (Palette[0] == -128) Palette[0] = -127;
+    if (Palette[1] == -128) Palette[1] = -127;
+  }
+  if (Palette[0] > Palette[1]) {
+    for (int i = 2; i < 8; ++i)
+      Palette[i] = ((8 - i) * Palette[0] + (i - 1) * Palette[1]) / 7;
+  } else {
+    for (int i = 2; i < 6; ++i)
+      Palette[i] = ((6 - i) * Palette[0] + (i - 1) * Palette[1]) / 5;
+    Palette[6] = Signed ? -127 : 0;
+    Palette[7] = Signed ? 127 : 255;
+  }
+}
+
+static void EncodeRgtcBlock(uint8_t Block[8], const int32_t Pixels[16],
+                            bool Signed) {
+  int32_t Low = Signed ? 127 : 255;
+  int32_t High = Signed ? -127 : 0;
+  for (int i = 0; i < 16; ++i) {
+    if (Pixels[i] < Low) Low = Pixels[i];
+    if (Pixels[i] > High) High = Pixels[i];
+  }
+  Block[0] = (uint8_t)High;
+  Block[1] = (uint8_t)Low;
+  int32_t Palette[8];
+  BuildRgtcPalette(Block, Signed, Palette);
+  uint64_t Indices = 0;
+  for (int i = 0; i < 16; ++i) {
+    int32_t BestDistance = INT32_MAX;
+    uint32_t BestIndex = 0;
+    for (uint32_t j = 0; j < 8; ++j) {
+      int32_t Distance = Pixels[i] - Palette[j];
+      if (Distance < 0) Distance = -Distance;
+      if (Distance < BestDistance) {
+        BestDistance = Distance;
+        BestIndex = j;
+      }
+    }
+    Indices |= (uint64_t)BestIndex << (3u * i);
+  }
+  for (int i = 0; i < 6; ++i)
+    Block[2 + i] = (uint8_t)(Indices >> (8u * i));
+}
+
+static int32_t DecodeRgtcComponent(const uint8_t Block[8],
+                                    uint32_t Index, bool Signed) {
+  int32_t Palette[8];
+  BuildRgtcPalette(Block, Signed, Palette);
+  uint64_t Indices = 0;
+  for (int i = 0; i < 6; ++i)
+    Indices |= (uint64_t)Block[2 + i] << (8u * i);
+  return Palette[(Indices >> (3u * Index)) & 7u];
+}
+
+static bool UploadRgtcRegion(GLTexture *Texture, GLint Level,
+                             GLint XOffset, GLint YOffset, GLint Slice,
+                             GLsizei Width, GLsizei Height, GLsizei Depth,
+                             const TextureFormatInfo *Info,
+                             const GLvoid *Pixels) {
+  if (Width == 0 || Height == 0 || Depth == 0 || !Pixels) return true;
+  TextureLevelLayout Layout;
+  if (!calc_level_layout(Texture->target, Texture->gx2_texture.surface.format,
+                         Texture->width, Texture->height, Texture->depth,
+                         (uint32_t)Level, &Layout)) return false;
+  if (XOffset < 0 || YOffset < 0 || Slice < 0 ||
+      (XOffset % 4) != 0 || (YOffset % 4) != 0 ||
+      XOffset + Width > Layout.width ||
+      YOffset + Height > Layout.height ||
+      Slice + Depth > Layout.depth) return false;
+  uint8_t *Destination = get_texture_level_ptr(Texture, (uint32_t)Level);
+  if (!Destination) return false;
+  uint32_t SourceRowBytes;
+  uint32_t SourceImageBytes;
+  size_t SourceOffset;
+  if (!get_unpack_layout(Info, Width, Height, &SourceRowBytes,
+                         &SourceImageBytes, &SourceOffset)) return false;
+  const uint8_t *Source = (const uint8_t *)Pixels + SourceOffset;
+  const bool Signed = IsSignedRgtcTextureFormat(Info->internal_format);
+  const uint32_t Channels = RgtcTextureChannels(Info->internal_format);
+  TextureFormatInfo Convert = *Info;
+  Convert.internal_format = Signed ?
+      (Channels == 2u ? GL_RG8_SNORM : GL_R8_SNORM) :
+      (Channels == 2u ? GL_RG8 : GL_R8);
+  Convert.dst_components = Channels;
+  Convert.dst_bytes_per_texel = Channels;
+  Convert.bytes_per_component = 1;
+  for (GLsizei Z = 0; Z < Depth; ++Z) {
+    uint8_t *SliceData = Destination + (size_t)(Slice + Z) * Layout.slice_size;
+    const uint8_t *SourceImage = Source + (size_t)Z * SourceImageBytes;
+    for (GLsizei BlockY = 0; BlockY < (Height + 3) / 4; ++BlockY) {
+      for (GLsizei BlockX = 0; BlockX < (Width + 3) / 4; ++BlockX) {
+        int32_t Samples[2][16] = {};
+        for (int Row = 0; Row < 4; ++Row) {
+          const uint32_t Y = (uint32_t)BlockY * 4u + (uint32_t)Row;
+          const uint32_t ClampedY = Y < (uint32_t)Height ? Y : (uint32_t)Height - 1u;
+          uint8_t Converted[8] = {};
+          uint32_t StartX = (uint32_t)BlockX * 4u;
+          uint32_t ValidCount = (uint32_t)Width - StartX;
+          if (ValidCount > 4u) ValidCount = 4u;
+          const uint8_t *Input = SourceImage +
+              (size_t)ClampedY * SourceRowBytes +
+              (size_t)StartX * Info->src_bytes_per_texel;
+          if (!copy_texture_row(Converted, Input, ValidCount, &Convert))
+            return false;
+          for (int Column = 0; Column < 4; ++Column) {
+            const uint32_t X = (uint32_t)Column < ValidCount ?
+                (uint32_t)Column : ValidCount - 1u;
+            for (uint32_t Component = 0; Component < Channels; ++Component) {
+              uint8_t Raw = Converted[X * Channels + Component];
+              int32_t Value = Signed ? (int8_t)Raw : Raw;
+              if (Signed && Value == -128) Value = -127;
+              Samples[Component][Row * 4 + Column] = Value;
+            }
+          }
+        }
+        const uint32_t DestinationX = (uint32_t)XOffset / 4u + (uint32_t)BlockX;
+        const uint32_t DestinationY = (uint32_t)YOffset / 4u + (uint32_t)BlockY;
+        uint8_t *Block = SliceData +
+            ((size_t)DestinationY * Layout.pitch + DestinationX) * Info->block_bytes;
+        for (uint32_t Component = 0; Component < Channels; ++Component)
+          EncodeRgtcBlock(Block + Component * 8u, Samples[Component], Signed);
+      }
+    }
+  }
+  DCFlushRange(Destination, Layout.image_size);
+  GX2Invalidate(GX2_INVALIDATE_MODE_CPU_TEXTURE, Destination, Layout.image_size);
+  return true;
+}
+
 static bool upload_texture_level(GLTexture *tex, GLint level, GLsizei width,
                                  GLsizei height, GLsizei depth,
                                  const TextureFormatInfo *info,
@@ -3951,6 +4102,9 @@ static bool upload_texture_level(GLTexture *tex, GLint level, GLsizei width,
   if (!pixels) {
     return true;
   }
+  if (IsRgtcTextureFormat(info->internal_format))
+    return UploadRgtcRegion(tex, level, 0, 0, 0,
+                            width, height, depth, info, pixels);
   if (!calc_level_layout(tex->target, tex->gx2_texture.surface.format,
                          tex->width, tex->height, tex->depth, (uint32_t)level,
                          &layout)) {
@@ -3973,10 +4127,12 @@ static bool upload_texture_level(GLTexture *tex, GLint level, GLsizei width,
     uint8_t *dst_slice = dst + (uint32_t)z * layout.slice_size;
     const uint8_t *src_slice = src + (size_t)z * src_image_bytes;
     for (GLsizei y = 0; y < height; ++y) {
-      uint32_t dst_y = (uint32_t)(height - 1 - y);
-      copy_texture_row(dst_slice + dst_y * dst_row_bytes,
-                       src_slice + (size_t)y * src_row_bytes, (uint32_t)width,
-                       info);
+      uint32_t dst_y = (uint32_t)y;
+      if (!copy_texture_row(dst_slice + dst_y * dst_row_bytes,
+                            src_slice + (size_t)y * src_row_bytes,
+                            (uint32_t)width, info)) {
+        return false;
+      }
     }
   }
 
@@ -4005,6 +4161,9 @@ static bool upload_texture_sub_region(GLTexture *tex, GLint level,
   if (!pixels) {
     return false;
   }
+  if (IsRgtcTextureFormat(info->internal_format))
+    return UploadRgtcRegion(tex, level, xoffset, yoffset, zoffset,
+                            width, height, depth, info, pixels);
   if (!calc_level_layout(tex->target, tex->gx2_texture.surface.format,
                          tex->width, tex->height, tex->depth, (uint32_t)level,
                          &layout)) {
@@ -4032,11 +4191,14 @@ static bool upload_texture_sub_region(GLTexture *tex, GLint level,
     uint8_t *dst_slice = dst + (uint32_t)(zoffset + z) * layout.slice_size;
     const uint8_t *src_slice = src + (size_t)z * src_image_bytes;
     for (GLsizei y = 0; y < height; ++y) {
-      uint32_t dst_y = (uint32_t)(layout.height - 1 - (yoffset + y));
-      copy_texture_row(
-          dst_slice + dst_y * dst_row_bytes +
-              (uint32_t)xoffset * info->dst_bytes_per_texel,
-          src_slice + (size_t)y * src_row_bytes, (uint32_t)width, info);
+      uint32_t dst_y = (uint32_t)(yoffset + y);
+      if (!copy_texture_row(
+              dst_slice + dst_y * dst_row_bytes +
+                  (uint32_t)xoffset * info->dst_bytes_per_texel,
+              src_slice + (size_t)y * src_row_bytes,
+              (uint32_t)width, info)) {
+        return false;
+      }
     }
   }
 
@@ -4085,8 +4247,6 @@ static bool upload_compressed_texture_region(
   src_row_bytes = src_blocks_w * info->block_bytes;
   dst_row_bytes = layout.pitch * info->block_bytes;
 
-  /* S3TC is a byte-defined little-endian block stream. Keep the block bytes
-   * intact on the big-endian CPU; GX2 consumes the same stream directly. */
   for (uint32_t row = 0; row < src_blocks_h; ++row) {
     uint8_t *dst = dst_level + (uint32_t)slice * layout.slice_size +
                    ((uint32_t)yoffset / 4u + row) * dst_row_bytes +
@@ -4302,6 +4462,8 @@ static GLuint get_bound_tex(GLenum target) {
     return g_gl_context->bound_texture_2d[unit];
   case GL_TEXTURE_3D:
     return g_gl_context->bound_texture_3d[unit];
+  case GL_TEXTURE_RECTANGLE:
+    return g_gl_context->bound_texture_rectangle[unit];
   case GL_TEXTURE_CUBE_MAP:
     return g_gl_context->bound_texture_cube[unit];
   case GL_TEXTURE_1D_ARRAY:
@@ -4312,6 +4474,8 @@ static GLuint get_bound_tex(GLenum target) {
     return g_gl_context->bound_texture_2d_multisample[unit];
   case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
     return g_gl_context->bound_texture_2d_multisample_array[unit];
+  case GL_TEXTURE_BUFFER:
+    return g_gl_context->bound_texture_buffer_texture[unit];
   default:
     return 0;
   }
@@ -4347,6 +4511,9 @@ static void set_bound_tex(GLenum target, GLuint texture) {
   case GL_TEXTURE_3D:
     g_gl_context->bound_texture_3d[unit] = texture;
     break;
+  case GL_TEXTURE_RECTANGLE:
+    g_gl_context->bound_texture_rectangle[unit] = texture;
+    break;
   case GL_TEXTURE_CUBE_MAP:
     g_gl_context->bound_texture_cube[unit] = texture;
     break;
@@ -4361,6 +4528,9 @@ static void set_bound_tex(GLenum target, GLuint texture) {
     break;
   case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
     g_gl_context->bound_texture_2d_multisample_array[unit] = texture;
+    break;
+  case GL_TEXTURE_BUFFER:
+    g_gl_context->bound_texture_buffer_texture[unit] = texture;
     break;
   default:
     break;
@@ -4412,6 +4582,7 @@ static bool is_copy_color_format_supported(GLint internalformat,
   case 3:
   case GL_RGB:
   case GL_RGB8:
+  case GL_R3_G3_B2:
   case 4:
   case GL_RGBA:
   case GL_RGBA8:
@@ -4423,13 +4594,34 @@ static bool is_copy_color_format_supported(GLint internalformat,
 
 static GLenum texture_component_type(GLint internalformat) {
   switch (internalformat) {
-  case GL_RGBA16F:
-  case GL_RGBA32F:
-  case GL_DEPTH_COMPONENT:
+  case GL_R8_SNORM:
+  case GL_RG8_SNORM:
+  case GL_COMPRESSED_SIGNED_RED_RGTC1:
+  case GL_COMPRESSED_SIGNED_RG_RGTC2:
+  case GL_RGB8_SNORM:
+  case GL_RGBA8_SNORM:
+  case GL_R16_SNORM:
+  case GL_RG16_SNORM:
+  case GL_RGB16_SNORM:
+  case GL_RGBA16_SNORM:
+    return GL_SIGNED_NORMALIZED;
+  case GL_R8I: case GL_RG8I: case GL_RGB8I: case GL_RGBA8I:
+  case GL_R16I: case GL_RG16I: case GL_RGB16I: case GL_RGBA16I:
+  case GL_R32I: case GL_RG32I: case GL_RGB32I: case GL_RGBA32I:
+    return GL_INT;
+  case GL_R8UI: case GL_RG8UI: case GL_RGB8UI: case GL_RGBA8UI:
+  case GL_R16UI: case GL_RG16UI: case GL_RGB16UI: case GL_RGBA16UI:
+  case GL_R32UI: case GL_RG32UI: case GL_RGB32UI: case GL_RGBA32UI:
+  case GL_RGB10_A2UI:
+    return GL_UNSIGNED_INT;
+  case GL_R16F: case GL_RG16F: case GL_RGB16F: case GL_RGBA16F:
+  case GL_R32F: case GL_RG32F: case GL_RGB32F: case GL_RGBA32F:
+  case GL_R11F_G11F_B10F: case GL_RGB9_E5:
   case GL_DEPTH_COMPONENT32F:
     return GL_FLOAT;
   case GL_DEPTH_STENCIL:
   case GL_DEPTH24_STENCIL8:
+  case GL_DEPTH32F_STENCIL8:
     return GL_UNSIGNED_INT;
   default:
     return GL_UNSIGNED_NORMALIZED;
@@ -4453,12 +4645,14 @@ static void texture_component_sizes(GLint internalformat, GLint *red,
     break;
   case 1:
   case GL_RED:
-  case GL_R8:
+  case GL_R8: case GL_R8_SNORM: case GL_R8I: case GL_R8UI:
+  case GL_COMPRESSED_RED_RGTC1: case GL_COMPRESSED_SIGNED_RED_RGTC1:
     *red = 8;
     break;
   case 2:
   case GL_RG:
-  case GL_RG8:
+  case GL_RG8: case GL_RG8_SNORM: case GL_RG8I: case GL_RG8UI:
+  case GL_COMPRESSED_RG_RGTC2: case GL_COMPRESSED_SIGNED_RG_RGTC2:
     *red = *green = 8;
     break;
   case 3:
