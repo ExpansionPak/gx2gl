@@ -19,16 +19,7 @@ void glTexImage3DMultisample(GLenum target, GLsizei samples,
 }
 
 void glTexBuffer(GLenum target, GLenum internalformat, GLuint buffer) {
-  (void)internalformat;
-  if (target != GL_TEXTURE_BUFFER) {
-    _gl_set_error(GL_INVALID_ENUM);
-    return;
-  }
-  if (buffer != 0 && !_gl_IsBuffer(buffer)) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return;
-  }
-  _gl_set_error(GL_INVALID_OPERATION);
+  _gl_TexBuffer(target, internalformat, buffer);
 }
 
 void glGetCompressedTexImage(GLenum target, GLint level, GLvoid *img) {
