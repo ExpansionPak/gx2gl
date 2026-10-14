@@ -4448,7 +4448,6 @@ GLboolean gl_read_color_pixels_rgba8(GLint x, GLint y, GLsizei width, GLsizei he
     uint8_t *dst;
     GLint internal_format;
     bool staged_surface = false;
-    bool texture_attachment_read = false;
     GLuint read_fbo;
     uint32_t texture_attachment_index = 0;
 
@@ -4472,7 +4471,6 @@ GLboolean gl_read_color_pixels_rgba8(GLint x, GLint y, GLsizei width, GLsizei he
                                                              &texture->surface,
                                                              &texture_read_surface)) {
             surface = &texture_read_surface;
-            texture_attachment_read = true;
         }
     }
     internal_format = get_read_color_internal_format();
@@ -4493,9 +4491,7 @@ GLboolean gl_read_color_pixels_rgba8(GLint x, GLint y, GLsizei width, GLsizei he
 
     for (GLsizei row = 0; row < height; ++row) {
         GLint gl_y = y + row;
-        GLint src_y = texture_attachment_read
-                          ? (GLint)read_surface->height - 1 - gl_y
-                          : gl_y;
+        GLint src_y = (GLint)read_surface->height - 1 - gl_y;
         if (src_y < 0 || src_y >= (GLint)read_surface->height) continue;
 
         for (GLsizei col = 0; col < width; ++col) {
@@ -4544,17 +4540,36 @@ GLboolean gl_read_color_pixels_rgba8(GLint x, GLint y, GLsizei width, GLsizei he
                 }
                 break;
             }
+            case GX2_SURFACE_FORMAT_UNORM_R16: {
+                const uint8_t *Source = (const uint8_t *)read_surface->image +
+                    ((size_t)src_y * (size_t)read_surface->pitch + (size_t)src_x) * 2u;
+                dst_texel[0] = (uint8_t)(((uint32_t)read_gpu_u16(Source) * 255u +
+                                          32767u) / 65535u);
+                dst_texel[1] = 0;
+                dst_texel[2] = 0;
+                dst_texel[3] = 0xFF;
+                break;
+            }
+            case GX2_SURFACE_FORMAT_UNORM_R16_G16: {
+                const uint8_t *Source = (const uint8_t *)read_surface->image +
+                    ((size_t)src_y * (size_t)read_surface->pitch + (size_t)src_x) * 4u;
+                dst_texel[0] = (uint8_t)(((uint32_t)read_gpu_u16(Source) * 255u +
+                                          32767u) / 65535u);
+                dst_texel[1] = (uint8_t)(((uint32_t)read_gpu_u16(Source + 2) * 255u +
+                                          32767u) / 65535u);
+                dst_texel[2] = 0;
+                dst_texel[3] = 0xFF;
+                break;
+            }
+            case GX2_SURFACE_FORMAT_SRGB_R8_G8_B8_A8:
             case GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8: {
                 const uint8_t *src_texel =
                     (const uint8_t *)read_surface->image +
                     (((size_t)src_y * (size_t)read_surface->pitch) + (size_t)src_x) * 4u;
-                uint32_t pixel;
-                memcpy(&pixel, src_texel, sizeof(pixel));
-                pixel = GPU_TO_CPU_32(pixel);
-                dst_texel[0] = (uint8_t)((pixel >> 24) & 0xFFu);
-                dst_texel[1] = (uint8_t)((pixel >> 16) & 0xFFu);
-                dst_texel[2] = (uint8_t)((pixel >> 8) & 0xFFu);
-                dst_texel[3] = (uint8_t)(pixel & 0xFFu);
+                dst_texel[0] = src_texel[0];
+                dst_texel[1] = src_texel[1];
+                dst_texel[2] = src_texel[2];
+                dst_texel[3] = src_texel[3];
                 break;
             }
             case GX2_SURFACE_FORMAT_FLOAT_R16_G16_B16_A16: {
