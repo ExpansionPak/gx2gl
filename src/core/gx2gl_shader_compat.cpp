@@ -472,18 +472,20 @@ static bool reserve_interface_locations(bool used_locations[], int location,
 }
 
 static int assign_interface_location(bool used_locations[],
-                                     const std::string &name, int span) {
+                                     const std::string &name, int span,
+                                     int max_locations) {
   uint32_t start;
 
-  if (span <= 0 || span > kMaxShaderInterfaceLocations) {
+  if (max_locations <= 0 || max_locations > kMaxShaderInterfaceLocations ||
+      span <= 0 || span > max_locations) {
     return -1;
   }
 
-  start = stable_name_hash(name) % kMaxShaderInterfaceLocations;
-  for (int probe = 0; probe < kMaxShaderInterfaceLocations; ++probe) {
-    int location = (int)((start + (uint32_t)probe) %
-                         kMaxShaderInterfaceLocations);
-    if (location > kMaxShaderInterfaceLocations - span) {
+  start = stable_name_hash(name) % (uint32_t)max_locations;
+  for (int probe = 0; probe < max_locations; ++probe) {
+    int location =
+        (int)((start + (uint32_t)probe) % (uint32_t)max_locations);
+    if (location > max_locations - span) {
       continue;
     }
     bool free_range = true;
@@ -628,6 +630,7 @@ static std::string add_extension_after_version(const std::string &source,
   std::string directive = std::string("#extension ") + extension +
                           " : enable";
   size_t line_start = 0;
+  size_t source_line_number = 1;
 
   if (source.find(directive) != std::string::npos) {
     return source;
@@ -646,13 +649,15 @@ static std::string add_extension_after_version(const std::string &source,
       size_t insert_at = line_end == std::string::npos
                              ? source.size()
                              : line_end + 1u;
-      return source.substr(0, insert_at) + directive + "\n" +
+      return source.substr(0, insert_at) + directive + "\n#line " +
+             std::to_string(source_line_number + 1u) + "\n" +
              source.substr(insert_at);
     }
     if (line_end == std::string::npos) {
       break;
     }
     line_start = line_end + 1u;
+    ++source_line_number;
   }
 
   return directive + "\n" + source;
@@ -675,6 +680,23 @@ static std::string add_cafeglsl_layout_extensions(
   return result;
 }
 
+static std::vector<std::string> SplitShaderStatements(const std::string &Line) {
+  std::vector<std::string> Segments;
+  const size_t First = skip_whitespace(Line, 0);
+  if (First < Line.size() && Line[First] == '#') return {Line};
+  size_t CodeEnd = Line.find("//");
+  if (CodeEnd == std::string::npos) CodeEnd = Line.size();
+  size_t Start = 0;
+  for (size_t Index = 0; Index < CodeEnd; ++Index) {
+    if (Line[Index] != ';') continue;
+    Segments.push_back(Line.substr(Start, Index + 1u - Start));
+    Start = Index + 1u;
+  }
+  if (Start < Line.size()) Segments.push_back(Line.substr(Start));
+  if (Segments.empty()) Segments.push_back(Line);
+  return Segments;
+}
+
 static bool collect_interface_declarations(
     const char *source, GLenum shader_type, const char *storage,
     std::vector<CollectedInterfaceDecl> *decls, char *info_log_out,
@@ -692,44 +714,46 @@ static bool collect_interface_declarations(
     const char *line_end = strchr(line_start, '\n');
     size_t line_length = line_end ? (size_t)(line_end - line_start)
                                   : strlen(line_start);
-    std::string line = strip_line_comment(std::string(line_start, line_length));
-    size_t first = skip_whitespace(line, 0);
-    InterfaceDecl decl;
+    std::string SourceLine = strip_line_comment(std::string(line_start, line_length));
+    for (const std::string &line : SplitShaderStatements(SourceLine)) {
+      size_t first = skip_whitespace(line, 0);
+      InterfaceDecl decl;
 
-    if (first < line.size() && line[first] != '#' &&
-        parse_interface_declaration(line, &decl) &&
-        decl.storage == storage && !is_builtin_name(decl.name)) {
-      int span = shader_type_location_span(decl.type);
-      CollectedInterfaceDecl collected;
+      if (first < line.size() && line[first] != '#' &&
+          parse_interface_declaration(line, &decl) &&
+          decl.storage == storage && !is_builtin_name(decl.name)) {
+        int span = shader_type_location_span(decl.type);
+        CollectedInterfaceDecl collected;
 
-      if (span <= 0) {
-        char message[256];
-        snprintf(message, sizeof(message),
-                 "Unsupported %s shader interface type '%s' for '%s' at line %u.",
-                 shader_stage_name(shader_type), decl.type.c_str(),
-                 decl.name.c_str(), line_number);
-        write_info_log(info_log_out, info_log_max_length, message);
-        return false;
+        if (span <= 0) {
+          char message[256];
+          snprintf(message, sizeof(message),
+                   "Unsupported %s shader interface type '%s' for '%s' at line %u.",
+                   shader_stage_name(shader_type), decl.type.c_str(),
+                   decl.name.c_str(), line_number);
+          write_info_log(info_log_out, info_log_max_length, message);
+          return false;
+        }
+        if (decl.layout.has_location &&
+            (decl.layout.location < 0 ||
+             decl.array_size > kMaxShaderInterfaceLocations / span ||
+             decl.layout.location >
+                 kMaxShaderInterfaceLocations - (span * decl.array_size))) {
+          char message[256];
+          snprintf(message, sizeof(message),
+                   "%s shader %s '%s' exceeds the supported interface location "
+                   "range at line %u.",
+                   shader_stage_name(shader_type), decl.storage.c_str(),
+                   decl.name.c_str(), line_number);
+          write_info_log(info_log_out, info_log_max_length, message);
+          return false;
+        }
+
+        collected.decl = decl;
+        collected.line_number = line_number;
+        collected.location_span = span * decl.array_size;
+        decls->push_back(collected);
       }
-      if (decl.layout.has_location &&
-          (decl.layout.location < 0 ||
-           decl.array_size > kMaxShaderInterfaceLocations / span ||
-           decl.layout.location >
-               kMaxShaderInterfaceLocations - (span * decl.array_size))) {
-        char message[256];
-        snprintf(message, sizeof(message),
-                 "%s shader %s '%s' exceeds the supported interface location "
-                 "range at line %u.",
-                 shader_stage_name(shader_type), decl.storage.c_str(),
-                 decl.name.c_str(), line_number);
-        write_info_log(info_log_out, info_log_max_length, message);
-        return false;
-      }
-
-      collected.decl = decl;
-      collected.line_number = line_number;
-      collected.location_span = span * decl.array_size;
-      decls->push_back(collected);
     }
 
     if (!line_end) {
@@ -870,7 +894,6 @@ static std::string normalize_fragment_output_channels(
   indent = leading_whitespace(source.substr(line_start,
                                              closing_brace - line_start));
 
-  // CafeGLSL emits runtime pixel-export lanes in wzyx order.
   for (size_t i = 0; i < outputs.size(); ++i) {
     assignments += indent + "    " + outputs[i] + " = " + outputs[i] +
                    ".wzyx;\n";
@@ -878,6 +901,316 @@ static std::string normalize_fragment_output_channels(
 
   return source.substr(0, closing_brace) + assignments +
          source.substr(closing_brace);
+}
+
+static std::string lower_fragment_coordinates(const std::string &source) {
+  if (source.find("gl_FragCoord") == std::string::npos ||
+      source.find("origin_upper_left") != std::string::npos) {
+    return source;
+  }
+
+  size_t insertion = 0;
+  bool inside_comment = false;
+  while (insertion < source.size()) {
+    size_t end = source.find('\n', insertion);
+    size_t limit = end == std::string::npos ? source.size() : end;
+    size_t first = skip_whitespace(source, insertion);
+    if (first < limit) {
+      if (inside_comment) {
+        if (source.find("*/", first) < limit) inside_comment = false;
+      } else if (source.compare(first, 2, "/*") == 0) {
+        inside_comment = source.find("*/", first + 2) >= limit;
+      } else if (source[first] != '#' &&
+                 source.compare(first, 2, "//") != 0) {
+        break;
+      }
+    }
+    insertion = end == std::string::npos ? source.size() : end + 1;
+  }
+
+  return source.substr(0, insertion) +
+         "uniform vec4 _gx2gl_frag_coord_height;\n"
+         "vec4 _gx2gl_fragment_coord() {\n"
+         "  vec4 coordinate = gl_FragCoord;\n"
+         "  coordinate.y = _gx2gl_frag_coord_height.x - coordinate.y;\n"
+         "  return coordinate;\n"
+         "}\n"
+         "#define gl_FragCoord _gx2gl_fragment_coord()\n" +
+         source.substr(insertion);
+}
+
+static std::string TrimConstructorText(const std::string &Text) {
+  size_t First = Text.find_first_not_of(" \t\n\r");
+  if (First == std::string::npos) return "";
+  size_t Last = Text.find_last_not_of(" \t\n\r");
+  return Text.substr(First, Last - First + 1);
+}
+
+static bool SplitConstructorArguments(const std::string &Source, size_t Open,
+                                      size_t *Close,
+                                      std::vector<std::string> *Arguments) {
+  if (Open >= Source.size() || Source[Open] != '(') return false;
+  int Depth = 1;
+  size_t Start = Open + 1;
+  for (size_t i = Start; i < Source.size(); ++i) {
+    if (Source[i] == '(') ++Depth;
+    else if (Source[i] == ')') {
+      if (--Depth == 0) {
+        Arguments->push_back(TrimConstructorText(Source.substr(Start, i - Start)));
+        *Close = i;
+        return true;
+      }
+    } else if (Source[i] == ',' && Depth == 1) {
+      Arguments->push_back(TrimConstructorText(Source.substr(Start, i - Start)));
+      Start = i + 1;
+    }
+  }
+  return false;
+}
+
+static bool IsConstantScalar(const std::string &Text) {
+  if (Text == "true" || Text == "false") return true;
+  if (Text.empty()) return false;
+  char *End = NULL;
+  std::strtod(Text.c_str(), &End);
+  return End != Text.c_str() && *End == '\0';
+}
+
+static bool ExpandConstantMatrix(const std::string &Argument,
+                                 std::vector<std::string> *Scalars) {
+  const std::string Text = TrimConstructorText(Argument);
+  if (Text.size() < 6 || Text.compare(0, 3, "mat") != 0 ||
+      Text[3] < '2' || Text[3] > '4') return false;
+  const unsigned Columns = (unsigned)(Text[3] - '0');
+  unsigned Rows = Columns;
+  size_t Open = 4;
+  if (Text.size() > 6 && Text[4] == 'x' && Text[5] >= '2' && Text[5] <= '4') {
+    Rows = (unsigned)(Text[5] - '0');
+    Open = 6;
+  }
+  if (Open >= Text.size() || Text[Open] != '(') return false;
+  size_t Close = 0;
+  std::vector<std::string> Values;
+  if (!SplitConstructorArguments(Text, Open, &Close, &Values) ||
+      Close != Text.size() - 1) return false;
+  for (const std::string &Value : Values) {
+    if (!IsConstantScalar(Value)) return false;
+  }
+  if (Values.size() == (size_t)Columns * Rows) {
+    *Scalars = Values;
+    return true;
+  }
+  if (Values.size() == 1) {
+    Scalars->clear();
+    for (unsigned Column = 0; Column < Columns; ++Column) {
+      for (unsigned Row = 0; Row < Rows; ++Row) {
+        Scalars->push_back(Column == Row ? Values[0] : "0.0");
+      }
+    }
+    return true;
+  }
+  return false;
+}
+
+static std::string LowerConstantMatrixVectorConstructors(
+    const std::string &Source, bool *InvalidConstructor) {
+  const char *Types[] = {"vec2", "vec3", "vec4", "ivec2", "ivec3",
+                         "ivec4", "bvec2", "bvec3", "bvec4"};
+  std::string Result;
+  size_t Cursor = 0;
+  bool LineComment = false;
+  bool BlockComment = false;
+  while (Cursor < Source.size()) {
+    if (LineComment) {
+      if (Source[Cursor] == '\n') LineComment = false;
+      Result += Source[Cursor++];
+      continue;
+    }
+    if (BlockComment) {
+      if (Source.compare(Cursor, 2, "*/") == 0) {
+        Result += "*/";
+        Cursor += 2;
+        BlockComment = false;
+      } else Result += Source[Cursor++];
+      continue;
+    }
+    if (Source.compare(Cursor, 2, "//") == 0) {
+      Result += "//";
+      Cursor += 2;
+      LineComment = true;
+      continue;
+    }
+    if (Source.compare(Cursor, 2, "/*") == 0) {
+      Result += "/*";
+      Cursor += 2;
+      BlockComment = true;
+      continue;
+    }
+    const char *Type = NULL;
+    size_t TypeLength = 0;
+    size_t Open = Cursor;
+    if (Cursor == 0 || !is_identifier_char(Source[Cursor - 1])) {
+      for (const char *Candidate : Types) {
+        const size_t Length = strlen(Candidate);
+        if (Source.compare(Cursor, Length, Candidate) != 0) continue;
+        size_t Next = skip_whitespace(Source, Cursor + Length);
+        if (Next < Source.size() && Source[Next] == '(') {
+          Type = Candidate;
+          TypeLength = Length;
+          Open = Next;
+          break;
+        }
+      }
+    }
+    if (!Type) {
+      Result += Source[Cursor++];
+      continue;
+    }
+    size_t Close = 0;
+    std::vector<std::string> Arguments;
+    if (!SplitConstructorArguments(Source, Open, &Close, &Arguments)) {
+      Result += Source[Cursor++];
+      continue;
+    }
+    const size_t Need = (size_t)(Type[TypeLength - 1] - '0');
+    std::vector<std::string> Scalars;
+    bool HasMatrix = false;
+    bool Valid = true;
+    for (size_t i = 0; i < Arguments.size(); ++i) {
+      std::vector<std::string> Components;
+      if (ExpandConstantMatrix(Arguments[i], &Components)) HasMatrix = true;
+      else if (IsConstantScalar(Arguments[i])) Components.push_back(Arguments[i]);
+      else { Valid = false; break; }
+      if (Scalars.size() + Components.size() >= Need && i + 1 < Arguments.size()) {
+        *InvalidConstructor = true;
+        Valid = false;
+        break;
+      }
+      Scalars.insert(Scalars.end(), Components.begin(), Components.end());
+    }
+    std::vector<std::string> LastMatrix;
+    if (!Valid || !HasMatrix || Scalars.size() < Need ||
+        (Scalars.size() > Need &&
+         !ExpandConstantMatrix(Arguments.back(), &LastMatrix))) {
+      Result += Source[Cursor++];
+      continue;
+    }
+    Result += Type;
+    Result += "(";
+    for (size_t i = 0; i < Need; ++i) {
+      if (i) Result += ", ";
+      if (Type[0] == 'b') {
+        const std::string &Scalar = Scalars[i];
+        Result += Scalar == "true" || Scalar == "false"
+                      ? Scalar
+                      : (std::strtod(Scalar.c_str(), NULL) != 0.0 ? "true" : "false");
+      } else {
+        Result += Scalars[i];
+      }
+    }
+    Result += ")";
+    Cursor = Close + 1;
+  }
+  return Result;
+}
+
+static size_t SkipShaderWhitespace(const std::string &Source, size_t Index) {
+  while (Index < Source.size() &&
+         (Source[Index] == ' ' || Source[Index] == '\t' ||
+          Source[Index] == '\r' || Source[Index] == '\n')) {
+    ++Index;
+  }
+  return Index;
+}
+
+static size_t FindShaderDelimiter(const std::string &Source, size_t Start,
+                                  char Open, char Close) {
+  if (Start >= Source.size() || Source[Start] != Open) return std::string::npos;
+  int Depth = 0;
+  for (size_t Index = Start; Index < Source.size(); ++Index) {
+    if (Source.compare(Index, 2, "//") == 0) {
+      size_t End = Source.find('\n', Index + 2);
+      if (End == std::string::npos) return std::string::npos;
+      Index = End;
+      continue;
+    }
+    if (Source.compare(Index, 2, "/*") == 0) {
+      size_t End = Source.find("*/", Index + 2);
+      if (End == std::string::npos) return std::string::npos;
+      Index = End + 1;
+      continue;
+    }
+    if (Source[Index] == Open) ++Depth;
+    if (Source[Index] == Close && --Depth == 0) return Index;
+  }
+  return std::string::npos;
+}
+
+static std::string LowerDoWhileContinue(const std::string &Source) {
+  std::string Result;
+  size_t Cursor = 0;
+  uint32_t Serial = 0;
+  while (Cursor < Source.size()) {
+    if (Source.compare(Cursor, 2, "//") == 0) {
+      size_t End = Source.find('\n', Cursor + 2);
+      if (End == std::string::npos) End = Source.size();
+      Result.append(Source, Cursor, End - Cursor);
+      Cursor = End;
+      continue;
+    }
+    if (Source.compare(Cursor, 2, "/*") == 0) {
+      size_t End = Source.find("*/", Cursor + 2);
+      if (End == std::string::npos) End = Source.size() - 2;
+      Result.append(Source, Cursor, End + 2 - Cursor);
+      Cursor = End + 2;
+      continue;
+    }
+    if (!starts_with_keyword(Source, Cursor, "do")) {
+      Result += Source[Cursor++];
+      continue;
+    }
+    size_t Body = SkipShaderWhitespace(Source, Cursor + 2);
+    if (Body >= Source.size() || Source[Body] != '{') {
+      Result += Source[Cursor++];
+      continue;
+    }
+    size_t BodyEnd = FindShaderDelimiter(Source, Body, '{', '}');
+    if (BodyEnd == std::string::npos) {
+      Result += Source[Cursor++];
+      continue;
+    }
+    size_t While = SkipShaderWhitespace(Source, BodyEnd + 1);
+    if (!starts_with_keyword(Source, While, "while")) {
+      Result += Source[Cursor++];
+      continue;
+    }
+    size_t Condition = SkipShaderWhitespace(Source, While + 5);
+    size_t ConditionEnd = FindShaderDelimiter(Source, Condition, '(', ')');
+    if (ConditionEnd == std::string::npos ||
+        SkipShaderWhitespace(Source, ConditionEnd + 1) >= Source.size() ||
+        Source[SkipShaderWhitespace(Source, ConditionEnd + 1)] != ';') {
+      Result += Source[Cursor++];
+      continue;
+    }
+    bool HasContinue = false;
+    for (size_t Index = Body; Index <= BodyEnd; ++Index) {
+      if (starts_with_keyword(Source, Index, "continue")) {
+        HasContinue = true;
+        break;
+      }
+    }
+    if (!HasContinue) {
+      Result += Source[Cursor++];
+      continue;
+    }
+    std::string First = "gx2glDoWhileFirst_" + std::to_string(Serial++);
+    Result += "for (bool " + First + " = true; " + First + " || (" +
+              Source.substr(Condition + 1, ConditionEnd - Condition - 1) +
+              "); " + First + " = false) ";
+    Result.append(Source, Body, BodyEnd + 1 - Body);
+    Cursor = SkipShaderWhitespace(Source, ConditionEnd + 1) + 1;
+  }
+  return Result;
 }
 
 static char *lower_source_for_cafeglsl(const char *source,
