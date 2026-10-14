@@ -3089,6 +3089,9 @@ static void read_color_texel(const GX2Surface *surface, GLint internal_format,
         value[3] = (float)(word & 255u) / 255.0f;
         break;
     }
+    case GX2_SURFACE_FORMAT_FLOAT_R32:
+        value[0] = decode_gpu_float32(texel);
+        break;
     case GX2_SURFACE_FORMAT_FLOAT_R16_G16_B16_A16:
         value[0] = decode_gpu_half_float(texel + 0);
         value[1] = decode_gpu_half_float(texel + 2);
@@ -3154,6 +3157,9 @@ static void write_color_texel(GX2Surface *surface, GLint internal_format,
         memcpy(texel, &word, sizeof(word));
         break;
     }
+    case GX2_SURFACE_FORMAT_FLOAT_R32:
+        encode_gpu_float32(texel, value[0]);
+        break;
     case GX2_SURFACE_FORMAT_FLOAT_R16_G16_B16_A16:
         encode_gpu_half_float(texel + 0, value[0]);
         encode_gpu_half_float(texel + 2, value[1]);
@@ -3641,12 +3647,8 @@ void _gl_DrawBuffers(GLsizei n, const GLenum *bufs) {
         return;
     }
     for (GLsizei i = 0; i < n; ++i) {
-        if (is_default_framebuffer_color_name(bufs[i])) {
-            _gl_set_error(GL_INVALID_ENUM);
-            return;
-        }
         if (fbo == 0) {
-            if (bufs[i] != GL_NONE) {
+            if (bufs[i] != GL_NONE && bufs[i] != GL_BACK) {
                 _gl_set_error(is_color_attachment_name(bufs[i], NULL)
                                   ? GL_INVALID_OPERATION
                                   : GL_INVALID_ENUM);
@@ -3709,7 +3711,15 @@ GLenum _gl_CheckFramebufferStatus(GLenum target) {
         has_att = true;
         if (!get_attachment_image_info(&fb->color_attachments[i], &info) ||
             info.width <= 0 || info.height <= 0 ||
-            info.depth_renderable || info.stencil_renderable) {
+            info.depth_renderable || info.stencil_renderable ||
+            info.internal_format == GL_COMPRESSED_RED_RGTC1 ||
+            info.internal_format == GL_COMPRESSED_SIGNED_RED_RGTC1 ||
+            info.internal_format == GL_COMPRESSED_RG_RGTC2 ||
+            info.internal_format == GL_COMPRESSED_SIGNED_RG_RGTC2 ||
+            info.internal_format == GL_COMPRESSED_RGB_S3TC_DXT1_EXT ||
+            info.internal_format == GL_COMPRESSED_RGBA_S3TC_DXT1_EXT ||
+            info.internal_format == GL_COMPRESSED_RGBA_S3TC_DXT3_EXT ||
+            info.internal_format == GL_COMPRESSED_RGBA_S3TC_DXT5_EXT) {
             return GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
         }
         if (!expected_samples_set) {
@@ -3887,6 +3897,7 @@ void _gl_GetFramebufferAttachmentParameteriv(GLenum target, GLenum attachment, G
         *params = attachment_component_bits(info.internal_format, pname);
         break;
     case GL_FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE:
+        if (attachment == GL_DEPTH_STENCIL_ATTACHMENT) { _gl_set_error(GL_INVALID_OPERATION); return; }
         if (!attachment_ref_present(ref)) { _gl_set_error(GL_INVALID_OPERATION); return; }
         if (!get_attachment_image_info(ref, &info)) { _gl_set_error(GL_INVALID_OPERATION); return; }
         *params = attachment_component_type(info.internal_format);
@@ -4041,6 +4052,24 @@ GLsizei gl_get_draw_sample_count(void) {
     return framebuffer_sample_count(g_gl_context->bound_framebuffer);
 }
 
+GLenum gl_get_draw_buffer(GLuint index) {
+    GLuint fbo;
+
+    if (!g_gl_context || index >= 8) return GL_NONE;
+    fbo = g_gl_context->bound_framebuffer;
+    if (fbo >= MAX_FRAMEBUFFERS || !g_framebuffers[fbo].in_use) return GL_NONE;
+    return g_framebuffers[fbo].draw_buffers[index];
+}
+
+GLenum gl_get_read_buffer(void) {
+    GLuint fbo;
+
+    if (!g_gl_context) return GL_NONE;
+    fbo = g_gl_context->bound_read_framebuffer;
+    if (fbo >= MAX_FRAMEBUFFERS || !g_framebuffers[fbo].in_use) return GL_NONE;
+    return g_framebuffers[fbo].read_buffer;
+}
+
 void gl_framebuffer_mark_bound_color_dirty(void) {
     GLuint fbo;
     GLFramebuffer *fb;
@@ -4135,6 +4164,279 @@ void gl_framebuffer_mark_texture_dirty(GLuint texture) {
             g_framebuffers[i].stencil_attachment.object == texture) fb_dirty = true;
         if (fb_dirty) g_framebuffers[i].dirty = true;
     }
+}
+
+static uint16_t read_gpu_u16(const uint8_t *ptr) {
+    uint16_t value;
+    memcpy(&value, ptr, sizeof(value));
+    return GPU_TO_CPU_16(value);
+}
+
+static uint32_t read_gpu_u32(const uint8_t *ptr) {
+    uint32_t value;
+    memcpy(&value, ptr, sizeof(value));
+    return GPU_TO_CPU_32(value);
+}
+
+GLboolean gl_read_color_pixels_red32(GLint x, GLint y,
+                                            GLsizei width, GLsizei height,
+                                            GLenum type, void *pixels) {
+    GX2ColorBuffer *cb;
+    GX2Surface *surface;
+    GX2Surface staging_surface;
+    GX2Surface texture_read_surface;
+    GX2Surface *read_surface;
+    uint8_t *dst = (uint8_t *)pixels;
+    GLint internal_format;
+    bool staged_surface = false;
+    GLuint read_fbo;
+    uint32_t texture_attachment_index = 0;
+
+    if (!g_gl_context || !pixels || width < 0 || height < 0) return GL_FALSE;
+    if (width == 0 || height == 0) return GL_TRUE;
+
+    cb = get_read_color_buffer();
+    if (!cb || !cb->surface.image) return GL_FALSE;
+
+    surface = &cb->surface;
+    memset(&texture_read_surface, 0, sizeof(texture_read_surface));
+    read_fbo = g_gl_context->bound_read_framebuffer;
+    if (read_fbo > 0 && read_fbo < MAX_FRAMEBUFFERS &&
+        get_color_attachment_index(g_framebuffers[read_fbo].read_buffer,
+                                   &texture_attachment_index) &&
+        g_framebuffers[read_fbo].color_attachments[texture_attachment_index].kind ==
+            GL_ATTACHMENT_KIND_TEXTURE) {
+        GLAttachmentRef *attachment =
+            &g_framebuffers[read_fbo].color_attachments[texture_attachment_index];
+        GX2Texture *texture = gl_get_gx2_texture(attachment->object);
+        if (texture && build_texture_attachment_read_surface(
+                           attachment, &texture->surface,
+                           &texture_read_surface)) {
+            surface = &texture_read_surface;
+        }
+    }
+
+    internal_format = get_read_color_internal_format();
+    GX2DrawDone();
+    memset(&staging_surface, 0, sizeof(staging_surface));
+    if (stage_surface_for_cpu_access(surface, internal_format, false,
+                                     &staging_surface)) {
+        read_surface = &staging_surface;
+        staged_surface = true;
+    } else {
+        read_surface = surface;
+        invalidate_surface_after_color_write(read_surface);
+        DCInvalidateRange(read_surface->image, read_surface->imageSize);
+    }
+
+    for (GLsizei row = 0; row < height; ++row) {
+        GLint gl_y = y + row;
+        GLint src_y = (GLint)read_surface->height - 1 - gl_y;
+        if (src_y < 0 || src_y >= (GLint)read_surface->height) continue;
+
+        for (GLsizei col = 0; col < width; ++col) {
+            GLint src_x = x + col;
+            size_t pixel_index;
+            uint8_t *dst_texel;
+
+            if (src_x < 0 || src_x >= (GLint)read_surface->width) continue;
+            pixel_index =
+                (size_t)src_y * (size_t)read_surface->pitch + (size_t)src_x;
+            dst_texel = dst +
+                ((size_t)row * (size_t)width + (size_t)col) * 4u;
+
+            if (type == GL_FLOAT) {
+                float value;
+
+                switch (read_surface->format) {
+                case GX2_SURFACE_FORMAT_UNORM_R8:
+                    value = ((const uint8_t *)read_surface->image)[pixel_index] /
+                            255.0f;
+                    break;
+                case GX2_SURFACE_FORMAT_UNORM_R8_G8:
+                    value = ((const uint8_t *)read_surface->image)[pixel_index * 2u] /
+                            255.0f;
+                    break;
+                case GX2_SURFACE_FORMAT_SNORM_R8:
+                case GX2_SURFACE_FORMAT_SNORM_R8_G8: {
+                    int8_t raw =
+                        ((const int8_t *)read_surface->image)[pixel_index];
+                    value = raw == INT8_MIN ? -1.0f : (float)raw / 127.0f;
+                    if (value < 0.0f) value = 0.0f;
+                    break;
+                }
+                case GX2_SURFACE_FORMAT_UNORM_R16:
+                    value = (float)read_gpu_u16(
+                                (const uint8_t *)read_surface->image +
+                                pixel_index * 2u) /
+                            65535.0f;
+                    break;
+                case GX2_SURFACE_FORMAT_UNORM_R16_G16:
+                    value = (float)read_gpu_u16(
+                                (const uint8_t *)read_surface->image +
+                                pixel_index * 4u) /
+                            65535.0f;
+                    break;
+                case GX2_SURFACE_FORMAT_SNORM_R16:
+                case GX2_SURFACE_FORMAT_SNORM_R16_G16: {
+                    int16_t raw = (int16_t)read_gpu_u16(
+                        (const uint8_t *)read_surface->image +
+                        pixel_index * 2u);
+                    value = raw == INT16_MIN ? -1.0f : (float)raw / 32767.0f;
+                    if (value < 0.0f) value = 0.0f;
+                    break;
+                }
+                case GX2_SURFACE_FORMAT_FLOAT_R16:
+                    value = decode_gpu_half_float(
+                        (const uint8_t *)read_surface->image +
+                        pixel_index * 2u);
+                    break;
+                case GX2_SURFACE_FORMAT_FLOAT_R32:
+                    value = decode_gpu_float32(
+                        (const uint8_t *)read_surface->image +
+                        pixel_index * 4u);
+                    break;
+                case GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8:
+                    value = ((const uint8_t *)read_surface->image)
+                                [pixel_index * 4u] /
+                            255.0f;
+                    break;
+                default:
+                    if (staged_surface) free_surface_storage(&staging_surface);
+                    return GL_FALSE;
+                }
+
+                memcpy(dst_texel, &value, sizeof(value));
+            } else if (type == GL_INT) {
+                int32_t value;
+
+                switch (read_surface->format) {
+                case GX2_SURFACE_FORMAT_SINT_R8:
+                    value = ((const int8_t *)read_surface->image)[pixel_index];
+                    break;
+                case GX2_SURFACE_FORMAT_SINT_R16:
+                    value = (int16_t)read_gpu_u16(
+                        (const uint8_t *)read_surface->image +
+                        pixel_index * 2u);
+                    break;
+                case GX2_SURFACE_FORMAT_SINT_R32:
+                    value = (int32_t)read_gpu_u32(
+                        (const uint8_t *)read_surface->image +
+                        pixel_index * 4u);
+                    break;
+                default:
+                    if (staged_surface) free_surface_storage(&staging_surface);
+                    return GL_FALSE;
+                }
+
+                memcpy(dst_texel, &value, sizeof(value));
+            } else {
+                uint32_t value;
+
+                switch (read_surface->format) {
+                case GX2_SURFACE_FORMAT_UINT_R8:
+                    value = ((const uint8_t *)read_surface->image)[pixel_index];
+                    break;
+                case GX2_SURFACE_FORMAT_UINT_R16:
+                    value = read_gpu_u16(
+                        (const uint8_t *)read_surface->image +
+                        pixel_index * 2u);
+                    break;
+                case GX2_SURFACE_FORMAT_UINT_R32:
+                    value = read_gpu_u32(
+                        (const uint8_t *)read_surface->image +
+                        pixel_index * 4u);
+                    break;
+                default:
+                    if (staged_surface) free_surface_storage(&staging_surface);
+                    return GL_FALSE;
+                }
+
+                memcpy(dst_texel, &value, sizeof(value));
+            }
+        }
+    }
+
+    if (staged_surface) free_surface_storage(&staging_surface);
+    return GL_TRUE;
+}
+
+static GLboolean ReadNormalizedColor16(GLint x, GLint y, GLsizei width,
+                                        GLsizei height, void *pixels) {
+    if (!g_gl_context || !pixels || width < 0 || height < 0) return GL_FALSE;
+    if (width == 0 || height == 0) return GL_TRUE;
+
+    GX2ColorBuffer *ColorBuffer = get_read_color_buffer();
+    if (!ColorBuffer || !ColorBuffer->surface.image) return GL_FALSE;
+
+    GX2Surface *Surface = &ColorBuffer->surface;
+    GX2Surface TextureSurface;
+    memset(&TextureSurface, 0, sizeof(TextureSurface));
+
+    GLuint Framebuffer = g_gl_context->bound_read_framebuffer;
+    uint32_t AttachmentIndex = 0;
+    if (Framebuffer > 0 && Framebuffer < MAX_FRAMEBUFFERS &&
+        get_color_attachment_index(g_framebuffers[Framebuffer].read_buffer,
+                                   &AttachmentIndex) &&
+        g_framebuffers[Framebuffer].color_attachments[AttachmentIndex].kind ==
+            GL_ATTACHMENT_KIND_TEXTURE) {
+        GLAttachmentRef *Attachment =
+            &g_framebuffers[Framebuffer].color_attachments[AttachmentIndex];
+        GX2Texture *Texture = gl_get_gx2_texture(Attachment->object);
+        if (Texture && build_texture_attachment_read_surface(
+                           Attachment, &Texture->surface, &TextureSurface)) {
+            Surface = &TextureSurface;
+        }
+    }
+
+    GX2DrawDone();
+    GX2Surface StagingSurface;
+    memset(&StagingSurface, 0, sizeof(StagingSurface));
+    bool Staged = stage_surface_for_cpu_access(
+        Surface, get_read_color_internal_format(), false, &StagingSurface);
+    GX2Surface *Source = Staged ? &StagingSurface : Surface;
+    if (!Staged) {
+        invalidate_surface_after_color_write(Source);
+        DCInvalidateRange(Source->image, Source->imageSize);
+    }
+
+    GLboolean Success = GL_TRUE;
+    if (Source->format != GX2_SURFACE_FORMAT_UNORM_R16 &&
+        Source->format != GX2_SURFACE_FORMAT_UNORM_R16_G16 &&
+        Source->format != GX2_SURFACE_FORMAT_UNORM_R16_G16_B16_A16) {
+        Success = GL_FALSE;
+    } else {
+        uint16_t *Destination = (uint16_t *)pixels;
+        for (GLsizei Row = 0; Row < height; ++Row) {
+            GLint SourceY = (GLint)Source->height - 1 - (y + Row);
+            for (GLsizei Column = 0; Column < width; ++Column) {
+                uint16_t *Pixel = Destination +
+                    ((size_t)Row * (size_t)width + (size_t)Column) * 4u;
+                Pixel[0] = Pixel[1] = Pixel[2] = 0;
+                Pixel[3] = UINT16_MAX;
+                GLint SourceX = x + Column;
+                if (SourceX < 0 || SourceY < 0 ||
+                    SourceX >= (GLint)Source->width ||
+                    SourceY >= (GLint)Source->height) continue;
+                size_t Index = (size_t)SourceY * (size_t)Source->pitch +
+                               (size_t)SourceX;
+                uint32_t Components =
+                    Source->format == GX2_SURFACE_FORMAT_UNORM_R16 ? 1u :
+                    Source->format == GX2_SURFACE_FORMAT_UNORM_R16_G16 ? 2u : 4u;
+                const uint8_t *Texel = (const uint8_t *)Source->image +
+                                       Index * Components * 2u;
+                for (uint32_t Component = 0; Component < Components; ++Component) {
+                    Pixel[Component] = read_gpu_u16(Texel + Component * 2u);
+                }
+                const GLint InternalFormat = get_read_color_internal_format();
+                if (InternalFormat == GL_RGB16 || InternalFormat == GL_RGB10 ||
+                    InternalFormat == GL_RGB12)
+                    Pixel[3] = UINT16_MAX;
+            }
+        }
+    }
+    if (Staged) free_surface_storage(&StagingSurface);
+    return Success;
 }
 
 GLboolean gl_read_color_pixels_rgba8(GLint x, GLint y, GLsizei width, GLsizei height, void *pixels) {
