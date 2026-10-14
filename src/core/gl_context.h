@@ -262,7 +262,6 @@ typedef struct {
 #define GL_DIRTY_PROVOKING_VERTEX (1 << 18)
 #define GL_DIRTY_RASTERIZER_DISCARD (1 << 19)
 
-#define GL_ERROR_QUEUE_SIZE 8
 #define GL33_MAX_VERTEX_ATTRIBS 16
 #define GL33_MAX_TEXTURE_IMAGE_UNITS 16
 #define GL33_MAX_COMBINED_TEXTURE_IMAGE_UNITS 48
@@ -270,6 +269,7 @@ typedef struct {
 #define GL33_MAX_TRANSFORM_FEEDBACK_BUFFER_BINDINGS 4
 #define GL33_MAX_SAMPLES 8
 #define GL33_MAX_SAMPLE_MASK_WORDS 1
+#define GL33_MAX_CLIP_DISTANCES 8
 #define GL33_MAX_TEXTURE_UNITS GL33_MAX_COMBINED_TEXTURE_IMAGE_UNITS
 
 typedef struct {
@@ -296,11 +296,13 @@ typedef struct {
     GLuint bound_texture_1d[GL33_MAX_TEXTURE_UNITS];
     GLuint bound_texture_2d[GL33_MAX_TEXTURE_UNITS];
     GLuint bound_texture_3d[GL33_MAX_TEXTURE_UNITS];
+    GLuint bound_texture_rectangle[GL33_MAX_TEXTURE_UNITS];
     GLuint bound_texture_cube[GL33_MAX_TEXTURE_UNITS];
     GLuint bound_texture_1d_array[GL33_MAX_TEXTURE_UNITS];
     GLuint bound_texture_2d_array[GL33_MAX_TEXTURE_UNITS];
     GLuint bound_texture_2d_multisample[GL33_MAX_TEXTURE_UNITS];
     GLuint bound_texture_2d_multisample_array[GL33_MAX_TEXTURE_UNITS];
+    GLuint bound_texture_buffer_texture[GL33_MAX_TEXTURE_UNITS];
     GLuint bound_sampler[GL33_MAX_TEXTURE_UNITS];
     GLuint bound_renderbuffer;
     GLuint bound_framebuffer;
@@ -309,7 +311,9 @@ typedef struct {
     GLuint bound_vao;
     struct { GLint x, y; GLsizei width, height; GLfloat near_z, far_z; } viewport;
     struct { GLint x, y; GLsizei width, height; } scissor;
+    GLint pack_swap_bytes, pack_lsb_first;
     GLint pack_alignment, pack_row_length, pack_skip_rows, pack_skip_pixels, pack_image_height, pack_skip_images;
+    GLint unpack_swap_bytes, unpack_lsb_first;
     GLint unpack_alignment, unpack_row_length, unpack_skip_rows, unpack_skip_pixels, unpack_image_height, unpack_skip_images;
     GLenum blend_src_rgb, blend_dst_rgb, blend_src_alpha, blend_dst_alpha, blend_eq_rgb, blend_eq_alpha;
     GLfloat blend_color[4];
@@ -322,6 +326,8 @@ typedef struct {
     GLenum provoking_vertex;
     GLenum clamp_read_color;
     GLfloat polygon_offset_factor, polygon_offset_units, line_width, point_size;
+    GLfloat point_fade_threshold_size;
+    GLenum point_sprite_coord_origin;
     GLboolean color_mask[4];
     GLfloat current_vertex_attrib[GL33_MAX_VERTEX_ATTRIBS][4];
     GLfloat clear_color[4], clear_depth;
@@ -330,7 +336,13 @@ typedef struct {
     GLboolean multisample_enabled, sample_alpha_to_coverage_enabled;
     GLboolean sample_alpha_to_one_enabled, sample_mask_enabled;
     GLboolean color_logic_op_enabled;
+    GLboolean dither_enabled, framebuffer_srgb_enabled;
     GLboolean primitive_restart_enabled, rasterizer_discard_enabled;
+    GLboolean vertex_program_point_size_enabled;
+    GLboolean depth_clamp_enabled;
+    GLboolean texture_cube_map_seamless_enabled;
+    GLboolean clip_distance_enabled[GL33_MAX_CLIP_DISTANCES];
+    GLboolean line_smooth_enabled, polygon_smooth_enabled;
     GLboolean polygon_offset_point_enabled, polygon_offset_line_enabled, polygon_offset_fill_enabled, sample_coverage_invert;
     GLfloat sample_coverage_value;
     GLuint sample_mask_value;
@@ -344,9 +356,9 @@ typedef struct {
     GLuint conditional_render_query;
     GLenum conditional_render_mode;
     GLboolean conditional_render_active;
+    GLenum line_smooth_hint, polygon_smooth_hint;
+    GLenum texture_compression_hint, fragment_shader_derivative_hint;
     GLenum generate_mipmap_hint, error;
-    GLenum error_queue[GL_ERROR_QUEUE_SIZE];
-    uint32_t error_head, error_tail;
     OSMutex error_mutex;
     uint32_t dirty_flags;
     gl_dispatch_t dispatch;
