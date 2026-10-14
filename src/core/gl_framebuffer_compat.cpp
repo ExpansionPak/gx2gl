@@ -40,11 +40,14 @@ void glFramebufferTexture1D(GLenum target, GLenum attachment,
     _gl_set_error(GL_INVALID_VALUE);
     return;
   }
-  if (texture != 0 && !_gl_IsTexture(texture)) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return;
+  if (texture != 0) {
+    if (_gl_IsTexture(texture) != GL_TRUE ||
+        gl_get_texture_target(texture) != GL_TEXTURE_1D) {
+      _gl_set_error(GL_INVALID_OPERATION);
+      return;
+    }
   }
-  _gl_set_error(GL_INVALID_OPERATION);
+  _gl_FramebufferTexture(target, attachment, texture, level);
 }
 
 void glFramebufferTexture3D(GLenum target, GLenum attachment,
