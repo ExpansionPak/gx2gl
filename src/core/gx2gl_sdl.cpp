@@ -271,7 +271,6 @@ void GX2GL_DeleteContext(GX2GL_Context context)
         g_gl_context = NULL;
     }
 
-    /* Every successful CreateContext acquires one library reference. */
     GX2GL_UnloadLibrary();
 }
 
