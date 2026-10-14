@@ -18,7 +18,9 @@
 #include <gx2/surface.h>
 #include <gx2/texture.h>
 #include <gx2/utils.h>
+#include <whb/gfx.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
 
@@ -84,6 +86,7 @@ typedef struct {
   bool complete;
   bool pending_delete;
   bool storage_allocated;
+  GLuint buffer_object;
 
   GLenum min_filter;
   GLenum mag_filter;
@@ -96,11 +99,16 @@ typedef struct {
   GX2SurfaceFormat gx2_format;
   GX2SurfaceUse surface_use;
   uint32_t comp_map;
+  GLint internal_format;
+  GLenum src_format;
+  GLenum src_type;
   uint8_t src_components;
   uint8_t dst_components;
+  uint8_t src_bytes_per_component;
   uint8_t bytes_per_component;
   uint8_t src_bytes_per_texel;
   uint8_t dst_bytes_per_texel;
+  bool convert_upload;
   bool packed_u32;
   bool mipmap_supported;
   bool compressed;
@@ -121,11 +129,13 @@ static GLTexture g_textures[MAX_TEXTURES];
 static GLTexture g_default_texture_1d;
 static GLTexture g_default_texture_2d;
 static GLTexture g_default_texture_3d;
+static GLTexture g_default_texture_rectangle;
 static GLTexture g_default_texture_cube;
 static GLTexture g_default_texture_1d_array;
 static GLTexture g_default_texture_2d_array;
 static GLTexture g_default_texture_2d_multisample;
 static GLTexture g_default_texture_2d_multisample_array;
+static GLTexture g_default_texture_buffer;
 
 typedef struct {
   GLsizei width;
@@ -201,6 +211,8 @@ static GLTexture *default_texture_for_target(GLenum target) {
     return &g_default_texture_2d;
   case GL_TEXTURE_3D:
     return &g_default_texture_3d;
+  case GL_TEXTURE_RECTANGLE:
+    return &g_default_texture_rectangle;
   case GL_TEXTURE_CUBE_MAP:
     return &g_default_texture_cube;
   case GL_TEXTURE_1D_ARRAY:
@@ -211,6 +223,8 @@ static GLTexture *default_texture_for_target(GLenum target) {
     return &g_default_texture_2d_multisample;
   case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
     return &g_default_texture_2d_multisample_array;
+  case GL_TEXTURE_BUFFER:
+    return &g_default_texture_buffer;
   default:
     return NULL;
   }
@@ -397,9 +411,10 @@ static void free_texture_storage(GLTexture *tex) {
 static bool map_dim(GLenum target, GX2SurfaceDim *dim) {
   switch (target) {
   case GL_TEXTURE_1D:
-    *dim = GX2_SURFACE_DIM_TEXTURE_2D;
+    *dim = GX2_SURFACE_DIM_TEXTURE_1D;
     return true;
   case GL_TEXTURE_2D:
+  case GL_TEXTURE_RECTANGLE:
     *dim = GX2_SURFACE_DIM_TEXTURE_2D;
     return true;
   case GL_TEXTURE_3D:
@@ -428,13 +443,66 @@ static bool map_dim(GLenum target, GX2SurfaceDim *dim) {
 
 static bool is_valid_texture_target(GLenum target) {
   return target == GL_TEXTURE_1D || target == GL_TEXTURE_2D ||
-         target == GL_TEXTURE_3D || target == GL_TEXTURE_CUBE_MAP ||
+         target == GL_TEXTURE_3D || target == GL_TEXTURE_RECTANGLE ||
+         target == GL_TEXTURE_CUBE_MAP ||
          target == GL_TEXTURE_1D_ARRAY || target == GL_TEXTURE_2D_ARRAY;
 }
 
 static bool is_multisample_texture_target(GLenum target) {
   return target == GL_TEXTURE_2D_MULTISAMPLE ||
          target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
+}
+
+static bool is_texture_binding_target(GLenum target) {
+  return is_valid_texture_target(target) ||
+         is_multisample_texture_target(target) ||
+         target == GL_TEXTURE_BUFFER;
+}
+
+static bool is_texture_parameter_target(GLenum target) {
+  return is_valid_texture_target(target) ||
+         is_multisample_texture_target(target);
+}
+
+static bool is_valid_texture_buffer_internal_format(GLenum internalformat) {
+  switch (internalformat) {
+  case GL_R8:
+  case GL_R16:
+  case GL_R16F:
+  case GL_R32F:
+  case GL_R8I:
+  case GL_R8UI:
+  case GL_R16I:
+  case GL_R16UI:
+  case GL_R32I:
+  case GL_R32UI:
+  case GL_RG8:
+  case GL_RG16:
+  case GL_RG16F:
+  case GL_RG32F:
+  case GL_RG8I:
+  case GL_RG8UI:
+  case GL_RG16I:
+  case GL_RG16UI:
+  case GL_RG32I:
+  case GL_RG32UI:
+  case GL_RGB32F:
+  case GL_RGB32I:
+  case GL_RGB32UI:
+  case GL_RGBA8:
+  case GL_RGBA16:
+  case GL_RGBA16F:
+  case GL_RGBA32F:
+  case GL_RGBA8I:
+  case GL_RGBA8UI:
+  case GL_RGBA16I:
+  case GL_RGBA16UI:
+  case GL_RGBA32I:
+  case GL_RGBA32UI:
+    return true;
+  default:
+    return false;
+  }
 }
 
 static bool texture_depth_is_spatial(GLenum target) {
@@ -589,6 +657,536 @@ static GX2TexBorderType map_border_type(const GLfloat color[4]) {
     return GX2_TEX_BORDER_TYPE_WHITE;
   }
   return GX2_TEX_BORDER_TYPE_VARIABLE;
+}
+
+
+static uint32_t sized_texture_comp_map(uint8_t components) {
+  switch (components) {
+  case 1:
+    return GX2_COMP_MAP(GX2_SQ_SEL_R, GX2_SQ_SEL_0, GX2_SQ_SEL_0, GX2_SQ_SEL_1);
+  case 2:
+    return GX2_COMP_MAP(GX2_SQ_SEL_R, GX2_SQ_SEL_G, GX2_SQ_SEL_0, GX2_SQ_SEL_1);
+  case 3:
+    return GX2_COMP_MAP(GX2_SQ_SEL_R, GX2_SQ_SEL_G, GX2_SQ_SEL_B, GX2_SQ_SEL_1);
+  default:
+    return GX2_COMP_MAP(GX2_SQ_SEL_R, GX2_SQ_SEL_G, GX2_SQ_SEL_B, GX2_SQ_SEL_A);
+  }
+}
+
+static void set_sized_texture_storage(TextureFormatInfo *info,
+                                      GX2SurfaceFormat format,
+                                      uint8_t logical_components,
+                                      uint8_t physical_components,
+                                      uint8_t bytes_per_component,
+                                      GX2SurfaceUse use) {
+  info->gx2_format = format;
+  info->surface_use = use;
+  info->comp_map = sized_texture_comp_map(logical_components);
+  info->dst_components = physical_components;
+  info->bytes_per_component = bytes_per_component;
+  info->dst_bytes_per_texel = physical_components * bytes_per_component;
+  info->mipmap_supported = true;
+}
+
+static bool sized_texture_is_signed_integer(GLint internalformat) {
+  switch (internalformat) {
+  case GL_R8I:
+  case GL_R16I:
+  case GL_R32I:
+  case GL_RG8I:
+  case GL_RG16I:
+  case GL_RG32I:
+  case GL_RGB8I:
+  case GL_RGB16I:
+  case GL_RGB32I:
+  case GL_RGBA8I:
+  case GL_RGBA16I:
+  case GL_RGBA32I:
+    return true;
+  default:
+    return false;
+  }
+}
+
+static bool sized_texture_is_unsigned_integer(GLint internalformat) {
+  switch (internalformat) {
+  case GL_R8UI:
+  case GL_R16UI:
+  case GL_R32UI:
+  case GL_RG8UI:
+  case GL_RG16UI:
+  case GL_RG32UI:
+  case GL_RGB8UI:
+  case GL_RGB16UI:
+  case GL_RGB32UI:
+  case GL_RGBA8UI:
+  case GL_RGBA16UI:
+  case GL_RGBA32UI:
+  case GL_RGB10_A2UI:
+    return true;
+  default:
+    return false;
+  }
+}
+
+static bool sized_texture_is_depth(GLint internalformat) {
+  switch (internalformat) {
+  case GL_DEPTH_COMPONENT16:
+  case GL_DEPTH_COMPONENT24:
+  case GL_DEPTH_COMPONENT32:
+  case GL_DEPTH_COMPONENT32F:
+  case GL_DEPTH24_STENCIL8:
+  case GL_DEPTH32F_STENCIL8:
+    return true;
+  default:
+    return false;
+  }
+}
+
+static bool setup_gl33_sized_texture_storage(GLint internalformat,
+                                             TextureFormatInfo *info) {
+  const GX2SurfaceUse color_use =
+      (GX2SurfaceUse)(GX2_SURFACE_USE_TEXTURE | GX2_SURFACE_USE_COLOR_BUFFER);
+  const GX2SurfaceUse depth_use =
+      (GX2SurfaceUse)(GX2_SURFACE_USE_TEXTURE | GX2_SURFACE_USE_DEPTH_BUFFER);
+
+  info->internal_format = internalformat;
+
+  switch (internalformat) {
+  case GL_RED:
+  case GL_COMPRESSED_RED:
+  case GL_R8:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_UNORM_R8, 1, 1, 1, color_use);
+    if (internalformat == GL_RED) info->internal_format = GL_R8;
+    return true;
+  case GL_COMPRESSED_RG:
+  case GL_RG:
+  case GL_RG8:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_UNORM_R8_G8, 2, 2, 1, color_use);
+    return true;
+  case GL_RGB4:
+  case GL_RGB5:
+  case GL_COMPRESSED_RGB:
+  case GL_R3_G3_B2:
+  case GL_RGB8:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8, 3, 4, 1, color_use);
+    return true;
+  case GL_RGBA2:
+  case GL_RGBA4:
+  case GL_RGB5_A1:
+  case GL_COMPRESSED_RGBA:
+  case GL_RGBA8:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8, 4, 4, 1, color_use);
+    return true;
+  case GL_RGB10:
+  case GL_RGB12:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_UNORM_R16_G16_B16_A16, 3, 4, 2, color_use);
+    return true;
+  case GL_RGBA12:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_UNORM_R16_G16_B16_A16, 4, 4, 2, color_use);
+    return true;
+  case GL_R16:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_UNORM_R16, 1, 1, 2, color_use);
+    return true;
+  case GL_RG16:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_UNORM_R16_G16, 2, 2, 2, color_use);
+    return true;
+  case GL_RGB16:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_UNORM_R16_G16_B16_A16, 3, 4, 2, color_use);
+    return true;
+  case GL_RGBA16:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_UNORM_R16_G16_B16_A16, 4, 4, 2, color_use);
+    return true;
+  case GL_R8_SNORM:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_SNORM_R8, 1, 1, 1, color_use);
+    return true;
+  case GL_RG8_SNORM:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_SNORM_R8_G8, 2, 2, 1, color_use);
+    return true;
+  case GL_RGB8_SNORM:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_SNORM_R8_G8_B8_A8, 3, 4, 1, color_use);
+    return true;
+  case GL_RGBA8_SNORM:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_SNORM_R8_G8_B8_A8, 4, 4, 1, color_use);
+    return true;
+  case GL_R16_SNORM:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_SNORM_R16, 1, 1, 2, color_use);
+    return true;
+  case GL_RG16_SNORM:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_SNORM_R16_G16, 2, 2, 2, color_use);
+    return true;
+  case GL_RGB16_SNORM:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_SNORM_R16_G16_B16_A16, 3, 4, 2, color_use);
+    return true;
+  case GL_RGBA16_SNORM:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_SNORM_R16_G16_B16_A16, 4, 4, 2, color_use);
+    return true;
+  case GL_SRGB8:
+  case GL_COMPRESSED_SRGB:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_SRGB_R8_G8_B8_A8, 3, 4, 1, color_use);
+    return true;
+  case GL_SRGB8_ALPHA8:
+  case GL_COMPRESSED_SRGB_ALPHA:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_SRGB_R8_G8_B8_A8, 4, 4, 1, color_use);
+    return true;
+  case GL_RGB10_A2:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_UNORM_R16_G16_B16_A16, 4, 4, 2, color_use);
+    return true;
+  case GL_RGB10_A2UI:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_UINT_R16_G16_B16_A16, 4, 4, 2, color_use);
+    return true;
+  case GL_R16F:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_FLOAT_R16, 1, 1, 2, color_use);
+    return true;
+  case GL_RG16F:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_FLOAT_R16_G16, 2, 2, 2, color_use);
+    return true;
+  case GL_RGB16F:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_FLOAT_R16_G16_B16_A16, 3, 4, 2, color_use);
+    return true;
+  case GL_RGBA16F:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_FLOAT_R16_G16_B16_A16, 4, 4, 2, color_use);
+    return true;
+  case GL_R32F:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_FLOAT_R32, 1, 1, 4, color_use);
+    return true;
+  case GL_RG32F:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_FLOAT_R32_G32, 2, 2, 4, color_use);
+    return true;
+  case GL_RGB32F:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_FLOAT_R32_G32_B32_A32, 3, 4, 4, color_use);
+    return true;
+  case GL_RGBA32F:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_FLOAT_R32_G32_B32_A32, 4, 4, 4, color_use);
+    return true;
+  case GL_R11F_G11F_B10F:
+  case GL_RGB9_E5:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_FLOAT_R32_G32_B32_A32, 3, 4, 4, color_use);
+    return true;
+  case GL_R8I:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_SINT_R8, 1, 1, 1, color_use);
+    return true;
+  case GL_RG8I:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_SINT_R8_G8, 2, 2, 1, color_use);
+    return true;
+  case GL_RGB8I:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_SINT_R8_G8_B8_A8, 3, 4, 1, color_use);
+    return true;
+  case GL_RGBA8I:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_SINT_R8_G8_B8_A8, 4, 4, 1, color_use);
+    return true;
+  case GL_R16I:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_SINT_R16, 1, 1, 2, color_use);
+    return true;
+  case GL_RG16I:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_SINT_R16_G16, 2, 2, 2, color_use);
+    return true;
+  case GL_RGB16I:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_SINT_R16_G16_B16_A16, 3, 4, 2, color_use);
+    return true;
+  case GL_RGBA16I:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_SINT_R16_G16_B16_A16, 4, 4, 2, color_use);
+    return true;
+  case GL_R32I:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_SINT_R32, 1, 1, 4, color_use);
+    return true;
+  case GL_RG32I:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_SINT_R32_G32, 2, 2, 4, color_use);
+    return true;
+  case GL_RGB32I:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_SINT_R32_G32_B32_A32, 3, 4, 4, color_use);
+    return true;
+  case GL_RGBA32I:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_SINT_R32_G32_B32_A32, 4, 4, 4, color_use);
+    return true;
+  case GL_R8UI:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_UINT_R8, 1, 1, 1, color_use);
+    return true;
+  case GL_RG8UI:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_UINT_R8_G8, 2, 2, 1, color_use);
+    return true;
+  case GL_RGB8UI:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_UINT_R8_G8_B8_A8, 3, 4, 1, color_use);
+    return true;
+  case GL_RGBA8UI:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_UINT_R8_G8_B8_A8, 4, 4, 1, color_use);
+    return true;
+  case GL_R16UI:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_UINT_R16, 1, 1, 2, color_use);
+    return true;
+  case GL_RG16UI:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_UINT_R16_G16, 2, 2, 2, color_use);
+    return true;
+  case GL_RGB16UI:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_UINT_R16_G16_B16_A16, 3, 4, 2, color_use);
+    return true;
+  case GL_RGBA16UI:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_UINT_R16_G16_B16_A16, 4, 4, 2, color_use);
+    return true;
+  case GL_R32UI:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_UINT_R32, 1, 1, 4, color_use);
+    return true;
+  case GL_RG32UI:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_UINT_R32_G32, 2, 2, 4, color_use);
+    return true;
+  case GL_RGB32UI:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_UINT_R32_G32_B32_A32, 3, 4, 4, color_use);
+    return true;
+  case GL_RGBA32UI:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_UINT_R32_G32_B32_A32, 4, 4, 4, color_use);
+    return true;
+  case GL_DEPTH_COMPONENT16:
+  case GL_DEPTH_COMPONENT24:
+  case GL_DEPTH_COMPONENT32:
+  case GL_DEPTH_COMPONENT32F:
+  case GL_DEPTH24_STENCIL8:
+  case GL_DEPTH32F_STENCIL8:
+    set_sized_texture_storage(info, GX2_SURFACE_FORMAT_FLOAT_R32, 1, 1, 4, depth_use);
+    return true;
+  default:
+    return false;
+  }
+}
+
+static uint8_t sized_texture_source_components(GLenum format) {
+  switch (format) {
+  case GL_GREEN:
+  case GL_BLUE:
+  case GL_RED:
+  case GL_RED_INTEGER:
+  case GL_GREEN_INTEGER:
+  case GL_BLUE_INTEGER:
+  case GL_DEPTH_COMPONENT:
+  case GL_STENCIL_INDEX:
+    return 1;
+  case GL_RG:
+  case GL_RG_INTEGER:
+    return 2;
+  case GL_BGR:
+  case GL_BGR_INTEGER:
+  case GL_RGB:
+  case GL_RGB_INTEGER:
+    return 3;
+  case GL_BGRA:
+  case GL_BGRA_INTEGER:
+  case GL_RGBA:
+  case GL_RGBA_INTEGER:
+    return 4;
+  default:
+    return 0;
+  }
+}
+
+static uint8_t sized_texture_source_bytes(GLenum type) {
+  switch (type) {
+  case GL_BYTE:
+  case GL_UNSIGNED_BYTE:
+    return 1;
+  case GL_SHORT:
+  case GL_UNSIGNED_SHORT:
+  case GL_HALF_FLOAT:
+    return 2;
+  case GL_INT:
+  case GL_UNSIGNED_INT:
+  case GL_FLOAT:
+    return 4;
+  default:
+    return 0;
+  }
+}
+
+static uint8_t compressed_red_packed_pixel_size(GLenum format, GLenum type) {
+  switch (type) {
+  case GL_UNSIGNED_BYTE_3_3_2:
+  case GL_UNSIGNED_BYTE_2_3_3_REV:
+    return format == GL_RGB ? 1 : 0;
+  case GL_UNSIGNED_SHORT_5_6_5:
+  case GL_UNSIGNED_SHORT_5_6_5_REV:
+    return format == GL_RGB ? 2 : 0;
+  case GL_UNSIGNED_SHORT_4_4_4_4:
+  case GL_UNSIGNED_SHORT_4_4_4_4_REV:
+  case GL_UNSIGNED_SHORT_5_5_5_1:
+  case GL_UNSIGNED_SHORT_1_5_5_5_REV:
+    return format == GL_RGBA || format == GL_BGRA ? 2 : 0;
+  case GL_UNSIGNED_INT_8_8_8_8:
+  case GL_UNSIGNED_INT_8_8_8_8_REV:
+  case GL_UNSIGNED_INT_10_10_10_2:
+  case GL_UNSIGNED_INT_2_10_10_10_REV:
+    return format == GL_RGBA || format == GL_BGRA ? 4 : 0;
+  case GL_UNSIGNED_INT_10F_11F_11F_REV:
+  case GL_UNSIGNED_INT_5_9_9_9_REV:
+    return format == GL_RGB ? 4 : 0;
+  default:
+    return 0;
+  }
+}
+
+static uint8_t IntegerPackedTextureSize(GLenum Format, GLenum Type) {
+  const GLenum NormalFormat = Format == GL_RGB_INTEGER ? GL_RGB :
+      Format == GL_RGBA_INTEGER ? GL_RGBA :
+      Format == GL_BGRA_INTEGER ? GL_BGRA : 0;
+  if (Type == GL_UNSIGNED_INT_10F_11F_11F_REV ||
+      Type == GL_UNSIGNED_INT_5_9_9_9_REV) return 0;
+  return NormalFormat ? compressed_red_packed_pixel_size(NormalFormat, Type) : 0;
+}
+
+static bool configure_gl33_sized_texture_upload(GLint internalformat,
+                                                GLenum format,
+                                                GLenum type,
+                                                bool validate_upload,
+                                                TextureFormatInfo *info) {
+  if (!setup_gl33_sized_texture_storage(internalformat, info)) {
+    return false;
+  }
+
+  if (!validate_upload) {
+    info->src_components = info->dst_components;
+    info->src_bytes_per_component = info->bytes_per_component;
+    info->src_bytes_per_texel = info->dst_bytes_per_texel;
+    return true;
+  }
+
+  const bool signed_integer = sized_texture_is_signed_integer(internalformat);
+  const bool unsigned_integer = sized_texture_is_unsigned_integer(internalformat);
+  const bool depth = sized_texture_is_depth(internalformat);
+  const bool integer_source =
+      format == GL_RED_INTEGER || format == GL_GREEN_INTEGER ||
+      format == GL_BLUE_INTEGER || format == GL_RG_INTEGER ||
+      format == GL_RGB_INTEGER || format == GL_BGR_INTEGER ||
+      format == GL_RGBA_INTEGER || format == GL_BGRA_INTEGER;
+  const bool color_source =
+      format == GL_RED || format == GL_RG || format == GL_RGB ||
+      format == GL_RGBA || format == GL_BGR || format == GL_BGRA ||
+      format == GL_GREEN || format == GL_BLUE;
+
+  if ((signed_integer || unsigned_integer) && !integer_source) {
+    return false;
+  }
+  if (!signed_integer && !unsigned_integer && !depth && !color_source) {
+    return false;
+  }
+  if (depth && format != GL_DEPTH_COMPONENT && format != GL_STENCIL_INDEX) {
+    return false;
+  }
+
+  if (((internalformat == GL_RGB10_A2 && format == GL_RGBA) ||
+       (internalformat == GL_RGB10_A2UI && format == GL_RGBA_INTEGER)) &&
+      (type == GL_UNSIGNED_INT_2_10_10_10_REV ||
+       type == GL_UNSIGNED_INT_10_10_10_2)) {
+    info->src_format = format;
+    info->src_type = type;
+    info->src_components = 1;
+    info->src_bytes_per_component = 4;
+    info->src_bytes_per_texel = 4;
+    info->convert_upload = true;
+    return true;
+  }
+
+  if (signed_integer || unsigned_integer) {
+    const uint8_t PackedSize = IntegerPackedTextureSize(format, type);
+    if (PackedSize) {
+      info->src_components = 1;
+      info->src_bytes_per_component = PackedSize;
+      info->src_bytes_per_texel = PackedSize;
+      info->convert_upload = true;
+      return true;
+    }
+  }
+
+  if (format == GL_RGB &&
+      ((internalformat == GL_R11F_G11F_B10F &&
+        type == GL_UNSIGNED_INT_10F_11F_11F_REV) ||
+       (internalformat == GL_RGB9_E5 &&
+        type == GL_UNSIGNED_INT_5_9_9_9_REV))) {
+    info->src_format = format;
+    info->src_type = type;
+    info->src_components = 1;
+    info->src_bytes_per_component = 4;
+    info->src_bytes_per_texel = 4;
+    info->convert_upload = true;
+    return true;
+  }
+
+  if (internalformat == GL_RED || internalformat == GL_COMPRESSED_RED ||
+      internalformat == GL_R8 ||
+      internalformat == GL_COMPRESSED_RG || internalformat == GL_RG8 ||
+      internalformat == GL_RG ||
+      internalformat == GL_RGB4 || internalformat == GL_RGB5 ||
+      internalformat == GL_RGB10 || internalformat == GL_RGB10_A2 ||
+      internalformat == GL_RGB12 ||
+      internalformat == GL_RGBA2 || internalformat == GL_RGBA12 ||
+      internalformat == GL_RGBA4 || internalformat == GL_RGB5_A1 ||
+      internalformat == GL_R16 || internalformat == GL_RG16 ||
+      internalformat == GL_COMPRESSED_RGB || internalformat == GL_RGB8 ||
+      internalformat == GL_COMPRESSED_SRGB || internalformat == GL_SRGB8 ||
+      internalformat == GL_COMPRESSED_SRGB_ALPHA || internalformat == GL_SRGB8_ALPHA8 ||
+      internalformat == GL_R3_G3_B2 ||
+      internalformat == GL_COMPRESSED_RGBA || internalformat == GL_RGBA8 ||
+      internalformat == GL_RGB16 || internalformat == GL_RGBA16 ||
+      internalformat == GL_R11F_G11F_B10F || internalformat == GL_RGB9_E5 ||
+      internalformat == GL_R16F || internalformat == GL_RG16F ||
+      internalformat == GL_RGB16F || internalformat == GL_RGBA16F ||
+      internalformat == GL_R32F || internalformat == GL_RG32F ||
+      internalformat == GL_RGB32F || internalformat == GL_RGBA32F ||
+      internalformat == GL_R8_SNORM ||
+      internalformat == GL_RG8_SNORM || internalformat == GL_RGB8_SNORM ||
+      internalformat == GL_RGBA8_SNORM || internalformat == GL_R16_SNORM ||
+      internalformat == GL_RG16_SNORM || internalformat == GL_RGB16_SNORM ||
+      internalformat == GL_RGBA16_SNORM) {
+    uint8_t packed_size = compressed_red_packed_pixel_size(format, type);
+    if (packed_size != 0) {
+      info->src_format = format;
+      info->src_type = type;
+      info->src_components = 1;
+      info->src_bytes_per_component = packed_size;
+      info->src_bytes_per_texel = packed_size;
+      info->convert_upload = true;
+      return true;
+    }
+  }
+  info->src_components = sized_texture_source_components(format);
+  info->src_bytes_per_component = sized_texture_source_bytes(type);
+  if (info->src_components == 0 || info->src_bytes_per_component == 0) {
+    return false;
+  }
+
+  if (integer_source &&
+      type != GL_BYTE && type != GL_UNSIGNED_BYTE &&
+      type != GL_SHORT && type != GL_UNSIGNED_SHORT &&
+      type != GL_INT && type != GL_UNSIGNED_INT) {
+    return false;
+  }
+  if (!integer_source &&
+      type != GL_BYTE && type != GL_UNSIGNED_BYTE &&
+      type != GL_SHORT && type != GL_UNSIGNED_SHORT &&
+      type != GL_INT && type != GL_UNSIGNED_INT &&
+      type != GL_HALF_FLOAT && type != GL_FLOAT) {
+    return false;
+  }
+
+  info->src_format = format;
+  info->src_type = type;
+  info->src_bytes_per_texel =
+      info->src_components * info->src_bytes_per_component;
+  info->convert_upload = true;
+  return true;
+}
+
+static bool IsRgtcTextureFormat(GLint Format) {
+  return Format == GL_COMPRESSED_RED_RGTC1 ||
+         Format == GL_COMPRESSED_SIGNED_RED_RGTC1 ||
+         Format == GL_COMPRESSED_RG_RGTC2 ||
+         Format == GL_COMPRESSED_SIGNED_RG_RGTC2;
+}
+
+static bool IsSignedRgtcTextureFormat(GLint Format) {
+  return Format == GL_COMPRESSED_SIGNED_RED_RGTC1 ||
+         Format == GL_COMPRESSED_SIGNED_RG_RGTC2;
+}
+
+static uint32_t RgtcTextureChannels(GLint Format) {
+  return Format == GL_COMPRESSED_RG_RGTC2 ||
+         Format == GL_COMPRESSED_SIGNED_RG_RGTC2 ? 2u : 1u;
 }
 
 static bool get_texture_format_info(GLint internalformat, GLenum format,
