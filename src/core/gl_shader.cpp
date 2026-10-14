@@ -1154,6 +1154,9 @@ static void clear_program_runtime_state(GLProgram *prog) {
   free_program_direct_uniform_shadows(prog);
   free_program_uniform_value_shadows(prog);
   free_program_uniform_blocks(prog);
+  free(prog->SourceUniformMembers);
+  prog->SourceUniformMembers = NULL;
+  prog->SourceUniformCount = 0;
   free_program_attrib_reflection(prog);
   free_program_transform_feedback_linked(prog);
 
@@ -1306,7 +1309,7 @@ static ProgramUniformBlock *append_program_uniform_block(GLProgram *prog, const 
   }
   block->vertex_block_index = -1;
   block->pixel_block_index = -1;
-  block->binding_point = prog->uniform_block_count;
+  block->binding_point = 0;
   block->implicit = implicit;
   ++prog->uniform_block_count;
   return block;
@@ -1316,15 +1319,6 @@ static bool is_cafeglsl_implicit_uniform_block(const GX2UniformBlock *block) {
   if (!block) return false;
   return (!block->name || block->name[0] == '\0') &&
          block->offset == GX2GL_CAFEGLSL_VIRTUAL_UNIFORM_BLOCK_LOCATION;
-}
-
-static void initialize_program_uniform_block_binding(ProgramUniformBlock *block,
-                                                     uint32_t gx2_location) {
-  if (!block || block->binding_initialized) return;
-  if (gx2_location < GL33_MAX_UNIFORM_BUFFER_BINDINGS) {
-    block->binding_point = gx2_location;
-  }
-  block->binding_initialized = true;
 }
 
 static void build_program_uniform_blocks(GLProgram *prog) {
@@ -1347,12 +1341,10 @@ static void build_program_uniform_blocks(GLProgram *prog) {
       if (!block) block = append_program_uniform_block(prog, shader_block->name, implicit);
       if (!block) continue;
       block->vertex_block_index = (int32_t)i;
-      block->vertex_location = shader_block->offset;
       block->vertex_size = shader_block->size;
       if (implicit) {
         block->implicit = true;
       }
-      initialize_program_uniform_block_binding(block, shader_block->offset);
     }
   }
 
@@ -1365,12 +1357,10 @@ static void build_program_uniform_blocks(GLProgram *prog) {
       if (!block) block = append_program_uniform_block(prog, shader_block->name, implicit);
       if (!block) continue;
       block->pixel_block_index = (int32_t)i;
-      block->pixel_location = shader_block->offset;
       block->pixel_size = shader_block->size;
       if (implicit) {
         block->implicit = true;
       }
-      initialize_program_uniform_block_binding(block, shader_block->offset);
     }
   }
 }
@@ -1436,28 +1426,78 @@ static bool shader_var_type_to_reflection(GX2ShaderVarType type, GLenum *base_ty
   }
 }
 
-static void build_program_attrib_reflection(GLProgram *prog, GX2VertexShader *vertex_shader) {
-  if (!prog) return;
+static bool build_program_attrib_reflection(GLProgram *prog, GX2VertexShader *vertex_shader) {
+  if (!prog) return false;
 
   free_program_attrib_reflection(prog);
-  if (!vertex_shader) return;
+  if (!vertex_shader) return true;
 
-  for (uint32_t i = 0; i < vertex_shader->attribVarCount; ++i) {
-    uint32_t location = vertex_shader->attribVars[i].location;
-    ProgramAttribReflection *reflection;
+  const char *VertexSource = NULL;
+  if (is_valid_shader(prog->attached_vertex_shader))
+    VertexSource = g_shaders[prog->attached_vertex_shader].source;
 
-    if (location >= GL33_MAX_VERTEX_ATTRIBS) continue;
-    reflection = &prog->attrib_reflection[location];
-    if (!shader_var_type_to_reflection(vertex_shader->attribVars[i].type,
-                                       &reflection->base_type,
-                                       &reflection->component_count)) {
-      continue;
-    }
-
-    reflection->active = true;
-    replace_owned_string(&reflection->name,
-                         vertex_shader->attribVars[i].name ? vertex_shader->attribVars[i].name : "");
+  GLint ExplicitLocations[GL33_MAX_VERTEX_ATTRIBS];
+  for (uint32_t i = 0; i < GL33_MAX_VERTEX_ATTRIBS; ++i) {
+    ExplicitLocations[i] = -1;
+    if (i < vertex_shader->attribVarCount && vertex_shader->attribVars[i].name)
+      ExplicitLocations[i] = gx2gl_explicit_vertex_input_location(
+          VertexSource, vertex_shader->attribVars[i].name);
   }
+
+  bool Assigned[GL33_MAX_VERTEX_ATTRIBS] = {};
+  for (uint32_t Pass = 0; Pass < 3; ++Pass) {
+    for (uint32_t i = 0; i < vertex_shader->attribVarCount &&
+                         i < GL33_MAX_VERTEX_ATTRIBS; ++i) {
+      if (Assigned[i]) continue;
+      const GX2AttribVar *Attrib = &vertex_shader->attribVars[i];
+      if (!Attrib->name || Attrib->location >= GL33_MAX_VERTEX_ATTRIBS)
+        continue;
+
+      GLenum BaseType;
+      uint32_t Components;
+      if (!shader_var_type_to_reflection(Attrib->type, &BaseType, &Components))
+        continue;
+
+      GLint ExplicitLocation = ExplicitLocations[i];
+      GLint RequestedLocation = -1;
+      if (ExplicitLocation < 0) {
+        for (uint32_t j = 0; j < GL33_MAX_VERTEX_ATTRIBS; ++j) {
+          if (prog->attrib_binding_names[j] &&
+              strcmp(prog->attrib_binding_names[j], Attrib->name) == 0) {
+            RequestedLocation = (GLint)j;
+          }
+        }
+      }
+
+      uint32_t Location;
+      if (Pass == 0) {
+        if (ExplicitLocation < 0) continue;
+        Location = (uint32_t)ExplicitLocation;
+      } else if (Pass == 1) {
+        if (ExplicitLocation >= 0 || RequestedLocation < 0) continue;
+        Location = (uint32_t)RequestedLocation;
+      } else {
+        if (ExplicitLocation >= 0 || RequestedLocation >= 0) continue;
+        Location = Attrib->location;
+        if (prog->attrib_reflection[Location].active) {
+          Location = 0;
+          while (Location < GL33_MAX_VERTEX_ATTRIBS &&
+                 prog->attrib_reflection[Location].active) ++Location;
+        }
+      }
+
+      if (Location >= GL33_MAX_VERTEX_ATTRIBS ||
+          prog->attrib_reflection[Location].active) return false;
+      ProgramAttribReflection *Reflection = &prog->attrib_reflection[Location];
+      Reflection->active = true;
+      Reflection->base_type = BaseType;
+      Reflection->component_count = Components;
+      Reflection->GX2Location = Attrib->location;
+      replace_owned_string(&Reflection->name, Attrib->name);
+      Assigned[i] = true;
+    }
+  }
+  return true;
 }
 
 static GLuint program_stream_out_binding_count(const GLProgram *prog) {
@@ -1672,7 +1712,28 @@ static bool initialize_program_block_shadows(GLProgram *prog, GX2VertexShader *v
   return true;
 }
 
+static GX2SamplerVarType ResolveSamplerType(GX2SamplerVarType Type,
+                                             const char *Source,
+                                             const char *Name) {
+  switch (GX2GLReflectSamplerType(Source, Name)) {
+  case GL_SAMPLER_1D_ARRAY: return (GX2SamplerVarType)10;
+  case GL_INT_SAMPLER_1D_ARRAY: return (GX2SamplerVarType)23;
+  case GL_UNSIGNED_INT_SAMPLER_1D_ARRAY: return (GX2SamplerVarType)36;
+  case GL_SAMPLER_2D_ARRAY: return (GX2SamplerVarType)11;
+  case GL_INT_SAMPLER_2D_ARRAY: return (GX2SamplerVarType)24;
+  case GL_UNSIGNED_INT_SAMPLER_2D_ARRAY: return (GX2SamplerVarType)37;
+  case 0x8B63: return (GX2SamplerVarType)2;
+  case 0x8DCD: return (GX2SamplerVarType)15;
+  case 0x8DD5: return (GX2SamplerVarType)28;
+  default: return Type;
+  }
+}
+
 static void initialize_program_sampler_tables(GLProgram *prog, GX2VertexShader *vs, GX2PixelShader *ps) {
+  const char *VertexSource = is_valid_shader(prog->attached_vertex_shader)
+      ? g_shaders[prog->attached_vertex_shader].source : NULL;
+  const char *PixelSource = is_valid_shader(prog->attached_pixel_shader)
+      ? g_shaders[prog->attached_pixel_shader].source : NULL;
   memset(prog->vertex_sampler_units, -1, sizeof(prog->vertex_sampler_units));
   memset(prog->pixel_sampler_units, -1, sizeof(prog->pixel_sampler_units));
   memset(prog->vertex_sampler_bindings, 0, sizeof(prog->vertex_sampler_bindings));
@@ -1689,6 +1750,9 @@ static void initialize_program_sampler_tables(GLProgram *prog, GX2VertexShader *
         prog->vertex_sampler_units[location] = (GLint)i;
       }
       prog->vertex_sampler_bindings[i] = 0;
+      vs->samplerVars[i].type = ResolveSamplerType(vs->samplerVars[i].type,
+                                                    VertexSource,
+                                                    vs->samplerVars[i].name);
       prog->vertex_sampler_targets[i] =
           sampler_var_type_to_texture_target(vs->samplerVars[i].type);
     }
@@ -1700,9 +1764,59 @@ static void initialize_program_sampler_tables(GLProgram *prog, GX2VertexShader *
         prog->pixel_sampler_units[location] = (GLint)i;
       }
       prog->pixel_sampler_bindings[i] = 0;
+      ps->samplerVars[i].type = ResolveSamplerType(ps->samplerVars[i].type,
+                                                   PixelSource,
+                                                   ps->samplerVars[i].name);
       prog->pixel_sampler_targets[i] =
           sampler_var_type_to_texture_target(ps->samplerVars[i].type);
     }
+  }
+}
+
+static void BuildSourceUniformMembers(GLProgram *prog) {
+  if (!prog || !prog->group || !prog->uniform_block_count) return;
+  const GLuint Shaders[2] = {prog->attached_vertex_shader, prog->attached_pixel_shader};
+  for (GLuint ShaderId : Shaders) {
+    if (!is_valid_shader(ShaderId) || !g_shaders[ShaderId].source) continue;
+    GX2GLUniformReflection *Found = (GX2GLUniformReflection *)calloc(
+        128, sizeof(GX2GLUniformReflection));
+    if (!Found) return;
+    size_t Count = GX2GLReflectUniformBlocks(g_shaders[ShaderId].source,
+                                              Found, 128);
+    for (size_t j = 0; j < Count; ++j) {
+      const GX2GLUniformReflection *Member = &Found[j];
+      bool HasBlock = false;
+      const size_t BlockNameLength = strlen(Member->BlockName);
+      for (uint32_t b = 0; b < prog->uniform_block_count; ++b) {
+        const ProgramUniformBlock *Block = &prog->uniform_blocks[b];
+        if (!Block->implicit && Block->name &&
+            strncmp(Block->name, Member->BlockName, BlockNameLength) == 0 &&
+            (Block->name[BlockNameLength] == '[' ||
+             Block->name[BlockNameLength] == '\0')) {
+          HasBlock = true;
+          break;
+        }
+      }
+      if (!HasBlock) continue;
+      bool Duplicate = false;
+      uint32_t Existing = get_active_uniform_count(prog);
+      for (uint32_t k = 0; k < Existing; ++k) {
+        ActiveUniformInfo Info;
+        if (get_active_uniform_info(prog, k, &Info) && Info.name &&
+            strcmp(Info.name, Member->Name) == 0) {
+          Duplicate = true;
+          break;
+        }
+      }
+      if (Duplicate || prog->SourceUniformCount >= 256) continue;
+      GX2GLUniformReflection *Next = (GX2GLUniformReflection *)realloc(
+          prog->SourceUniformMembers,
+          (prog->SourceUniformCount + 1) * sizeof(GX2GLUniformReflection));
+      if (!Next) break;
+      prog->SourceUniformMembers = Next;
+      prog->SourceUniformMembers[prog->SourceUniformCount++] = *Member;
+    }
+    free(Found);
   }
 }
 
@@ -1743,7 +1857,11 @@ static bool initialize_program_from_group(GLProgram *prog, const WHBGfxShaderGro
 
   initialize_program_sampler_tables(prog, vs, ps);
   build_program_uniform_blocks(prog);
-  build_program_attrib_reflection(prog, vs);
+  BuildSourceUniformMembers(prog);
+  if (!build_program_attrib_reflection(prog, vs)) {
+    clear_program_runtime_state(prog);
+    return false;
+  }
   initialize_program_prelinked_stream_out(prog);
   prog->linked = true;
   prog->validated = false;
@@ -1798,35 +1916,47 @@ static bool stage_uses_virtual_uniform_block(const GLProgram *prog,
              : vs && vs->mode == GX2_SHADER_MODE_UNIFORM_BLOCK;
 }
 
-static bool update_uniform_words(GLint location, const uint32_t *data, GLsizei count_words, uint32_t extra_offset_bytes) {
-  if (location == -1 || count_words <= 0 || !data) return true;
-  if (!g_gl_context) return false;
-  GLuint prog_id = g_gl_context->bound_program;
-  if (!is_valid_program(prog_id)) {
-    _gl_set_error(GL_INVALID_OPERATION);
-    return false;
-  }
-  GLProgram *prog = &g_programs[prog_id];
-  location = resolve_uniform_location(prog, location);
-  if (location_is_sampler(location)) return false;
+static bool write_uniform_storage_words(GLProgram *prog, GLint location,
+                                        const uint32_t *data,
+                                        GLsizei count_words,
+                                        uint32_t extra_offset_bytes) {
+  if (!prog || location == -1 || count_words <= 0 || !data) return false;
+
   bool is_pixel = location_is_pixel(location);
   uint32_t offset = ((uint32_t)location & 0xFFFFu) + extra_offset_bytes;
-  uint32_t byte_count = (uint32_t)count_words * 4;
-  set_program_uniform_value_shadow(prog, location, data, (uint32_t)count_words);
+  uint32_t byte_count = (uint32_t)count_words * sizeof(uint32_t);
+
   if (location_is_direct(location)) {
     uint8_t *shadow = is_pixel ? prog->ps_direct_uniform_shadow : prog->vs_direct_uniform_shadow;
     uint32_t shadow_size = is_pixel ? prog->ps_direct_uniform_shadow_size : prog->vs_direct_uniform_shadow_size;
     if (stage_uses_virtual_uniform_block(prog, is_pixel)) {
       uint32_t shadow_offset = offset;
-      if (!shadow || shadow_offset + byte_count > shadow_size) {
-        return false;
-      }
+      GX2ShaderVarType Type = GX2_SHADER_VAR_TYPE_FLOAT;
+      uint32_t Elements = 0;
+      bool Known = get_uniform_var_by_location(prog, location, NULL, &Type,
+                                               NULL, NULL, NULL, &Elements);
+      uint32_t Components = Type == GX2_SHADER_VAR_TYPE_FLOAT ? 1u :
+                            Type == GX2_SHADER_VAR_TYPE_FLOAT2 ? 2u :
+                            Type == GX2_SHADER_VAR_TYPE_FLOAT3 ? 3u : 0u;
+      bool PaddedArray = Known && Components > 0u && Elements > 1u &&
+                         count_words > (GLsizei)Components &&
+                         count_words <= (GLsizei)(Components * Elements);
+      uint32_t UploadSize = PaddedArray
+                                ? ((uint32_t)(count_words - 1) / Components) * 16u +
+                                      ((uint32_t)(count_words - 1) % Components + 1u) * 4u
+                                : byte_count;
+      if (!shadow || shadow_offset > shadow_size ||
+          UploadSize > shadow_size - shadow_offset) return false;
       for (GLsizei i = 0; i < count_words; ++i) {
-        uint32_t swapped = CPU_TO_GPU_32(data[i]);
-        memcpy(shadow + shadow_offset + (uint32_t)i * sizeof(uint32_t),
-               &swapped, sizeof(swapped));
+        uint32_t Index = PaddedArray
+                             ? ((uint32_t)i / Components) * 4u +
+                                   (uint32_t)i % Components
+                             : (uint32_t)i;
+        uint32_t Swapped = CPU_TO_GPU_32(data[i]);
+        memcpy(shadow + shadow_offset + Index * sizeof(uint32_t),
+               &Swapped, sizeof(Swapped));
       }
-      DCFlushRange(shadow + shadow_offset, byte_count);
+      DCFlushRange(shadow + shadow_offset, UploadSize);
       return true;
     }
 
@@ -1855,6 +1985,7 @@ static bool update_uniform_words(GLint location, const uint32_t *data, GLsizei c
     if (swapped != swapped_stack) free(swapped);
     return true;
   }
+
   uint32_t block_idx = ((uint32_t)location >> 16) & GL_LOCATION_BLOCK_MASK;
   UniformBlockShadow *block = is_pixel ? (block_idx < prog->ps_block_count ? &prog->ps_blocks[block_idx] : NULL) : (block_idx < prog->vs_block_count ? &prog->vs_blocks[block_idx] : NULL);
   if (!block || !block->buffer || offset + byte_count > block->size) return false;
