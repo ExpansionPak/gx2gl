@@ -24,13 +24,7 @@ static GLfloat normalize_signed_vertex_value(GLint value, uint32_t bits) {
 }
 
 static GLfloat normalize_signed_packed_value(GLint value, uint32_t bits) {
-  const GLint minimum = -(GLint)((uint32_t)1u << (bits - 1u));
-  const GLint maximum = (GLint)(((uint32_t)1u << (bits - 1u)) - 1u);
-
-  if (value <= minimum) {
-    return -1.0f;
-  }
-  return (GLfloat)((double)value / (double)maximum);
+  return normalize_signed_vertex_value(value, bits);
 }
 
 static GLfloat normalize_unsigned_vertex_value(GLuint value, uint32_t bits) {
