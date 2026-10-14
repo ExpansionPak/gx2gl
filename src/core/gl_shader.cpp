@@ -1,4 +1,5 @@
 #include "gl_shader.h"
+#include "gl_uniform_reflection.h"
 #include "gl_buffer.h"
 #include "gl_framebuffer.h"
 #include "gx2gl_cafeglsl.h"
@@ -40,6 +41,12 @@ extern "C" {
 #define GX2GL_MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS 64u
 #define GX2GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS 4u
 
+#ifndef GL_ACTIVE_UNIFORM_BLOCK_MAX_NAME_LENGTH
+#define GL_ACTIVE_UNIFORM_BLOCK_MAX_NAME_LENGTH 0x8A35
+#endif
+#ifndef GL_ACTIVE_UNIFORM_BLOCKS
+#define GL_ACTIVE_UNIFORM_BLOCKS 0x8A36
+#endif
 #ifndef GL_UNIFORM_BLOCK_BINDING
 #define GL_UNIFORM_BLOCK_BINDING 0x8A3F
 #endif
@@ -48,6 +55,15 @@ extern "C" {
 #endif
 #ifndef GL_UNIFORM_BLOCK_NAME_LENGTH
 #define GL_UNIFORM_BLOCK_NAME_LENGTH 0x8A41
+#endif
+#ifndef GL_UNIFORM_BLOCK_ACTIVE_UNIFORMS
+#define GL_UNIFORM_BLOCK_ACTIVE_UNIFORMS 0x8A42
+#endif
+#ifndef GL_UNIFORM_BLOCK_ACTIVE_UNIFORM_INDICES
+#define GL_UNIFORM_BLOCK_ACTIVE_UNIFORM_INDICES 0x8A43
+#endif
+#ifndef GL_UNIFORM_BLOCK_REFERENCED_BY_GEOMETRY_SHADER
+#define GL_UNIFORM_BLOCK_REFERENCED_BY_GEOMETRY_SHADER 0x8A45
 #endif
 #ifndef GL_UNIFORM_BLOCK_REFERENCED_BY_VERTEX_SHADER
 #define GL_UNIFORM_BLOCK_REFERENCED_BY_VERTEX_SHADER 0x8A44
@@ -69,6 +85,15 @@ extern "C" {
 #endif
 #ifndef GL_UNIFORM_OFFSET
 #define GL_UNIFORM_OFFSET 0x8A3B
+#endif
+#ifndef GL_UNIFORM_ARRAY_STRIDE
+#define GL_UNIFORM_ARRAY_STRIDE 0x8A3C
+#endif
+#ifndef GL_UNIFORM_MATRIX_STRIDE
+#define GL_UNIFORM_MATRIX_STRIDE 0x8A3D
+#endif
+#ifndef GL_UNIFORM_IS_ROW_MAJOR
+#define GL_UNIFORM_IS_ROW_MAJOR 0x8A3E
 #endif
 #ifndef GL_UNSIGNED_INT_VEC2
 #define GL_UNSIGNED_INT_VEC2 0x8DC6
@@ -136,12 +161,9 @@ typedef struct {
   char *name;
   int32_t vertex_block_index;
   int32_t pixel_block_index;
-  uint32_t vertex_location;
-  uint32_t pixel_location;
   uint32_t vertex_size;
   uint32_t pixel_size;
   GLuint binding_point;
-  bool binding_initialized;
   bool implicit;
 } ProgramUniformBlock;
 
@@ -150,6 +172,7 @@ typedef struct {
   char *name;
   GLenum base_type;
   uint32_t component_count;
+  uint32_t GX2Location;
 } ProgramAttribReflection;
 
 typedef struct {
@@ -187,6 +210,8 @@ typedef struct {
   uint32_t ps_block_count;
   ProgramUniformBlock *uniform_blocks;
   uint32_t uniform_block_count;
+  GX2GLUniformReflection *SourceUniformMembers;
+  uint32_t SourceUniformCount;
   GLint vertex_sampler_units[MAX_PROGRAM_SAMPLERS];
   GLint pixel_sampler_units[MAX_PROGRAM_SAMPLERS];
   GLint vertex_sampler_bindings[MAX_PROGRAM_SAMPLERS];
@@ -221,8 +246,26 @@ static GLProgram g_programs[MAX_PROGRAMS];
 static bool g_shader_mode_valid = false;
 static GX2ShaderMode g_shader_mode = GX2_SHADER_MODE_UNIFORM_REGISTER;
 
+static bool is_private_fragment_uniform(const char *name) {
+  return name && strcmp(name, "_gx2gl_frag_coord_height") == 0;
+}
+
 static bool is_valid_shader(GLuint s) { return s > 0 && s < MAX_SHADERS && g_shaders[s].in_use; }
 static bool is_valid_program(GLuint p) { return p > 0 && p < MAX_PROGRAMS && g_programs[p].in_use; }
+
+static GLuint allocate_shader_program_name(void) {
+  const GLuint limit = MAX_SHADERS < MAX_PROGRAMS ? MAX_SHADERS : MAX_PROGRAMS;
+  for (GLuint name = 1; name < limit; ++name) {
+    if (!g_shaders[name].in_use && !g_programs[name].in_use) return name;
+  }
+  return 0;
+}
+
+static bool validate_program_object_name(GLuint name) {
+  if (is_valid_program(name)) return true;
+  _gl_set_error(is_valid_shader(name) ? GL_INVALID_OPERATION : GL_INVALID_VALUE);
+  return false;
+}
 static GLint make_sampler_location(bool pixel_stage, uint32_t location);
 static GLint make_direct_uniform_location(bool pixel_stage, uint32_t offset);
 static bool location_is_sampler(GLint l);
@@ -318,8 +361,17 @@ static GLenum sampler_var_type_to_gl_enum(GX2SamplerVarType type) {
   switch (type) {
   case GX2_SAMPLER_VAR_TYPE_SAMPLER_1D: return GL_SAMPLER_1D;
   case GX2_SAMPLER_VAR_TYPE_SAMPLER_2D: return GL_SAMPLER_2D;
+  case (GX2SamplerVarType)2: return (GLenum)0x8B63u;
+  case (GX2SamplerVarType)15: return (GLenum)0x8DCDu;
+  case (GX2SamplerVarType)28: return (GLenum)0x8DD5u;
   case GX2_SAMPLER_VAR_TYPE_SAMPLER_3D: return GL_SAMPLER_3D;
   case GX2_SAMPLER_VAR_TYPE_SAMPLER_CUBE: return GL_SAMPLER_CUBE;
+  case (GX2SamplerVarType)10: return GL_SAMPLER_1D_ARRAY;
+  case (GX2SamplerVarType)23: return GL_INT_SAMPLER_1D_ARRAY;
+  case (GX2SamplerVarType)36: return GL_UNSIGNED_INT_SAMPLER_1D_ARRAY;
+  case (GX2SamplerVarType)11: return GL_SAMPLER_2D_ARRAY;
+  case (GX2SamplerVarType)24: return GL_INT_SAMPLER_2D_ARRAY;
+  case (GX2SamplerVarType)37: return GL_UNSIGNED_INT_SAMPLER_2D_ARRAY;
   case (GX2SamplerVarType)17: return GL_SAMPLER_2D_MULTISAMPLE;
   case (GX2SamplerVarType)18: return GL_SAMPLER_2D_MULTISAMPLE_ARRAY;
   case (GX2SamplerVarType)30: return GL_INT_SAMPLER_2D_MULTISAMPLE;
@@ -334,8 +386,20 @@ static GLenum sampler_var_type_to_texture_target(GX2SamplerVarType type) {
   switch ((uint32_t)type) {
   case 0: return GL_TEXTURE_1D;
   case 1: return GL_TEXTURE_2D;
+  case 2:
+  case 15:
+  case 28:
+    return GL_TEXTURE_RECTANGLE;
   case 3: return GL_TEXTURE_3D;
   case 4: return GL_TEXTURE_CUBE_MAP;
+  case 10:
+  case 23:
+  case 36:
+    return GL_TEXTURE_1D_ARRAY;
+  case 11:
+  case 24:
+  case 37:
+    return GL_TEXTURE_2D_ARRAY;
   case 17:
   case 30:
   case 43:
@@ -390,6 +454,25 @@ static uint32_t shader_var_type_word_count(GX2ShaderVarType type) {
   }
 }
 
+static uint32_t shader_var_type_storage_word_count(GX2ShaderVarType type) {
+  switch (type) {
+  case GX2_SHADER_VAR_TYPE_FLOAT2X2:
+  case GX2_SHADER_VAR_TYPE_FLOAT2X3:
+  case GX2_SHADER_VAR_TYPE_FLOAT2X4:
+    return 8;
+  case GX2_SHADER_VAR_TYPE_FLOAT3X2:
+  case GX2_SHADER_VAR_TYPE_FLOAT3X3:
+  case GX2_SHADER_VAR_TYPE_FLOAT3X4:
+    return 12;
+  case GX2_SHADER_VAR_TYPE_FLOAT4X2:
+  case GX2_SHADER_VAR_TYPE_FLOAT4X3:
+  case GX2_SHADER_VAR_TYPE_FLOAT4X4:
+    return 16;
+  default:
+    return shader_var_type_word_count(type);
+  }
+}
+
 static uint32_t shader_var_element_count(uint32_t count) {
   return count > 0 ? count : 1u;
 }
@@ -401,6 +484,9 @@ typedef struct {
   GLint block_index;
   GLint offset;
   GLint location;
+  GLint array_stride;
+  GLint matrix_stride;
+  GLint row_major;
   bool is_sampler;
 } ActiveUniformInfo;
 
@@ -432,8 +518,12 @@ static uint32_t get_active_uniform_count(GLProgram *prog) {
   ps = prog->group->pixelShader;
 
   if (vs) count += vs->uniformVarCount + vs->samplerVarCount;
-  if (ps) count += ps->uniformVarCount + ps->samplerVarCount;
-  return count;
+  if (ps) {
+    count += ps->uniformVarCount + ps->samplerVarCount;
+    for (uint32_t i = 0; i < ps->uniformVarCount; ++i)
+      if (is_private_fragment_uniform(ps->uniformVars[i].name)) --count;
+  }
+  return count + prog->SourceUniformCount;
 }
 
 static GLsizei get_active_uniform_max_name_length(GLProgram *prog) {
@@ -457,6 +547,7 @@ static GLsizei get_active_uniform_max_name_length(GLProgram *prog) {
   }
   if (ps) {
     for (uint32_t i = 0; i < ps->uniformVarCount; ++i) {
+      if (is_private_fragment_uniform(ps->uniformVars[i].name)) continue;
       GLsizei length = ps->uniformVars[i].name ? (GLsizei)strlen(ps->uniformVars[i].name) + 1 : 0;
       if (length > max_length) max_length = length;
     }
@@ -466,7 +557,60 @@ static GLsizei get_active_uniform_max_name_length(GLProgram *prog) {
     }
   }
 
+  for (uint32_t i = 0; i < prog->SourceUniformCount; ++i) {
+    GLsizei length = (GLsizei)strlen(prog->SourceUniformMembers[i].Name) + 1;
+    if (length > max_length) max_length = length;
+  }
   return max_length;
+}
+
+static uint32_t get_active_uniform_block_count(const GLProgram *prog) {
+  uint32_t count = 0;
+
+  if (!prog) return 0;
+  for (uint32_t i = 0; i < prog->uniform_block_count; ++i) {
+    if (!prog->uniform_blocks[i].implicit) {
+      ++count;
+    }
+  }
+  return count;
+}
+
+static GLsizei get_active_uniform_block_max_name_length(const GLProgram *prog) {
+  GLsizei max_length = 0;
+
+  if (!prog) return 0;
+  for (uint32_t i = 0; i < prog->uniform_block_count; ++i) {
+    const ProgramUniformBlock *block = &prog->uniform_blocks[i];
+    if (block->implicit || !block->name) continue;
+
+    GLsizei length = (GLsizei)strlen(block->name) + 1;
+    if (length > max_length) max_length = length;
+  }
+  return max_length;
+}
+
+static ProgramUniformBlock *GetPublicUniformBlock(GLProgram *prog, GLuint index) {
+  if (!prog) return NULL;
+  for (uint32_t i = 0; i < prog->uniform_block_count; ++i) {
+    ProgramUniformBlock *block = &prog->uniform_blocks[i];
+    if (block->implicit) continue;
+    if (index-- == 0) return block;
+  }
+  return NULL;
+}
+
+static GLint GetStageUniformBlockIndex(const GLProgram *prog, GLint stageIndex, bool pixelStage) {
+  if (!prog || stageIndex < 0) return -1;
+  GLint visibleIndex = 0;
+  for (uint32_t i = 0; i < prog->uniform_block_count; ++i) {
+    const ProgramUniformBlock *block = &prog->uniform_blocks[i];
+    if (block->implicit) continue;
+    if ((pixelStage ? block->pixel_block_index : block->vertex_block_index) == stageIndex)
+      return visibleIndex;
+    ++visibleIndex;
+  }
+  return -1;
 }
 
 static bool get_active_uniform_info(GLProgram *prog, GLuint index, ActiveUniformInfo *info) {
@@ -488,12 +632,7 @@ static bool get_active_uniform_info(GLProgram *prog, GLuint index, ActiveUniform
       info->name = vs->uniformVars[i].name;
       info->size = (GLint)shader_var_element_count(vs->uniformVars[i].count);
       info->type = shader_var_type_to_gl_enum(vs->uniformVars[i].type);
-      info->block_index =
-          (vs->uniformVars[i].block >= 0 &&
-           (uint32_t)vs->uniformVars[i].block < vs->uniformBlockCount &&
-           is_cafeglsl_implicit_uniform_block(&vs->uniformBlocks[vs->uniformVars[i].block]))
-              ? -1
-              : vs->uniformVars[i].block;
+      info->block_index = GetStageUniformBlockIndex(prog, vs->uniformVars[i].block, false);
       info->offset = (GLint)vs->uniformVars[i].offset;
       info->location = vs->uniformVars[i].block < 0
                            ? make_direct_uniform_location(false, (uint32_t)vs->uniformVars[i].offset)
@@ -503,17 +642,13 @@ static bool get_active_uniform_info(GLProgram *prog, GLuint index, ActiveUniform
     }
   }
   if (ps) {
-    for (uint32_t i = 0; i < ps->uniformVarCount; ++i, ++cursor) {
-      if (cursor != index) continue;
+    for (uint32_t i = 0; i < ps->uniformVarCount; ++i) {
+      if (is_private_fragment_uniform(ps->uniformVars[i].name)) continue;
+      if (cursor++ != index) continue;
       info->name = ps->uniformVars[i].name;
       info->size = (GLint)shader_var_element_count(ps->uniformVars[i].count);
       info->type = shader_var_type_to_gl_enum(ps->uniformVars[i].type);
-      info->block_index =
-          (ps->uniformVars[i].block >= 0 &&
-           (uint32_t)ps->uniformVars[i].block < ps->uniformBlockCount &&
-           is_cafeglsl_implicit_uniform_block(&ps->uniformBlocks[ps->uniformVars[i].block]))
-              ? -1
-              : ps->uniformVars[i].block;
+      info->block_index = GetStageUniformBlockIndex(prog, ps->uniformVars[i].block, true);
       info->offset = (GLint)ps->uniformVars[i].offset;
       info->location = ps->uniformVars[i].block < 0
                            ? make_direct_uniform_location(true, (uint32_t)ps->uniformVars[i].offset)
@@ -546,6 +681,30 @@ static bool get_active_uniform_info(GLProgram *prog, GLuint index, ActiveUniform
     }
   }
 
+  if (index >= cursor && index - cursor < prog->SourceUniformCount) {
+    const GX2GLUniformReflection *Member =
+        &prog->SourceUniformMembers[index - cursor];
+    info->name = Member->Name;
+    info->size = Member->Size;
+    info->type = Member->Type;
+    info->offset = Member->Offset;
+    info->array_stride = Member->ArrayStride;
+    info->matrix_stride = Member->MatrixStride;
+    info->row_major = Member->RowMajor;
+    GLint BlockIndex = 0;
+    for (uint32_t i = 0; i < prog->uniform_block_count; ++i) {
+      const ProgramUniformBlock *Block = &prog->uniform_blocks[i];
+      if (Block->implicit) continue;
+      size_t Length = strlen(Member->BlockName);
+      if (Block->name && strncmp(Block->name, Member->BlockName, Length) == 0 &&
+          (Block->name[Length] == '[' || Block->name[Length] == '\0')) {
+        info->block_index = BlockIndex;
+        return true;
+      }
+      ++BlockIndex;
+    }
+    return false;
+  }
   return false;
 }
 
@@ -591,7 +750,8 @@ static bool get_uniform_var_by_location(GLProgram *prog, GLint location,
                                         GX2ShaderVarType *type,
                                         uint32_t *block_index,
                                         uint32_t *offset,
-                                        uint32_t *word_count) {
+                                        uint32_t *word_count,
+                                        uint32_t *element_count = NULL) {
   GX2VertexShader *vs;
   GX2PixelShader *ps;
 
@@ -609,6 +769,7 @@ static bool get_uniform_var_by_location(GLProgram *prog, GLint location,
       if (candidate != location) continue;
       if (pixel_stage) *pixel_stage = false;
       if (type) *type = vs->uniformVars[i].type;
+      if (element_count) *element_count = shader_var_element_count(vs->uniformVars[i].count);
       if (block_index) *block_index = vs->uniformVars[i].block >= 0 ? (uint32_t)vs->uniformVars[i].block : 0u;
       if (offset) *offset = (uint32_t)vs->uniformVars[i].offset;
       if (word_count) {
@@ -629,6 +790,7 @@ static bool get_uniform_var_by_location(GLProgram *prog, GLint location,
       if (candidate != location) continue;
       if (pixel_stage) *pixel_stage = true;
       if (type) *type = ps->uniformVars[i].type;
+      if (element_count) *element_count = shader_var_element_count(ps->uniformVars[i].count);
       if (block_index) *block_index = ps->uniformVars[i].block >= 0 ? (uint32_t)ps->uniformVars[i].block : 0u;
       if (offset) *offset = (uint32_t)ps->uniformVars[i].offset;
       if (word_count) {
@@ -911,10 +1073,15 @@ static bool initialize_program_direct_uniform_shadows(GLProgram *prog, GX2Vertex
       uint32_t size_bytes;
       uint32_t end_offset;
       if (vs->uniformVars[i].block >= 0) continue;
-      size_bytes = shader_var_type_word_count(vs->uniformVars[i].type) *
+      size_bytes = shader_var_type_storage_word_count(vs->uniformVars[i].type) *
                    shader_var_element_count(vs->uniformVars[i].count) *
                    sizeof(uint32_t);
-      // CafeGLSL exposes loose-uniform offsets as bytes in its virtual block.
+      if (vs->mode == GX2_SHADER_MODE_UNIFORM_BLOCK &&
+          shader_var_element_count(vs->uniformVars[i].count) > 1u &&
+          (vs->uniformVars[i].type == GX2_SHADER_VAR_TYPE_FLOAT ||
+           vs->uniformVars[i].type == GX2_SHADER_VAR_TYPE_FLOAT2 ||
+           vs->uniformVars[i].type == GX2_SHADER_VAR_TYPE_FLOAT3))
+        size_bytes = 16u * shader_var_element_count(vs->uniformVars[i].count);
       end_offset = vs->mode == GX2_SHADER_MODE_UNIFORM_BLOCK
                        ? (uint32_t)vs->uniformVars[i].offset + size_bytes
                        : (uint32_t)vs->uniformVars[i].offset *
@@ -930,10 +1097,15 @@ static bool initialize_program_direct_uniform_shadows(GLProgram *prog, GX2Vertex
       uint32_t size_bytes;
       uint32_t end_offset;
       if (ps->uniformVars[i].block >= 0) continue;
-      size_bytes = shader_var_type_word_count(ps->uniformVars[i].type) *
+      size_bytes = shader_var_type_storage_word_count(ps->uniformVars[i].type) *
                    shader_var_element_count(ps->uniformVars[i].count) *
                    sizeof(uint32_t);
-      // CafeGLSL exposes loose-uniform offsets as bytes in its virtual block.
+      if (ps->mode == GX2_SHADER_MODE_UNIFORM_BLOCK &&
+          shader_var_element_count(ps->uniformVars[i].count) > 1u &&
+          (ps->uniformVars[i].type == GX2_SHADER_VAR_TYPE_FLOAT ||
+           ps->uniformVars[i].type == GX2_SHADER_VAR_TYPE_FLOAT2 ||
+           ps->uniformVars[i].type == GX2_SHADER_VAR_TYPE_FLOAT3))
+        size_bytes = 16u * shader_var_element_count(ps->uniformVars[i].count);
       end_offset = ps->mode == GX2_SHADER_MODE_UNIFORM_BLOCK
                        ? (uint32_t)ps->uniformVars[i].offset + size_bytes
                        : (uint32_t)ps->uniformVars[i].offset *
