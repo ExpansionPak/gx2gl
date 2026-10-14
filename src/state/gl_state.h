@@ -8,6 +8,7 @@ extern "C" {
 #endif
 
 void gl_flush_state(void);
+void gl_restore_after_gpu_clear(void);
 GLboolean gl_get_multisample_position(GLsizei samples, GLuint index,
                                       GLfloat *position);
 GLboolean gl_state_cpu_clear_draw_color_buffer(GLuint index,

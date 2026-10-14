@@ -11,9 +11,11 @@ extern "C" {
 #endif
 #include <coreinit/cache.h>
 #include <gx2/clear.h>
+#include <gx2/context.h>
 #include <gx2/mem.h>
 #include <gx2/registers.h>
 #include <gx2/state.h>
+#include <whb/gfx.h>
 
 typedef struct {
   int8_t x[8];
@@ -630,9 +632,17 @@ void _gl_ClearStencil(GLint s) {
   g_gl_context->clear_stencil = s;
 }
 
+void gl_restore_after_gpu_clear(void) {
+  GX2ContextState *context = WHBGfxGetTVContextState();
+  if (!context) context = WHBGfxGetDRCContextState();
+  if (context) GX2SetContextState(context);
+  if (g_gl_context) g_gl_context->dirty_flags = 0xFFFFFFFFu;
+}
+
 void _gl_Clear(GLbitfield mask) {
   GX2DepthBuffer *depth;
   GX2ClearFlags depth_stencil_flags = (GX2ClearFlags)0;
+  bool gpu_clear = false;
 
   if (!g_gl_context) return;
   if ((mask & ~(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)) != 0) {
@@ -655,6 +665,7 @@ void _gl_Clear(GLbitfield mask) {
                         g_gl_context->clear_color[1],
                         g_gl_context->clear_color[2],
                         g_gl_context->clear_color[3]);
+          gpu_clear = true;
         }
       }
     }
@@ -662,27 +673,28 @@ void _gl_Clear(GLbitfield mask) {
   }
 
   depth = gl_get_draw_depth_buffer();
-  if (!depth) return;
-
-  if ((mask & GL_DEPTH_BUFFER_BIT) && g_gl_context->depth_mask) {
-    depth_stencil_flags = (GX2ClearFlags)(depth_stencil_flags | GX2_CLEAR_FLAGS_DEPTH);
+  if (depth) {
+    if ((mask & GL_DEPTH_BUFFER_BIT) && g_gl_context->depth_mask) {
+      depth_stencil_flags = (GX2ClearFlags)(depth_stencil_flags | GX2_CLEAR_FLAGS_DEPTH);
+    }
+    if ((mask & GL_STENCIL_BUFFER_BIT) &&
+        (g_gl_context->stencil_write_mask[0] != 0 ||
+         g_gl_context->stencil_write_mask[1] != 0)) {
+      depth_stencil_flags = (GX2ClearFlags)(depth_stencil_flags | GX2_CLEAR_FLAGS_STENCIL);
+    }
+    if (depth_stencil_flags != 0) {
+      GX2ClearDepthStencilEx(depth,
+                             (mask & GL_DEPTH_BUFFER_BIT)
+                                 ? g_gl_context->clear_depth
+                                 : depth->depthClear,
+                             (mask & GL_STENCIL_BUFFER_BIT)
+                                 ? (uint8_t)g_gl_context->clear_stencil
+                                 : (uint8_t)depth->stencilClear,
+                             depth_stencil_flags);
+      gpu_clear = true;
+    }
   }
-  if ((mask & GL_STENCIL_BUFFER_BIT) &&
-      (g_gl_context->stencil_write_mask[0] != 0 ||
-       g_gl_context->stencil_write_mask[1] != 0)) {
-    depth_stencil_flags = (GX2ClearFlags)(depth_stencil_flags | GX2_CLEAR_FLAGS_STENCIL);
-  }
-
-  if (depth_stencil_flags != 0) {
-    GX2ClearDepthStencilEx(depth,
-                           (mask & GL_DEPTH_BUFFER_BIT)
-                               ? g_gl_context->clear_depth
-                               : depth->depthClear,
-                           (mask & GL_STENCIL_BUFFER_BIT)
-                               ? (uint8_t)g_gl_context->clear_stencil
-                               : (uint8_t)depth->stencilClear,
-                           depth_stencil_flags);
-  }
+  if (gpu_clear) gl_restore_after_gpu_clear();
 }
 
 void _gl_Enable(GLenum cap) {

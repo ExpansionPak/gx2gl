@@ -63,6 +63,7 @@ static void clear_color_buffer(GLint drawbuffer, const GLfloat value[4]) {
   }
 
   GX2ClearColor(color, value[0], value[1], value[2], value[3]);
+  gl_restore_after_gpu_clear();
   gl_framebuffer_mark_bound_color_buffer_dirty((GLuint)drawbuffer);
 }
 
