@@ -14,6 +14,22 @@
 #ifndef GL_READ_FRAMEBUFFER_BINDING
 #define GL_READ_FRAMEBUFFER_BINDING 0x8CAA
 #endif
+#ifndef GL_DRAW_BUFFER
+#define GL_DRAW_BUFFER 0x0C01
+#endif
+#ifndef GL_READ_BUFFER
+#define GL_READ_BUFFER 0x0C02
+#endif
+#ifndef GL_DRAW_BUFFER0
+#define GL_DRAW_BUFFER0 0x8825
+#define GL_DRAW_BUFFER1 0x8826
+#define GL_DRAW_BUFFER2 0x8827
+#define GL_DRAW_BUFFER3 0x8828
+#define GL_DRAW_BUFFER4 0x8829
+#define GL_DRAW_BUFFER5 0x882A
+#define GL_DRAW_BUFFER6 0x882B
+#define GL_DRAW_BUFFER7 0x882C
+#endif
 #ifndef GL_MAX_VERTEX_UNIFORM_BLOCKS
 #define GL_MAX_VERTEX_UNIFORM_BLOCKS 0x8A2B
 #endif
@@ -46,6 +62,9 @@
 #endif
 #ifndef GL_MAX_TEXTURE_LOD_BIAS
 #define GL_MAX_TEXTURE_LOD_BIAS 0x84FD
+#endif
+#ifndef GL_MAX_RECTANGLE_TEXTURE_SIZE
+#define GL_MAX_RECTANGLE_TEXTURE_SIZE 0x84F8
 #endif
 #ifndef GL_MAX_VIEWPORT_DIMS
 #define GL_MAX_VIEWPORT_DIMS 0x0D3A
@@ -323,6 +342,12 @@ static bool get_context_value(GLenum pname, GetValue *value) {
   memset(value, 0, sizeof(*value));
   unit = active_texture_unit();
 
+  if (pname >= GL_CLIP_DISTANCE0 &&
+      pname < GL_CLIP_DISTANCE0 + GL33_MAX_CLIP_DISTANCES) {
+    return set_bool1(value,
+                     g_gl_context->clip_distance_enabled[pname - GL_CLIP_DISTANCE0]);
+  }
+
   switch (pname) {
   case GL_MAJOR_VERSION:
     return set_int1(value, 3);
@@ -341,11 +366,15 @@ static bool get_context_value(GLenum pname, GetValue *value) {
   case GL_EXTENSIONS:
     break;
 
+  case GL_MAX_CLIP_DISTANCES:
+    return set_int1(value, GL33_MAX_CLIP_DISTANCES);
   case GL_MAX_TEXTURE_SIZE:
     return set_int1(value, GX2GL_MAX_TEXTURE_SIZE);
   case GL_MAX_3D_TEXTURE_SIZE:
     return set_int1(value, GX2GL_MAX_3D_TEXTURE_SIZE);
   case GL_MAX_CUBE_MAP_TEXTURE_SIZE:
+    return set_int1(value, GX2GL_MAX_TEXTURE_SIZE);
+  case GL_MAX_RECTANGLE_TEXTURE_SIZE:
     return set_int1(value, GX2GL_MAX_TEXTURE_SIZE);
   case GL_MAX_TEXTURE_IMAGE_UNITS:
     return set_int1(value, GX2GL_MAX_TEXTURE_IMAGE_UNITS);
@@ -437,8 +466,16 @@ static bool get_context_value(GLenum pname, GetValue *value) {
     return set_bool1(value, g_gl_context->blend_enabled);
   case GL_COLOR_LOGIC_OP:
     return set_bool1(value, g_gl_context->color_logic_op_enabled);
+  case GL_DITHER:
+    return set_bool1(value, g_gl_context->dither_enabled);
+  case GL_FRAMEBUFFER_SRGB:
+    return set_bool1(value, g_gl_context->framebuffer_srgb_enabled);
   case GL_CULL_FACE:
     return set_bool1(value, g_gl_context->cull_face_enabled);
+  case GL_LINE_SMOOTH:
+    return set_bool1(value, g_gl_context->line_smooth_enabled);
+  case GL_POLYGON_SMOOTH:
+    return set_bool1(value, g_gl_context->polygon_smooth_enabled);
   case GL_SCISSOR_TEST:
     return set_bool1(value, g_gl_context->scissor_test_enabled);
   case GL_SAMPLE_ALPHA_TO_COVERAGE:
@@ -457,6 +494,12 @@ static bool get_context_value(GLenum pname, GetValue *value) {
     return set_bool1(value, g_gl_context->primitive_restart_enabled);
   case GL_RASTERIZER_DISCARD:
     return set_bool1(value, g_gl_context->rasterizer_discard_enabled);
+  case GL_VERTEX_PROGRAM_POINT_SIZE:
+    return set_bool1(value, g_gl_context->vertex_program_point_size_enabled);
+  case GL_DEPTH_CLAMP:
+    return set_bool1(value, g_gl_context->depth_clamp_enabled);
+  case GL_TEXTURE_CUBE_MAP_SEAMLESS:
+    return set_bool1(value, g_gl_context->texture_cube_map_seamless_enabled);
   case GL_POLYGON_OFFSET_POINT:
     return set_bool1(value, g_gl_context->polygon_offset_point_enabled);
   case GL_POLYGON_OFFSET_LINE:
@@ -490,6 +533,8 @@ static bool get_context_value(GLenum pname, GetValue *value) {
     return set_int1(value, (GLint)g_gl_context->bound_texture_2d[unit]);
   case GL_TEXTURE_BINDING_3D:
     return set_int1(value, (GLint)g_gl_context->bound_texture_3d[unit]);
+  case GL_TEXTURE_BINDING_RECTANGLE:
+    return set_int1(value, (GLint)g_gl_context->bound_texture_rectangle[unit]);
   case GL_TEXTURE_BINDING_CUBE_MAP:
     return set_int1(value, (GLint)g_gl_context->bound_texture_cube[unit]);
   case GL_TEXTURE_BINDING_1D_ARRAY:
@@ -504,7 +549,8 @@ static bool get_context_value(GLenum pname, GetValue *value) {
         value,
         (GLint)g_gl_context->bound_texture_2d_multisample_array[unit]);
   case GL_TEXTURE_BINDING_BUFFER:
-    return set_int1(value, (GLint)g_gl_context->bound_texture_buffer);
+    return set_int1(value,
+                    (GLint)g_gl_context->bound_texture_buffer_texture[unit]);
   case GL_SAMPLER_BINDING:
     return set_int1(value, (GLint)g_gl_context->bound_sampler[unit]);
   case GL_TRANSFORM_FEEDBACK_BUFFER_BINDING:
@@ -525,7 +571,31 @@ static bool get_context_value(GLenum pname, GetValue *value) {
     return set_int1(value, (GLint)g_gl_context->bound_read_framebuffer);
   case GL_RENDERBUFFER_BINDING:
     return set_int1(value, (GLint)g_gl_context->bound_renderbuffer);
+  case GL_DRAW_BUFFER:
+    return set_int1(value, (GLint)gl_get_draw_buffer(0));
+  case GL_READ_BUFFER:
+    return set_int1(value, (GLint)gl_get_read_buffer());
+  case GL_DRAW_BUFFER0:
+    return set_int1(value, (GLint)gl_get_draw_buffer(0));
+  case GL_DRAW_BUFFER1:
+    return set_int1(value, (GLint)gl_get_draw_buffer(1));
+  case GL_DRAW_BUFFER2:
+    return set_int1(value, (GLint)gl_get_draw_buffer(2));
+  case GL_DRAW_BUFFER3:
+    return set_int1(value, (GLint)gl_get_draw_buffer(3));
+  case GL_DRAW_BUFFER4:
+    return set_int1(value, (GLint)gl_get_draw_buffer(4));
+  case GL_DRAW_BUFFER5:
+    return set_int1(value, (GLint)gl_get_draw_buffer(5));
+  case GL_DRAW_BUFFER6:
+    return set_int1(value, (GLint)gl_get_draw_buffer(6));
+  case GL_DRAW_BUFFER7:
+    return set_int1(value, (GLint)gl_get_draw_buffer(7));
 
+  case GL_PACK_SWAP_BYTES:
+    return set_bool1(value, g_gl_context->pack_swap_bytes ? GL_TRUE : GL_FALSE);
+  case GL_PACK_LSB_FIRST:
+    return set_bool1(value, g_gl_context->pack_lsb_first ? GL_TRUE : GL_FALSE);
   case GL_PACK_ALIGNMENT:
     return set_int1(value, g_gl_context->pack_alignment);
   case GL_PACK_ROW_LENGTH:
@@ -538,6 +608,10 @@ static bool get_context_value(GLenum pname, GetValue *value) {
     return set_int1(value, g_gl_context->pack_image_height);
   case GL_PACK_SKIP_IMAGES:
     return set_int1(value, g_gl_context->pack_skip_images);
+  case GL_UNPACK_SWAP_BYTES:
+    return set_bool1(value, g_gl_context->unpack_swap_bytes ? GL_TRUE : GL_FALSE);
+  case GL_UNPACK_LSB_FIRST:
+    return set_bool1(value, g_gl_context->unpack_lsb_first ? GL_TRUE : GL_FALSE);
   case GL_UNPACK_ALIGNMENT:
     return set_int1(value, g_gl_context->unpack_alignment);
   case GL_UNPACK_ROW_LENGTH:
@@ -581,6 +655,10 @@ static bool get_context_value(GLenum pname, GetValue *value) {
     return set_float1(value, g_gl_context->line_width);
   case GL_POINT_SIZE:
     return set_float1(value, g_gl_context->point_size);
+  case GL_POINT_FADE_THRESHOLD_SIZE:
+    return set_float1(value, g_gl_context->point_fade_threshold_size);
+  case GL_POINT_SPRITE_COORD_ORIGIN:
+    return set_int1(value, (GLint)g_gl_context->point_sprite_coord_origin);
   case GL_POLYGON_OFFSET_FACTOR:
     return set_float1(value, g_gl_context->polygon_offset_factor);
   case GL_POLYGON_OFFSET_UNITS:
@@ -627,6 +705,14 @@ static bool get_context_value(GLenum pname, GetValue *value) {
     return set_int1(value, (GLint)g_gl_context->primitive_restart_index);
   case GL_PROVOKING_VERTEX:
     return set_int1(value, (GLint)g_gl_context->provoking_vertex);
+  case GL_LINE_SMOOTH_HINT:
+    return set_int1(value, (GLint)g_gl_context->line_smooth_hint);
+  case GL_POLYGON_SMOOTH_HINT:
+    return set_int1(value, (GLint)g_gl_context->polygon_smooth_hint);
+  case GL_TEXTURE_COMPRESSION_HINT:
+    return set_int1(value, (GLint)g_gl_context->texture_compression_hint);
+  case GL_FRAGMENT_SHADER_DERIVATIVE_HINT:
+    return set_int1(value, (GLint)g_gl_context->fragment_shader_derivative_hint);
   case GL_GENERATE_MIPMAP_HINT:
     return set_int1(value, (GLint)g_gl_context->generate_mipmap_hint);
   case GL_CLAMP_READ_COLOR:
