@@ -344,17 +344,30 @@ static uint32_t dirty_for_cap(GLenum cap) {
 static GLboolean *cap_storage(GLenum cap) {
   if (!g_gl_context) return NULL;
 
+  if (cap >= GL_CLIP_DISTANCE0 &&
+      cap < GL_CLIP_DISTANCE0 + GL33_MAX_CLIP_DISTANCES) {
+    return &g_gl_context->clip_distance_enabled[cap - GL_CLIP_DISTANCE0];
+  }
+
   switch (cap) {
   case GL_BLEND:
     return &g_gl_context->blend_enabled;
   case GL_COLOR_LOGIC_OP:
     return &g_gl_context->color_logic_op_enabled;
+  case GL_DITHER:
+    return &g_gl_context->dither_enabled;
+  case GL_FRAMEBUFFER_SRGB:
+    return &g_gl_context->framebuffer_srgb_enabled;
   case GL_DEPTH_TEST:
     return &g_gl_context->depth_test_enabled;
   case GL_STENCIL_TEST:
     return &g_gl_context->stencil_test_enabled;
   case GL_CULL_FACE:
     return &g_gl_context->cull_face_enabled;
+  case GL_LINE_SMOOTH:
+    return &g_gl_context->line_smooth_enabled;
+  case GL_POLYGON_SMOOTH:
+    return &g_gl_context->polygon_smooth_enabled;
   case GL_SCISSOR_TEST:
     return &g_gl_context->scissor_test_enabled;
   case GL_SAMPLE_ALPHA_TO_COVERAGE:
@@ -371,6 +384,12 @@ static GLboolean *cap_storage(GLenum cap) {
     return &g_gl_context->primitive_restart_enabled;
   case GL_RASTERIZER_DISCARD:
     return &g_gl_context->rasterizer_discard_enabled;
+  case GL_VERTEX_PROGRAM_POINT_SIZE:
+    return &g_gl_context->vertex_program_point_size_enabled;
+  case GL_DEPTH_CLAMP:
+    return &g_gl_context->depth_clamp_enabled;
+  case GL_TEXTURE_CUBE_MAP_SEAMLESS:
+    return &g_gl_context->texture_cube_map_seamless_enabled;
   case GL_POLYGON_OFFSET_FILL:
     return &g_gl_context->polygon_offset_fill_enabled;
   case GL_POLYGON_OFFSET_LINE:
@@ -766,19 +785,51 @@ void _gl_Hint(GLenum target, GLenum mode) {
     _gl_set_error(GL_INVALID_ENUM);
     return;
   }
-  if (target != GL_GENERATE_MIPMAP_HINT) {
+  switch (target) {
+  case GL_LINE_SMOOTH_HINT:
+    g_gl_context->line_smooth_hint = mode;
+    break;
+  case GL_POLYGON_SMOOTH_HINT:
+    g_gl_context->polygon_smooth_hint = mode;
+    break;
+  case GL_TEXTURE_COMPRESSION_HINT:
+    g_gl_context->texture_compression_hint = mode;
+    break;
+  case GL_FRAGMENT_SHADER_DERIVATIVE_HINT:
+    g_gl_context->fragment_shader_derivative_hint = mode;
+    break;
+  case GL_GENERATE_MIPMAP_HINT:
+    g_gl_context->generate_mipmap_hint = mode;
+    break;
+  default:
     _gl_set_error(GL_INVALID_ENUM);
-    return;
+    break;
   }
-  g_gl_context->generate_mipmap_hint = mode;
 }
 
 void _gl_PixelStorei(GLenum pname, GLint param) {
   GLint *slot = NULL;
+  bool boolean_param = false;
 
   if (!g_gl_context) return;
 
   switch (pname) {
+  case GL_PACK_SWAP_BYTES:
+    slot = &g_gl_context->pack_swap_bytes;
+    boolean_param = true;
+    break;
+  case GL_PACK_LSB_FIRST:
+    slot = &g_gl_context->pack_lsb_first;
+    boolean_param = true;
+    break;
+  case GL_UNPACK_SWAP_BYTES:
+    slot = &g_gl_context->unpack_swap_bytes;
+    boolean_param = true;
+    break;
+  case GL_UNPACK_LSB_FIRST:
+    slot = &g_gl_context->unpack_lsb_first;
+    boolean_param = true;
+    break;
   case GL_PACK_ALIGNMENT:
     slot = &g_gl_context->pack_alignment;
     break;
@@ -825,6 +876,8 @@ void _gl_PixelStorei(GLenum pname, GLint param) {
       _gl_set_error(GL_INVALID_VALUE);
       return;
     }
+  } else if (boolean_param) {
+    param = param ? GL_TRUE : GL_FALSE;
   } else if (param < 0) {
     _gl_set_error(GL_INVALID_VALUE);
     return;
@@ -1126,16 +1179,6 @@ static void emit_scissor_state(void) {
 }
 
 static void emit_blend_state(void) {
-  uint8_t blend_mask = (g_gl_context->blend_enabled &&
-                        !g_gl_context->color_logic_op_enabled)
-                           ? 0xFF
-                           : 0x00;
-  GX2LogicOp logic_op = g_gl_context->color_logic_op_enabled
-                            ? map_logic_op(g_gl_context->logic_op)
-                            : GX2_LOGIC_OP_COPY;
-
-  GX2SetColorControl(logic_op, blend_mask, GX2_FALSE, GX2_TRUE);
-
   for (GLuint i = 0; i < 8; ++i) {
     GX2SetBlendControl((GX2RenderTarget)i,
                        map_blend_factor(g_gl_context->blend_src_rgb),
@@ -1151,20 +1194,6 @@ static void emit_blend_state(void) {
                            g_gl_context->blend_color[1],
                            g_gl_context->blend_color[2],
                            g_gl_context->blend_color[3]);
-}
-
-static void emit_color_mask_state(void) {
-  uint8_t mask = 0;
-
-  if (g_gl_context->color_mask[0]) mask |= GX2_CHANNEL_MASK_R;
-  if (g_gl_context->color_mask[1]) mask |= GX2_CHANNEL_MASK_G;
-  if (g_gl_context->color_mask[2]) mask |= GX2_CHANNEL_MASK_B;
-  if (g_gl_context->color_mask[3]) mask |= GX2_CHANNEL_MASK_A;
-
-  GX2SetTargetChannelMasks((GX2ChannelMask)mask, (GX2ChannelMask)mask,
-                           (GX2ChannelMask)mask, (GX2ChannelMask)mask,
-                           (GX2ChannelMask)mask, (GX2ChannelMask)mask,
-                           (GX2ChannelMask)mask, (GX2ChannelMask)mask);
 }
 
 static void emit_depth_stencil_state(void) {
@@ -1249,9 +1278,6 @@ void gl_flush_state(void) {
   }
   if (dirty & (GL_DIRTY_BLEND | GL_DIRTY_LOGIC_OP)) {
     emit_blend_state();
-  }
-  if (dirty & GL_DIRTY_COLOR_MASK) {
-    emit_color_mask_state();
   }
   if (dirty & GL_DIRTY_DEPTH_STENCIL) {
     emit_depth_stencil_state();
