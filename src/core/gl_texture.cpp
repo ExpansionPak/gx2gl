@@ -2992,12 +2992,61 @@ static void copy_texture_row_unswapped(uint8_t *dst, const uint8_t *src,
   }
 
   if (info->bytes_per_component == 1) {
+    if (info->src_format == GL_RGB_INTEGER &&
+        info->src_components == 3 && info->dst_components == 4) {
+      for (uint32_t Texel = 0; Texel < texel_count; ++Texel) {
+        const uint8_t *Source = src + (size_t)Texel * info->src_bytes_per_texel;
+        uint8_t *Destination = dst + (size_t)Texel * info->dst_bytes_per_texel;
+        memcpy(Destination, Source, 3u);
+        Destination[3] = 1u;
+      }
+      return;
+    }
+    if (info->dst_bytes_per_texel == 4 &&
+        (info->src_format == GL_RED || info->src_format == GL_RG ||
+         info->src_format == GL_RGB || info->src_format == GL_RGBA ||
+         info->src_format == GL_BGR || info->src_format == GL_BGRA ||
+         info->src_format == GL_GREEN || info->src_format == GL_BLUE)) {
+      for (uint32_t i = 0; i < texel_count; ++i) {
+        const uint8_t *source = src + (size_t)i * info->src_bytes_per_texel;
+        uint8_t *destination = dst + (size_t)i * 4u;
+        const uint32_t size = info->src_bytes_per_component;
+        const bool bgr = info->src_format == GL_BGR ||
+                         info->src_format == GL_BGRA;
+        const bool has_alpha = info->src_format == GL_RGBA ||
+                               info->src_format == GL_BGRA;
+        float rgba[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        if (info->src_format == GL_GREEN) {
+          rgba[1] = generic_compressed_red_component(source, info->src_type);
+        } else if (info->src_format == GL_BLUE) {
+          rgba[2] = generic_compressed_red_component(source, info->src_type);
+        } else {
+          rgba[0] = generic_compressed_red_component(source +
+              (bgr ? 2u : 0u) * size, info->src_type);
+          if (info->src_components > 1u) {
+            rgba[1] = generic_compressed_red_component(source + size, info->src_type);
+          }
+          if (info->src_components > 2u) {
+            rgba[2] = generic_compressed_red_component(source +
+                (bgr ? 0u : 2u) * size, info->src_type);
+          }
+          if (has_alpha) {
+            rgba[3] = generic_compressed_red_component(source + 3u * size,
+                                                        info->src_type);
+          }
+        }
+        for (uint32_t component = 0; component < 4; ++component) {
+          float value = rgba[component];
+          if (value < 0.0f) value = 0.0f;
+          if (value > 1.0f) value = 1.0f;
+          destination[component] = (uint8_t)(value * 255.0f + 0.5f);
+        }
+      }
+      return;
+    }
     if (info->dst_bytes_per_texel == 4 && info->src_bytes_per_texel == 4 &&
         info->src_components == 4 && info->dst_components == 4) {
-      for (uint32_t i = 0; i < texel_count; ++i) {
-        uint32_t word = load_unaligned_u32(src + i * sizeof(uint32_t));
-        store_unaligned_u32(dst + i * sizeof(uint32_t), CPU_TO_GPU_32(word));
-      }
+      memcpy(dst, src, texel_count * 4u);
       return;
     }
 
@@ -3028,28 +3077,41 @@ static void copy_texture_row_unswapped(uint8_t *dst, const uint8_t *src,
     return;
   }
 
-  if (info->bytes_per_component == 2) {
-    uint32_t count = texel_count * info->dst_components;
-    for (uint32_t i = 0; i < count; ++i) {
-      uint32_t byte_offset = i * sizeof(uint16_t);
-      uint16_t word = load_unaligned_u16(src + byte_offset);
-      store_unaligned_u16(dst + byte_offset, CPU_TO_GPU_16(word));
-    }
-    return;
-  }
-
-  if (info->bytes_per_component == 4) {
-    uint32_t count = texel_count * info->dst_components;
-    for (uint32_t i = 0; i < count; ++i) {
-      uint32_t byte_offset = i * sizeof(uint32_t);
-      uint32_t word = load_unaligned_u32(src + byte_offset);
-      store_unaligned_u32(dst + byte_offset, CPU_TO_GPU_32(word));
+  if (info->bytes_per_component == 2 || info->bytes_per_component == 4) {
+    const uint32_t ComponentSize = info->bytes_per_component;
+    const bool Integer = sized_texture_is_signed_integer(info->internal_format) ||
+                         sized_texture_is_unsigned_integer(info->internal_format);
+    for (uint32_t Texel = 0; Texel < texel_count; ++Texel) {
+      const uint8_t *Source = src + (size_t)Texel * info->src_bytes_per_texel;
+      uint8_t *Destination = dst + (size_t)Texel * info->dst_bytes_per_texel;
+      for (uint32_t Component = 0; Component < info->dst_components; ++Component) {
+        uint32_t Value = 0;
+        if (Component < info->src_components) {
+          const uint8_t *Input = Source + (size_t)Component * ComponentSize;
+          Value = ComponentSize == 2 ? load_unaligned_u16(Input) :
+                                       load_unaligned_u32(Input);
+        } else if (Component == 3) {
+          if (info->src_type == GL_HALF_FLOAT) {
+            Value = 0x3c00u;
+          } else if (info->src_type == GL_FLOAT) {
+            Value = 0x3f800000u;
+          } else {
+            Value = Integer ? 1u : (ComponentSize == 2 ? 0xffffu : 0xffffffffu);
+          }
+        }
+        uint8_t *Output = Destination + (size_t)Component * ComponentSize;
+        if (ComponentSize == 2) {
+          store_unaligned_u16(Output, CPU_TO_GPU_16((uint16_t)Value));
+        } else {
+          store_unaligned_u32(Output, CPU_TO_GPU_32(Value));
+        }
+      }
     }
     return;
   }
 }
 
-static void read_texture_row(uint8_t *dst, const uint8_t *src,
+static bool copy_texture_row(uint8_t *dst, const uint8_t *src,
                              uint32_t texel_count,
                              const TextureFormatInfo *info) {
   if (info->packed_u32) {
