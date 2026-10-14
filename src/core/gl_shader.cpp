@@ -3271,7 +3271,8 @@ void _gl_GetUniformiv(GLuint p, GLint l, GLint *v) {
   uint32_t words[16];
   uint32_t actual_words = 0;
 
-  if (!is_valid_program(p) || !v) return;
+  if (!v) return;
+  if (!validate_program_object_name(p)) return;
   if (l == -1) {
     _gl_set_error(GL_INVALID_OPERATION);
     return;
@@ -3304,7 +3305,8 @@ void _gl_GetUniformuiv(GLuint program, GLint location, GLuint *params) {
   uint32_t words[16];
   uint32_t actual_words = 0;
 
-  if (!is_valid_program(program) || !params) return;
+  if (!params) return;
+  if (!validate_program_object_name(program)) return;
   if (location == -1) {
     _gl_set_error(GL_INVALID_OPERATION);
     return;
@@ -3340,7 +3342,11 @@ GLuint _gl_GetUniformBlockIndex(GLuint p, const GLchar *n) {
   prog = &g_programs[p];
   block = find_program_uniform_block(prog, n);
   if (!block) return GL_INVALID_INDEX;
-  return (GLuint)(block - prog->uniform_blocks);
+  GLuint index = 0;
+  for (uint32_t j = 0; j < (uint32_t)(block - prog->uniform_blocks); ++j) {
+    if (!prog->uniform_blocks[j].implicit) ++index;
+  }
+  return index;
 }
 
 void _gl_UniformBlockBinding(GLuint p, GLuint i, GLuint b) {
@@ -3348,15 +3354,12 @@ void _gl_UniformBlockBinding(GLuint p, GLuint i, GLuint b) {
 
   if (!is_valid_program(p)) return;
   prog = &g_programs[p];
-  if (i >= prog->uniform_block_count) {
+  ProgramUniformBlock *block = GetPublicUniformBlock(prog, i);
+  if (!block || b >= GL33_MAX_UNIFORM_BUFFER_BINDINGS) {
     _gl_set_error(GL_INVALID_VALUE);
     return;
   }
-  if (b >= GL33_MAX_UNIFORM_BUFFER_BINDINGS) {
-    _gl_set_error(GL_INVALID_VALUE);
-    return;
-  }
-  prog->uniform_blocks[i].binding_point = b;
+  block->binding_point = b;
   if (g_gl_context && g_gl_context->bound_program == p) {
     g_gl_context->dirty_flags |= GL_DIRTY_UNIFORM_BINDINGS;
   }
@@ -3423,11 +3426,12 @@ GLint _gl_GetUniformLocation(GLuint p, const GLchar *name) {
 GLint _gl_GetAttribLocation(GLuint p, const GLchar *name) {
   if (!is_valid_program(p) || !name) return -1;
   GLProgram *prog = &g_programs[p];
-  if (!prog->group || !prog->group->vertexShader) return -1;
-  GX2VertexShader *vs = prog->group->vertexShader;
-  for (uint32_t i = 0; i < vs->attribVarCount; i++)
-    if (vs->attribVars[i].name && strcmp(vs->attribVars[i].name, name) == 0)
-      return (GLint)vs->attribVars[i].location;
+  if (!prog->linked) return -1;
+  for (uint32_t i = 0; i < GL33_MAX_VERTEX_ATTRIBS; ++i) {
+    const ProgramAttribReflection *Attrib = &prog->attrib_reflection[i];
+    if (Attrib->active && Attrib->name && strcmp(Attrib->name, name) == 0)
+      return (GLint)i;
+  }
   return -1;
 }
 void _gl_ReleaseShaderCompiler(void) { gx2gl_cafeglsl_shutdown(); }
@@ -3499,15 +3503,33 @@ void _gl_Uniform4uiv(GLint l, GLsizei c, const GLuint *v) {
     update_uniform_words(l, v, c * 4, 0);
 }
 
-void _gl_UniformMatrix2fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) { (void)t; update_uniform_words(l, (uint32_t*)v, c*4, 0); }
-void _gl_UniformMatrix3fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) { (void)t; update_uniform_words(l, (uint32_t*)v, c*9, 0); }
-void _gl_UniformMatrix4fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) { (void)t; update_uniform_words(l, (uint32_t*)v, c*16, 0); }
-void _gl_UniformMatrix2x3fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) { (void)t; update_uniform_words(l, (uint32_t*)v, c*6, 0); }
-void _gl_UniformMatrix3x2fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) { (void)t; update_uniform_words(l, (uint32_t*)v, c*6, 0); }
-void _gl_UniformMatrix2x4fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) { (void)t; update_uniform_words(l, (uint32_t*)v, c*8, 0); }
-void _gl_UniformMatrix4x2fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) { (void)t; update_uniform_words(l, (uint32_t*)v, c*8, 0); }
-void _gl_UniformMatrix3x4fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) { (void)t; update_uniform_words(l, (uint32_t*)v, c*12, 0); }
-void _gl_UniformMatrix4x3fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) { (void)t; update_uniform_words(l, (uint32_t*)v, c*12, 0); }
+void _gl_UniformMatrix2fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) {
+  update_uniform_matrix(l, c, t, v, 2, 2);
+}
+void _gl_UniformMatrix3fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) {
+  update_uniform_matrix(l, c, t, v, 3, 3);
+}
+void _gl_UniformMatrix4fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) {
+  update_uniform_matrix(l, c, t, v, 4, 4);
+}
+void _gl_UniformMatrix2x3fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) {
+  update_uniform_matrix(l, c, t, v, 2, 3);
+}
+void _gl_UniformMatrix3x2fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) {
+  update_uniform_matrix(l, c, t, v, 3, 2);
+}
+void _gl_UniformMatrix2x4fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) {
+  update_uniform_matrix(l, c, t, v, 2, 4);
+}
+void _gl_UniformMatrix4x2fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) {
+  update_uniform_matrix(l, c, t, v, 4, 2);
+}
+void _gl_UniformMatrix3x4fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) {
+  update_uniform_matrix(l, c, t, v, 3, 4);
+}
+void _gl_UniformMatrix4x3fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) {
+  update_uniform_matrix(l, c, t, v, 4, 3);
+}
 
 void _gl_GetActiveUniformBlockiv(GLuint p, GLuint i, GLenum n, GLint *v) {
   GLProgram *prog;
@@ -3520,12 +3542,12 @@ void _gl_GetActiveUniformBlockiv(GLuint p, GLuint i, GLenum n, GLint *v) {
   }
 
   prog = &g_programs[p];
-  if (i >= prog->uniform_block_count) {
+  block = GetPublicUniformBlock(prog, i);
+  if (!block) {
     _gl_set_error(GL_INVALID_VALUE);
     return;
   }
 
-  block = &prog->uniform_blocks[i];
   switch (n) {
   case GL_UNIFORM_BLOCK_BINDING:
     *v = (GLint)block->binding_point;
@@ -3535,6 +3557,33 @@ void _gl_GetActiveUniformBlockiv(GLuint p, GLuint i, GLenum n, GLint *v) {
     break;
   case GL_UNIFORM_BLOCK_NAME_LENGTH:
     *v = block->name ? (GLint)strlen(block->name) + 1 : 0;
+    break;
+  case GL_UNIFORM_BLOCK_ACTIVE_UNIFORMS:
+  case GL_UNIFORM_BLOCK_ACTIVE_UNIFORM_INDICES: {
+    GLint count = 0;
+    uint32_t activeCount = get_active_uniform_count(prog);
+    for (uint32_t j = 0; j < activeCount; ++j) {
+      ActiveUniformInfo info;
+      if (!get_active_uniform_info(prog, j, &info)) continue;
+      bool MemberOfBlock = info.block_index == (GLint)i;
+      if (j >= activeCount - prog->SourceUniformCount) {
+        const GX2GLUniformReflection *Member =
+            &prog->SourceUniformMembers[j - (activeCount - prog->SourceUniformCount)];
+        const size_t Length = strlen(Member->BlockName);
+        MemberOfBlock = block->name &&
+            strncmp(block->name, Member->BlockName, Length) == 0 &&
+            (block->name[Length] == '[' || block->name[Length] == '\0');
+      }
+      if (MemberOfBlock) {
+        if (n == GL_UNIFORM_BLOCK_ACTIVE_UNIFORM_INDICES) v[count] = (GLint)j;
+        ++count;
+      }
+    }
+    if (n == GL_UNIFORM_BLOCK_ACTIVE_UNIFORMS) *v = count;
+    break;
+  }
+  case GL_UNIFORM_BLOCK_REFERENCED_BY_GEOMETRY_SHADER:
+    *v = GL_FALSE;
     break;
   case GL_UNIFORM_BLOCK_REFERENCED_BY_VERTEX_SHADER:
     *v = block->vertex_block_index >= 0 ? GL_TRUE : GL_FALSE;
@@ -3554,11 +3603,12 @@ void _gl_GetActiveUniformBlockName(GLuint p, GLuint i, GLsizei s, GLsizei *l, GL
 
   if (!is_valid_program(p) || s < 0 || (s > 0 && !n)) return;
   prog = &g_programs[p];
-  if (i >= prog->uniform_block_count) {
+  ProgramUniformBlock *block = GetPublicUniformBlock(prog, i);
+  if (!block) {
     _gl_set_error(GL_INVALID_VALUE);
     return;
   }
-  name = prog->uniform_blocks[i].name ? prog->uniform_blocks[i].name : "";
+  name = block->name ? block->name : "";
   len = (GLsizei)strlen(name);
   if (l) *l = len;
   if (s > 0) {
@@ -3598,6 +3648,15 @@ void _gl_GetActiveUniformsiv(GLuint p, GLsizei c, const GLuint *i, GLenum n, GLi
       break;
     case GL_UNIFORM_OFFSET:
       v[j] = info.offset;
+      break;
+    case GL_UNIFORM_ARRAY_STRIDE:
+      v[j] = info.array_stride;
+      break;
+    case GL_UNIFORM_MATRIX_STRIDE:
+      v[j] = info.matrix_stride;
+      break;
+    case GL_UNIFORM_IS_ROW_MAJOR:
+      v[j] = info.row_major;
       break;
     default:
       _gl_set_error(GL_INVALID_ENUM);
@@ -3730,6 +3789,52 @@ GLenum gl_program_transform_feedback_buffer_mode(GLuint program) {
   return g_programs[program].tf_linked_buffer_mode;
 }
 
+static void update_private_fragment_uniform(GLProgram *prog) {
+  if (!prog || !prog->group || !prog->group->pixelShader) return;
+
+  GX2PixelShader *shader = prog->group->pixelShader;
+  GX2ColorBuffer *color = gl_get_draw_color_buffer(0);
+  GX2DepthBuffer *depth = gl_get_draw_depth_buffer();
+  float height = color ? (float)color->surface.height
+                       : (depth ? (float)depth->surface.height
+                                : (float)g_gl_context->viewport.height);
+  uint32_t word;
+  memcpy(&word, &height, sizeof(word));
+  for (uint32_t i = 0; i < shader->uniformVarCount; ++i) {
+    const GX2UniformVar *uniform = &shader->uniformVars[i];
+    if (!is_private_fragment_uniform(uniform->name)) continue;
+
+    if (uniform->block >= 0) {
+      uint32_t index = (uint32_t)uniform->block;
+      if (!prog->ps_blocks || index >= prog->ps_block_count ||
+          !prog->ps_blocks[index].buffer ||
+          uniform->offset > prog->ps_blocks[index].size ||
+          sizeof(word) > prog->ps_blocks[index].size - uniform->offset) {
+        continue;
+      }
+      uint32_t swapped = CPU_TO_GPU_32(word);
+      memcpy((uint8_t *)prog->ps_blocks[index].buffer + uniform->offset,
+             &swapped, sizeof(swapped));
+      DCFlushRange(prog->ps_blocks[index].buffer, prog->ps_blocks[index].size);
+      continue;
+    }
+
+    uint32_t offset = shader->mode == GX2_SHADER_MODE_UNIFORM_BLOCK
+                          ? (uint32_t)uniform->offset
+                          : (uint32_t)uniform->offset * sizeof(word);
+    if (!prog->ps_direct_uniform_shadow ||
+        offset > prog->ps_direct_uniform_shadow_size ||
+        sizeof(word) > prog->ps_direct_uniform_shadow_size - offset) {
+      continue;
+    }
+    uint32_t value = shader->mode == GX2_SHADER_MODE_UNIFORM_BLOCK
+                         ? CPU_TO_GPU_32(word) : word;
+    memcpy(prog->ps_direct_uniform_shadow + offset, &value, sizeof(value));
+  }
+
+
+}
+
 void gl_bind_shaders(void) {
   if (!g_gl_context) return;
   GLuint prog_id = g_gl_context->bound_program;
@@ -3737,13 +3842,31 @@ void gl_bind_shaders(void) {
   GLProgram *prog = &g_programs[prog_id];
   if (!prog->group || !prog->linked) return;
   GX2ShaderMode shader_mode = choose_shader_mode(prog);
+  {
+    static int ProbeCount = 0;
+    if (ProbeCount++ < 12 && prog->group->pixelShader && prog->group->vertexShader) {
+      const GX2PixelShader *ps = prog->group->pixelShader;
+      const GX2VertexShader *vs = prog->group->vertexShader;
+      FILE *Probe = fopen("/vol/external01/gx2gl/float_shader_metadata.txt", "a");
+      if (Probe) {
+        fprintf(Probe, "program=%u mode=%u vmode=%u pmode=%u psize=%u pexports=%x pmask=%x pctrl=%x pin=%x pncnt=%u samplers=%u uniform=%u firstps=%x\n", prog_id,
+                (unsigned)shader_mode, (unsigned)vs->mode, (unsigned)ps->mode,
+                ps->size, ps->regs.sq_pgm_exports_ps, ps->regs.cb_shader_mask,
+                ps->regs.cb_shader_control, ps->regs.spi_ps_in_control_0,
+                ps->regs.num_spi_ps_input_cntl, ps->samplerVarCount, ps->uniformVarCount,
+                ps->regs.spi_ps_input_cntls[0]);
+        fclose(Probe);
+      }
+    }
+  }
+  update_private_fragment_uniform(prog);
   if (!g_shader_mode_valid || g_shader_mode != shader_mode) {
     GX2SetShaderMode(shader_mode);
     g_shader_mode = shader_mode;
     g_shader_mode_valid = true;
   }
   if (prog->group->vertexShader) GX2SetVertexShader(prog->group->vertexShader);
-  if (prog->group->pixelShader)  GX2SetPixelShader(prog->group->pixelShader);
+  if (prog->group->pixelShader) GX2SetPixelShader(prog->group->pixelShader);
   if (shader_mode == GX2_SHADER_MODE_UNIFORM_BLOCK ||
       shader_mode == GX2_SHADER_MODE_GEOMETRY_SHADER) {
     GX2Invalidate(GX2_INVALIDATE_MODE_SHADER, NULL, 0xFFFFFFFFu);
