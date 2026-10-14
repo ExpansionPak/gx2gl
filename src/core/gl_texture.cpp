@@ -2558,6 +2558,431 @@ static void WriteFloatTextureOutput(uint8_t *Destination, float Value,
 static void copy_texture_row_unswapped(uint8_t *dst, const uint8_t *src,
                              uint32_t texel_count,
                              const TextureFormatInfo *info) {
+  if (IsFloatTextureStorage(info->internal_format)) {
+    const bool Bgr = info->src_format == GL_BGR || info->src_format == GL_BGRA;
+    const bool Packed = compressed_red_packed_pixel_size(
+        info->src_format, info->src_type) != 0;
+    for (uint32_t Texel = 0; Texel < texel_count; ++Texel) {
+      const uint8_t *Source = src + (size_t)Texel * info->src_bytes_per_texel;
+      uint8_t *Destination = dst + (size_t)Texel * info->dst_bytes_per_texel;
+      float Components[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+      if (Packed) {
+        if (!unpack_normalized_color_pixel(Source, info->src_format,
+                                           info->src_type, Components)) return;
+      } else if (info->src_format == GL_GREEN) {
+        Components[1] = ReadSignedNormalizedInput(Source, info->src_type);
+      } else if (info->src_format == GL_BLUE) {
+        Components[2] = ReadSignedNormalizedInput(Source, info->src_type);
+      } else {
+        for (uint32_t Component = 0; Component < info->src_components; ++Component) {
+          const uint32_t Channel = Bgr && Component < 3u ? 2u - Component : Component;
+          Components[Channel] = ReadSignedNormalizedInput(
+              Source + (size_t)Component * info->src_bytes_per_component,
+              info->src_type);
+        }
+      }
+      for (uint32_t Component = 0; Component < info->dst_components; ++Component) {
+        WriteFloatTextureStorage(
+            Destination + (size_t)Component * info->bytes_per_component,
+            Components[Component], info->bytes_per_component);
+      }
+    }
+    return;
+  }
+  if ((sized_texture_is_signed_integer(info->internal_format) ||
+       sized_texture_is_unsigned_integer(info->internal_format)) &&
+      !(info->internal_format == GL_RGB10_A2UI &&
+        info->src_format == GL_RGBA_INTEGER &&
+        (info->src_type == GL_UNSIGNED_INT_2_10_10_10_REV ||
+         info->src_type == GL_UNSIGNED_INT_10_10_10_2))) {
+    const bool Signed = sized_texture_is_signed_integer(info->internal_format);
+    for (uint32_t Texel = 0; Texel < texel_count; ++Texel) {
+      const uint8_t *Source = src + (size_t)Texel * info->src_bytes_per_texel;
+      uint8_t *Destination = dst + (size_t)Texel * info->dst_bytes_per_texel;
+      int64_t Components[4] = {0, 0, 0, 1};
+      if (IntegerPackedTextureSize(info->src_format, info->src_type)) {
+        UnpackIntegerTexturePixel(Source, Components, info->src_format,
+                                  info->src_type);
+      } else for (uint32_t Component = 0; Component < info->src_components; ++Component) {
+        uint32_t Channel = IntegerTextureChannel(info->src_format, Component);
+        Components[Channel] = ReadIntegerTextureComponent(
+            Source + (size_t)Component * info->src_bytes_per_component,
+            info->src_type, false);
+      }
+      for (uint32_t Component = 0; Component < info->dst_components; ++Component) {
+        WriteIntegerTextureComponent(
+            Destination + (size_t)Component * info->bytes_per_component,
+            Components[Component], info->bytes_per_component, Signed, true);
+      }
+    }
+    return;
+  }
+  if (IsLegacyPrecisionTexture(info->internal_format)) {
+    const bool Bgr = info->src_format == GL_BGR || info->src_format == GL_BGRA;
+    const bool Packed = compressed_red_packed_pixel_size(
+        info->src_format, info->src_type) != 0;
+    for (uint32_t Texel = 0; Texel < texel_count; ++Texel) {
+      const uint8_t *Source = src + (size_t)Texel * info->src_bytes_per_texel;
+      uint8_t *Destination = dst + (size_t)Texel * info->dst_bytes_per_texel;
+      float Channels[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+      if (Packed) {
+        if (!unpack_normalized_color_pixel(Source, info->src_format,
+                                           info->src_type, Channels)) return;
+      } else if (info->src_format == GL_GREEN) {
+        Channels[1] = ReadSignedNormalizedInput(Source, info->src_type);
+      } else if (info->src_format == GL_BLUE) {
+        Channels[2] = ReadSignedNormalizedInput(Source, info->src_type);
+      } else {
+        for (uint32_t Component = 0; Component < info->src_components; ++Component) {
+          const uint32_t Channel = Bgr && Component < 3u ? 2u - Component : Component;
+          Channels[Channel] = ReadSignedNormalizedInput(
+              Source + (size_t)Component * info->src_bytes_per_component,
+              info->src_type);
+        }
+      }
+      for (uint32_t Component = 0; Component < info->dst_components; ++Component) {
+        const uint32_t Bits = LegacyTextureChannelBits(info->internal_format,
+                                                       Component);
+        float Value = Bits ? Channels[Component] : 1.0f;
+        if (Value < 0.0f) Value = 0.0f;
+        if (Value > 1.0f) Value = 1.0f;
+        const uint32_t Max = Bits ? (1u << Bits) - 1u : 1u;
+        const uint32_t Quantized = (uint32_t)(Value * (float)Max + 0.5f);
+        if (info->bytes_per_component == 1) {
+          Destination[Component] = (uint8_t)((Quantized * 255u + Max / 2u) / Max);
+        } else {
+          const uint16_t Stored = (uint16_t)((Quantized * 65535u + Max / 2u) / Max);
+          store_unaligned_u16(Destination + Component * 2u, CPU_TO_GPU_16(Stored));
+        }
+      }
+    }
+    return;
+  }
+  if (info->internal_format == GL_R3_G3_B2) {
+    const bool Bgr = info->src_format == GL_BGR || info->src_format == GL_BGRA;
+    const bool Packed = compressed_red_packed_pixel_size(info->src_format,
+                                                         info->src_type) != 0;
+    for (uint32_t Texel = 0; Texel < texel_count; ++Texel) {
+      const uint8_t *Source = src + (size_t)Texel * info->src_bytes_per_texel;
+      uint8_t *Destination = dst + (size_t)Texel * 4u;
+      float Channels[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+      if (Packed) {
+        if (!unpack_normalized_color_pixel(Source, info->src_format,
+                                           info->src_type, Channels)) return;
+      } else if (info->src_format == GL_GREEN) {
+        Channels[1] = generic_compressed_red_component(Source, info->src_type);
+      } else if (info->src_format == GL_BLUE) {
+        Channels[2] = generic_compressed_red_component(Source, info->src_type);
+      } else {
+        for (uint32_t Component = 0; Component < info->src_components; ++Component) {
+          const uint32_t Channel = Bgr && Component < 3u ? 2u - Component : Component;
+          Channels[Channel] = generic_compressed_red_component(
+              Source + (size_t)Component * info->src_bytes_per_component,
+              info->src_type);
+        }
+      }
+      for (uint32_t Component = 0; Component < 3u; ++Component) {
+        float Value = Channels[Component];
+        if (Value < 0.0f) Value = 0.0f;
+        if (Value > 1.0f) Value = 1.0f;
+        const uint32_t Max = Component == 2u ? 3u : 7u;
+        const uint32_t Quantized = (uint32_t)(Value * (float)Max + 0.5f);
+        Destination[Component] = (uint8_t)((Quantized * 255u + Max / 2u) / Max);
+      }
+      Destination[3] = 255u;
+    }
+    return;
+  }
+  if (((info->internal_format == GL_DEPTH_COMPONENT16 &&
+        info->src_type == GL_UNSIGNED_SHORT) ||
+       (info->internal_format == GL_DEPTH_COMPONENT32 &&
+        info->src_type == GL_UNSIGNED_INT)) &&
+      info->src_format == GL_DEPTH_COMPONENT) {
+    for (uint32_t Texel = 0; Texel < texel_count; ++Texel) {
+      const uint8_t *Source = src + (size_t)Texel * info->src_bytes_per_texel;
+      uint8_t *Destination = dst + (size_t)Texel * info->dst_bytes_per_texel;
+      const float Depth = generic_compressed_red_component(Source, info->src_type);
+      uint32_t Bits;
+      memcpy(&Bits, &Depth, sizeof(Bits));
+      store_unaligned_u32(Destination, CPU_TO_GPU_32(Bits));
+    }
+    return;
+  }
+  if (info->gx2_format == GX2_SURFACE_FORMAT_UNORM_R4_G4_B4_A4 &&
+      info->src_type == GL_UNSIGNED_SHORT_4_4_4_4) {
+    for (uint32_t Texel = 0; Texel < texel_count; ++Texel) {
+      const uint16_t Packed = load_unaligned_u16(src + (size_t)Texel * 2u);
+      const uint16_t Result = ((Packed >> 12u) & 0x000fu) |
+                              ((Packed >> 4u) & 0x00f0u) |
+                              ((Packed << 4u) & 0x0f00u) |
+                              ((Packed << 12u) & 0xf000u);
+      store_unaligned_u16(dst + (size_t)Texel * 2u, CPU_TO_GPU_16(Result));
+    }
+    return;
+  }
+  if (info->gx2_format == GX2_SURFACE_FORMAT_UNORM_R5_G5_B5_A1 &&
+      info->src_type == GL_UNSIGNED_SHORT_5_5_5_1) {
+    for (uint32_t Texel = 0; Texel < texel_count; ++Texel) {
+      const uint16_t Packed = load_unaligned_u16(src + (size_t)Texel * 2u);
+      const uint16_t Result = ((Packed >> 11u) & 0x001fu) |
+                              ((Packed >> 1u) & 0x03e0u) |
+                              ((Packed << 9u) & 0x7c00u) |
+                              ((Packed & 1u) << 15u);
+      store_unaligned_u16(dst + (size_t)Texel * 2u, CPU_TO_GPU_16(Result));
+    }
+    return;
+  }
+  if (((info->internal_format == GL_RGB10_A2 &&
+        info->src_format == GL_RGBA) ||
+       (info->internal_format == GL_RGB10_A2UI &&
+        info->src_format == GL_RGBA_INTEGER)) &&
+      (info->src_type == GL_UNSIGNED_INT_2_10_10_10_REV ||
+       info->src_type == GL_UNSIGNED_INT_10_10_10_2)) {
+    const bool Integer = info->internal_format == GL_RGB10_A2UI;
+    const bool Reverse = info->src_type == GL_UNSIGNED_INT_2_10_10_10_REV;
+    for (uint32_t Texel = 0; Texel < texel_count; ++Texel) {
+      uint32_t Packed = load_unaligned_u32(src + (size_t)Texel * 4u);
+      uint8_t *Destination = dst + (size_t)Texel * info->dst_bytes_per_texel;
+      for (uint32_t Component = 0; Component < 4; ++Component) {
+        const uint32_t Bits = Component == 3 ? 2u : 10u;
+        const uint32_t Max = (1u << Bits) - 1u;
+        const uint32_t Shift = Reverse ? Component * 10u :
+            (Component == 3 ? 0u : 22u - Component * 10u);
+        const uint32_t Value = (Packed >> Shift) & Max;
+        const uint16_t Result = (uint16_t)(Integer ? Value :
+            (Value * 65535u + Max / 2u) / Max);
+        store_unaligned_u16(Destination + Component * 2u,
+                            CPU_TO_GPU_16(Result));
+      }
+    }
+    return;
+  }
+  if ((info->internal_format == GL_R8_SNORM ||
+       info->internal_format == GL_RG8_SNORM ||
+       info->internal_format == GL_RGB8_SNORM ||
+       info->internal_format == GL_RGBA8_SNORM ||
+       info->internal_format == GL_R16_SNORM ||
+       info->internal_format == GL_RG16_SNORM ||
+       info->internal_format == GL_RGB16_SNORM ||
+       info->internal_format == GL_RGBA16_SNORM) &&
+      info->src_bytes_per_component != 0) {
+    const bool Bgr = info->src_format == GL_BGR || info->src_format == GL_BGRA;
+    const bool Packed = compressed_red_packed_pixel_size(
+        info->src_format, info->src_type) != 0;
+    const uint32_t ComponentSize = info->src_bytes_per_component;
+    for (uint32_t Texel = 0; Texel < texel_count; ++Texel) {
+      const uint8_t *Source = src + (size_t)Texel * info->src_bytes_per_texel;
+      uint8_t *Destination = dst + (size_t)Texel * info->dst_bytes_per_texel;
+      float Components[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+      if (Packed) {
+        if (!unpack_normalized_color_pixel(Source, info->src_format,
+                                           info->src_type, Components)) return;
+      } else if (info->src_format == GL_GREEN) {
+        Components[1] = ReadSignedNormalizedInput(Source, info->src_type);
+      } else if (info->src_format == GL_BLUE) {
+        Components[2] = ReadSignedNormalizedInput(Source, info->src_type);
+      } else {
+        for (uint32_t Component = 0; Component < info->src_components; ++Component) {
+          uint32_t DestinationComponent = Bgr && Component < 3u ?
+              2u - Component : Component;
+          Components[DestinationComponent] = ReadSignedNormalizedInput(
+              Source + (size_t)Component * ComponentSize, info->src_type);
+        }
+      }
+      if (info->internal_format == GL_RGB8_SNORM ||
+          info->internal_format == GL_RGB16_SNORM) Components[3] = 1.0f;
+      for (uint32_t Component = 0; Component < info->dst_components; ++Component) {
+        float Value = Components[Component];
+        if (info->bytes_per_component == 1) {
+          Destination[Component] = (uint8_t)(int8_t)QuantizeSignedNormalized(
+              Value, 127.0f);
+        } else {
+          int16_t Result = (int16_t)QuantizeSignedNormalized(Value, 32767.0f);
+          store_unaligned_u16(Destination + Component * 2u,
+                              CPU_TO_GPU_16((uint16_t)Result));
+        }
+      }
+    }
+    return;
+  }
+  if (info->internal_format == GL_COMPRESSED_RED &&
+      info->dst_bytes_per_texel == 1) {
+    for (uint32_t i = 0; i < texel_count; ++i) {
+      const uint8_t *source = src + (size_t)i * info->src_bytes_per_texel;
+      float red = 0.0f;
+      if (info->src_format != GL_GREEN && info->src_format != GL_BLUE) {
+        uint32_t index = (info->src_format == GL_BGR ||
+                          info->src_format == GL_BGRA) ? 2u : 0u;
+        if (compressed_red_packed_pixel_size(info->src_format, info->src_type)) {
+          red = compressed_red_packed_component(source, info->src_format,
+                                                info->src_type);
+        } else {
+          red = generic_compressed_red_component(
+              source + index * info->src_bytes_per_component, info->src_type);
+        }
+      }
+      if (red < 0.0f) red = 0.0f;
+      if (red > 1.0f) red = 1.0f;
+      dst[i] = (uint8_t)(red * 255.0f + 0.5f);
+    }
+    return;
+  }
+  if ((info->internal_format == GL_R16 || info->internal_format == GL_RG16 ||
+       info->internal_format == GL_RGB16 || info->internal_format == GL_RGBA16 ||
+       info->internal_format == GL_RGB10_A2) &&
+      info->src_bytes_per_component != 0) {
+    const bool bgr = info->src_format == GL_BGR || info->src_format == GL_BGRA;
+    const bool packed = compressed_red_packed_pixel_size(info->src_format, info->src_type) != 0;
+    for (uint32_t i = 0; i < texel_count; ++i) {
+      const uint8_t *source = src + (size_t)i * info->src_bytes_per_texel;
+      uint8_t *destination = dst + (size_t)i * info->dst_bytes_per_texel;
+      float rgba[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+      if (packed) {
+        if (!unpack_normalized_color_pixel(source, info->src_format,
+                                           info->src_type, rgba)) return;
+      } else if (info->src_format == GL_GREEN) {
+        rgba[1] = generic_compressed_red_component(source, info->src_type);
+      } else if (info->src_format == GL_BLUE) {
+        rgba[2] = generic_compressed_red_component(source, info->src_type);
+      } else {
+        uint32_t size = info->src_bytes_per_component;
+        for (uint32_t c = 0; c < info->src_components && c < 4u; ++c) {
+          uint32_t destination_component = bgr && c < 3u ? 2u - c : c;
+          rgba[destination_component] = generic_compressed_red_component(
+              source + (size_t)c * size, info->src_type);
+        }
+      }
+      if (info->internal_format == GL_RGB16) rgba[3] = 1.0f;
+      for (uint32_t c = 0; c < info->dst_components; ++c) {
+        float value = rgba[c];
+        if (value < 0.0f) value = 0.0f;
+        if (value > 1.0f) value = 1.0f;
+        if (info->internal_format == GL_RGB10_A2) {
+          const uint32_t max = c == 3 ? 3u : 1023u;
+          value = (float)(uint32_t)(value * (float)max + 0.5f) / (float)max;
+        }
+        store_unaligned_u16(destination + c * 2u,
+                            CPU_TO_GPU_16((uint16_t)(value * 65535.0f + 0.5f)));
+      }
+    }
+    return;
+  }
+  if ((info->internal_format == GL_R8 || info->internal_format == GL_RG8 ||
+       info->internal_format == GL_RG ||
+       info->internal_format == GL_COMPRESSED_RG) &&
+      compressed_red_packed_pixel_size(info->src_format, info->src_type)) {
+    for (uint32_t i = 0; i < texel_count; ++i) {
+      const uint8_t *source = src + (size_t)i * info->src_bytes_per_texel;
+      uint8_t *destination = dst + (size_t)i * info->dst_bytes_per_texel;
+      float rgba[4];
+      if (!unpack_normalized_color_pixel(source, info->src_format,
+                                         info->src_type, rgba)) {
+        return;
+      }
+      for (uint32_t c = 0; c < info->dst_components; ++c) {
+        float value = rgba[c];
+        if (value < 0.0f) value = 0.0f;
+        if (value > 1.0f) value = 1.0f;
+        destination[c] = (uint8_t)(value * 255.0f + 0.5f);
+      }
+    }
+    return;
+  }
+  if ((info->internal_format == GL_R8 || info->internal_format == GL_RG8 ||
+       info->internal_format == GL_RG ||
+       info->internal_format == GL_COMPRESSED_RG) &&
+      info->src_bytes_per_component != 0 &&
+      (info->src_format == GL_RED || info->src_format == GL_GREEN ||
+       info->src_format == GL_BLUE || info->src_format == GL_RG ||
+       info->src_format == GL_RGB || info->src_format == GL_BGR ||
+       info->src_format == GL_RGBA || info->src_format == GL_BGRA)) {
+    const uint32_t component_size = info->src_bytes_per_component;
+    const bool bgr = info->src_format == GL_BGR || info->src_format == GL_BGRA;
+    for (uint32_t i = 0; i < texel_count; ++i) {
+      const uint8_t *source = src + (size_t)i * info->src_bytes_per_texel;
+      uint8_t *destination = dst + (size_t)i * info->dst_bytes_per_texel;
+      float red = 0.0f;
+      float green = 0.0f;
+      if (info->src_format == GL_GREEN) {
+        green = generic_compressed_red_component(source, info->src_type);
+      } else if (info->src_format != GL_BLUE) {
+        red = generic_compressed_red_component(
+            source + (bgr ? 2u : 0u) * component_size, info->src_type);
+        if (info->src_components > 1) {
+          green = generic_compressed_red_component(
+              source + component_size, info->src_type);
+        }
+      }
+      if (red < 0.0f) red = 0.0f;
+      if (red > 1.0f) red = 1.0f;
+      if (green < 0.0f) green = 0.0f;
+      if (green > 1.0f) green = 1.0f;
+      destination[0] = (uint8_t)(red * 255.0f + 0.5f);
+      if (info->dst_components > 1) {
+        destination[1] = (uint8_t)(green * 255.0f + 0.5f);
+      }
+    }
+    return;
+  }
+  if (info->dst_bytes_per_texel == 4 &&
+      compressed_red_packed_pixel_size(info->src_format, info->src_type)) {
+    for (uint32_t i = 0; i < texel_count; ++i) {
+      const uint8_t *source = src + (size_t)i * info->src_bytes_per_texel;
+      uint8_t *destination = dst + (size_t)i * 4u;
+      float rgba[4];
+      if (!unpack_normalized_color_pixel(source, info->src_format,
+                                         info->src_type, rgba)) return;
+      for (uint32_t c = 0; c < 4; ++c) {
+        float value = rgba[c];
+        if (value < 0.0f) value = 0.0f;
+        if (value > 1.0f) value = 1.0f;
+        destination[c] = (uint8_t)(value * 255.0f + 0.5f);
+      }
+    }
+    return;
+  }
+  if (info->src_type == GL_FLOAT && info->bytes_per_component == 1) {
+    const bool bgr = info->src_format == GL_BGR || info->src_format == GL_BGRA;
+    for (uint32_t i = 0; i < texel_count; ++i) {
+      const uint8_t *src_texel = src + i * info->src_bytes_per_texel;
+      uint8_t *dst_texel = dst + i * info->dst_bytes_per_texel;
+      float rgba[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+
+      for (uint32_t c = 0; c < info->src_components && c < 4; ++c) {
+        float value;
+        memcpy(&value, src_texel + c * sizeof(float), sizeof(value));
+        rgba[bgr && c < 3 ? 2 - c : c] = value;
+      }
+      for (uint32_t c = 0; c < info->dst_components && c < 4; ++c) {
+        float value = rgba[c];
+        if (value < 0.0f) value = 0.0f;
+        if (value > 1.0f) value = 1.0f;
+        dst_texel[c] = (uint8_t)(value * 255.0f + 0.5f);
+      }
+    }
+    return;
+  }
+
+  if (info->bytes_per_component == 4 && info->dst_components == 4 &&
+      ((info->internal_format == GL_R11F_G11F_B10F &&
+        info->src_type == GL_UNSIGNED_INT_10F_11F_11F_REV) ||
+       (info->internal_format == GL_RGB9_E5 &&
+        info->src_type == GL_UNSIGNED_INT_5_9_9_9_REV))) {
+    for (uint32_t i = 0; i < texel_count; ++i) {
+      const uint8_t *Source = src + (size_t)i * info->src_bytes_per_texel;
+      uint8_t *Destination = dst + (size_t)i * info->dst_bytes_per_texel;
+      float Components[4];
+      if (!unpack_normalized_color_pixel(Source, info->src_format,
+                                         info->src_type, Components)) return;
+      for (uint32_t c = 0; c < 4; ++c) {
+        uint32_t Word;
+        memcpy(&Word, &Components[c], sizeof(Word));
+        store_unaligned_u32(Destination + c * sizeof(Word), CPU_TO_GPU_32(Word));
+      }
+    }
+    return;
+  }
+
   if (info->packed_u32) {
     for (uint32_t i = 0; i < texel_count; ++i) {
       uint32_t word = load_unaligned_u32(src + i * sizeof(uint32_t));
