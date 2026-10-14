@@ -52,6 +52,7 @@ void _gl_TexImage3DMultisample(GLenum target, GLsizei samples,
                                GLenum internalformat, GLsizei width,
                                GLsizei height, GLsizei depth,
                                GLboolean fixedsamplelocations);
+void _gl_TexBuffer(GLenum target, GLenum internalformat, GLuint buffer);
 
 void _gl_TexImage1D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLint border, GLenum format, GLenum type, const GLvoid *pixels);
 void _gl_TexSubImage1D(GLenum target, GLint level, GLint xoffset, GLsizei width, GLenum format, GLenum type, const GLvoid *pixels);
@@ -67,9 +68,22 @@ void _gl_GetTexLevelParameterfv(GLenum target, GLint level, GLenum pname, GLfloa
 void _gl_GetTexImage(GLenum target, GLint level, GLenum format, GLenum type, GLvoid *pixels);
 void _gl_GetCompressedTexImage(GLenum target, GLint level, GLvoid *pixels);
 
+GLsizei gl_texture_packed_pixel_size(GLenum format, GLenum type);
+GLboolean gl_texture_pack_integer_pixel(uint8_t *Destination,
+                                         const int64_t Components[4],
+                                         GLenum Format, GLenum Type);
+GLboolean gl_texture_pack_float_pixel(uint8_t *Destination,
+                                       const float Channels[4],
+                                       GLenum Format, GLenum Type);
+GLboolean gl_texture_pack_normalized_pixel(uint8_t *dst, const uint8_t *rgba,
+                                           GLenum format, GLenum type);
+GLboolean gl_texture_pack_normalized_pixel16(uint8_t *dst, const uint16_t *rgba,
+                                             GLenum format, GLenum type);
+
 void gl_bind_textures(void);
 
 GX2Texture *gl_get_gx2_texture(GLuint id);
+GLboolean gl_get_texture_swizzle(GLuint id, GLenum components[4]);
 GLint gl_get_texture_internal_format(GLuint id);
 GLenum gl_get_texture_target(GLuint id);
 GLsizei gl_get_texture_samples(GLuint id);
