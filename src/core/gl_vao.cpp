@@ -334,7 +334,7 @@ void _gl_EnableVertexAttribArray(GLuint index) {
     return;
   }
 
-  vao = current_vao(false);
+  vao = current_vao(true);
   if (!vao) return;
 
   vao->attribs[index].enabled = GL_TRUE;
@@ -350,7 +350,7 @@ void _gl_DisableVertexAttribArray(GLuint index) {
     return;
   }
 
-  vao = current_vao(false);
+  vao = current_vao(true);
   if (!vao) return;
 
   vao->attribs[index].enabled = GL_FALSE;
@@ -665,7 +665,7 @@ void _gl_VertexAttribDivisor(GLuint index, GLuint divisor) {
     return;
   }
 
-  vao = current_vao(false);
+  vao = current_vao(true);
   if (!vao) return;
 
   vao->attribs[index].divisor = divisor;
@@ -684,17 +684,11 @@ GLboolean gl_vao_has_bound_array(void) {
 void gl_vao_set_element_array_buffer(GLuint buffer) {
   GLVAO *vao;
 
-  if (!g_gl_context || g_bound_vao >= MAX_VAOS) return;
-
-  vao = &g_vaos[g_bound_vao];
-  if (g_bound_vao != 0 && !vao->in_use) {
-    _gl_set_error(GL_INVALID_OPERATION);
-    return;
-  }
+  vao = current_vao(true);
+  if (!vao) return;
 
   vao->element_array_buffer = buffer;
-  if (g_bound_vao != 0)
-    mark_vao_dirty(vao);
+  mark_vao_dirty(vao);
 }
 
 void gl_vao_unbind_buffer(GLuint buffer) {
