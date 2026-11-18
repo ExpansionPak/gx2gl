@@ -512,8 +512,11 @@ static bool reserve_binding(bool used_bindings[], int max_bindings,
   return true;
 }
 
-static int assign_binding(bool used_bindings[], int max_bindings) {
-  for (int i = 0; i < max_bindings; ++i) {
+/* CafeGLSL 0.3 keeps uniform block binding 0 for a shader's loose uniforms, so
+ * blocks are assigned from 1 up. Samplers have no such slot and start at 0.
+ */
+static int assign_binding(bool used_bindings[], int max_bindings, bool uniform_block) {
+  for (int i = uniform_block ? 1 : 0; i < max_bindings; ++i) {
     if (!used_bindings[i]) {
       used_bindings[i] = true;
       return i;
@@ -1257,7 +1260,8 @@ static char *lower_source_for_cafeglsl(const char *source,
           if ((uniform_decl.is_block || is_sampler_type(uniform_decl.type)) &&
               !uniform_decl.layout.has_binding) {
             int binding = assign_binding(used_bindings,
-                                         GL33_MAX_COMBINED_TEXTURE_IMAGE_UNITS);
+                                         GL33_MAX_COMBINED_TEXTURE_IMAGE_UNITS,
+                                         uniform_decl.is_block);
             if (binding < 0) {
               write_info_log(info_log_out, info_log_max_length,
                              "Shader has too many sampler or uniform block "
