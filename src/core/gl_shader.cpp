@@ -14,6 +14,7 @@
 extern "C" {
 #endif
 #include <coreinit/cache.h>
+#include <gx2/event.h>
 #include <gfd.h>
 #include <gx2/draw.h>
 #include <gx2/mem.h>
@@ -188,6 +189,18 @@ typedef struct {
   uint32_t component_count;
 } ProgramTransformFeedbackVarying;
 
+#define GX2GL_FETCH_SHADER_CACHE_SIZE 4
+
+typedef struct {
+  bool valid;
+  uint32_t attrib_count;
+  GX2AttribStream streams[GL33_MAX_VERTEX_ATTRIBS];
+  GX2FetchShader shader;
+  void *program;
+  uint32_t program_size;
+  uint32_t last_used;
+} ProgramFetchShaderEntry;
+
 typedef struct {
   bool in_use;
   bool linked;
@@ -234,10 +247,12 @@ typedef struct {
   GLuint tf_required_binding_count;
   bool tf_stream_out_ready;
   ProgramAttribReflection attrib_reflection[GL33_MAX_VERTEX_ATTRIBS];
-  GX2FetchShader dynamic_fetch_shader;
-  void *dynamic_fetch_shader_program;
-  uint32_t dynamic_fetch_shader_program_size;
-  uint32_t dynamic_fetch_shader_attrib_count;
+  /* Fetch shaders built for the vertex layouts this program has drawn with.
+   * The GPU reads a fetch shader when it runs the draw, possibly a frame later,
+   * so a built one is never rewritten while it may still be in use.
+   */
+  ProgramFetchShaderEntry fetch_shaders[GX2GL_FETCH_SHADER_CACHE_SIZE];
+  uint32_t fetch_shader_clock;
   char *attrib_binding_names[GL33_MAX_VERTEX_ATTRIBS];
 } GLProgram;
 
@@ -1165,17 +1180,15 @@ static void clear_program_runtime_state(GLProgram *prog) {
   } else if (prog->owns_group && prog->owned_group.fetchShaderProgram) {
     gl_mem_free(GL_MEM_TYPE_MEM2, prog->owned_group.fetchShaderProgram);
   }
-  if (prog->dynamic_fetch_shader_program) {
-    gl_mem_free(GL_MEM_TYPE_MEM2, prog->dynamic_fetch_shader_program);
+  for (ProgramFetchShaderEntry &entry : prog->fetch_shaders) {
+    if (entry.program) gl_mem_free(GL_MEM_TYPE_MEM2, entry.program);
   }
   release_compiled_shader(prog->linked_vertex_binary);
   release_compiled_shader(prog->linked_pixel_binary);
 
   memset(&prog->owned_group, 0, sizeof(prog->owned_group));
-  memset(&prog->dynamic_fetch_shader, 0, sizeof(prog->dynamic_fetch_shader));
-  prog->dynamic_fetch_shader_program = NULL;
-  prog->dynamic_fetch_shader_program_size = 0;
-  prog->dynamic_fetch_shader_attrib_count = 0;
+  memset(prog->fetch_shaders, 0, sizeof(prog->fetch_shaders));
+  prog->fetch_shader_clock = 0;
   prog->linked_vertex_binary = NULL;
   prog->linked_pixel_binary = NULL;
   prog->group = NULL;
@@ -2500,32 +2513,62 @@ typedef struct {
   const uint8_t *data_ptr;
 } ProgramFetchBufferBinding;
 
-static bool ensure_dynamic_fetch_shader_storage(GLProgram *prog, uint32_t attrib_count) {
-  uint32_t required_size;
+/* Returns the fetch shader for this vertex layout, building it if needed. A
+ * built fetch shader is reused as is: rewriting one in place, as gx2gl did on
+ * every draw, races with the GPU still running an earlier draw that uses it.
+ */
+static const GX2FetchShader *get_program_fetch_shader(GLProgram *prog,
+                                                      const GX2AttribStream *streams,
+                                                      uint32_t attrib_count) {
+  ProgramFetchShaderEntry *slot = NULL;
+  const size_t streams_size = attrib_count * sizeof(GX2AttribStream);
 
-  if (!prog) return false;
-
-  required_size = GX2CalcFetchShaderSizeEx(attrib_count,
-                                           GX2_FETCH_SHADER_TESSELLATION_NONE,
-                                           GX2_TESSELLATION_MODE_DISCRETE);
-  if (required_size == 0) return false;
-
-  if (!prog->dynamic_fetch_shader_program || prog->dynamic_fetch_shader_program_size != required_size) {
-    if (prog->dynamic_fetch_shader_program) {
-      gl_mem_free(GL_MEM_TYPE_MEM2, prog->dynamic_fetch_shader_program);
-      prog->dynamic_fetch_shader_program = NULL;
+  ++prog->fetch_shader_clock;
+  for (ProgramFetchShaderEntry &entry : prog->fetch_shaders) {
+    if (entry.valid && entry.attrib_count == attrib_count &&
+        memcmp(entry.streams, streams, streams_size) == 0) {
+      entry.last_used = prog->fetch_shader_clock;
+      return &entry.shader;
     }
-    prog->dynamic_fetch_shader_program =
-        gl_mem_alloc(GL_MEM_TYPE_MEM2, required_size, GX2_SHADER_PROGRAM_ALIGNMENT);
-    if (!prog->dynamic_fetch_shader_program) {
-      prog->dynamic_fetch_shader_program_size = 0;
-      return false;
-    }
-    prog->dynamic_fetch_shader_program_size = required_size;
   }
 
-  prog->dynamic_fetch_shader_attrib_count = attrib_count;
-  return true;
+  for (ProgramFetchShaderEntry &entry : prog->fetch_shaders) {
+    if (!entry.valid) {
+      slot = &entry;
+      break;
+    }
+    if (!slot || entry.last_used < slot->last_used) slot = &entry;
+  }
+  if (slot->valid) {
+    /* Evicting a layout an in-flight draw may still read. Rare: it takes more
+     * than GX2GL_FETCH_SHADER_CACHE_SIZE layouts with one program. */
+    GX2DrawDone();
+  }
+
+  const uint32_t required_size = GX2CalcFetchShaderSizeEx(
+      attrib_count, GX2_FETCH_SHADER_TESSELLATION_NONE, GX2_TESSELLATION_MODE_DISCRETE);
+  if (required_size == 0) return NULL;
+  if (!slot->program || slot->program_size < required_size) {
+    if (slot->program) gl_mem_free(GL_MEM_TYPE_MEM2, slot->program);
+    slot->program = gl_mem_alloc(GL_MEM_TYPE_MEM2, required_size, GX2_SHADER_PROGRAM_ALIGNMENT);
+    slot->program_size = slot->program ? required_size : 0;
+    if (!slot->program) {
+      slot->valid = false;
+      return NULL;
+    }
+  }
+
+  memset(slot->program, 0, slot->program_size);
+  GX2InitFetchShaderEx(&slot->shader, (uint8_t *)slot->program, attrib_count,
+                       const_cast<GX2AttribStream *>(streams),
+                       GX2_FETCH_SHADER_TESSELLATION_NONE, GX2_TESSELLATION_MODE_DISCRETE);
+  DCFlushRange(slot->program, slot->program_size);
+  GX2Invalidate(GX2_INVALIDATE_MODE_CPU_SHADER, slot->program, slot->program_size);
+  memcpy(slot->streams, streams, streams_size);
+  slot->attrib_count = attrib_count;
+  slot->valid = true;
+  slot->last_used = prog->fetch_shader_clock;
+  return &slot->shader;
 }
 
 void gl_bind_program_fetch_shader(void) {
@@ -2634,23 +2677,12 @@ void gl_bind_program_fetch_shader(void) {
     ++attrib_count;
   }
 
-  if (!ensure_dynamic_fetch_shader_storage(prog, attrib_count)) {
+  const GX2FetchShader *fetch_shader = get_program_fetch_shader(prog, streams, attrib_count);
+  if (!fetch_shader) {
     WiiU_Log("gx2gl: failed to allocate dynamic fetch shader storage for program %u.", prog_id);
     return;
   }
-
-  memset(prog->dynamic_fetch_shader_program, 0, prog->dynamic_fetch_shader_program_size);
-  GX2InitFetchShaderEx(&prog->dynamic_fetch_shader,
-                       (uint8_t *)prog->dynamic_fetch_shader_program,
-                       attrib_count,
-                       streams,
-                       GX2_FETCH_SHADER_TESSELLATION_NONE,
-                       GX2_TESSELLATION_MODE_DISCRETE);
-  DCFlushRange(prog->dynamic_fetch_shader_program, prog->dynamic_fetch_shader_program_size);
-  GX2Invalidate(GX2_INVALIDATE_MODE_CPU_SHADER,
-                prog->dynamic_fetch_shader_program,
-                prog->dynamic_fetch_shader_program_size);
-  GX2SetFetchShader(&prog->dynamic_fetch_shader);
+  GX2SetFetchShader(const_cast<GX2FetchShader *>(fetch_shader));
 
   for (uint32_t i = 0; i < buffer_count; ++i) {
     if (!buffers[i].in_use) continue;
