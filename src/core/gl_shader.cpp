@@ -628,6 +628,14 @@ static GLint GetStageUniformBlockIndex(const GLProgram *prog, GLint stageIndex, 
   return -1;
 }
 
+/* CafeGLSL, like GX2, gives uniform offsets in 32-bit registers. Inside a
+ * uniform block gx2gl addresses bytes, so block members are scaled here.
+ * (Loose uniforms of pre-0.3 CafeGLSL, block < 0, keep their own units.)
+ */
+static uint32_t uniform_var_offset(const GX2UniformVar *var) {
+  return var->block >= 0 ? (uint32_t)var->offset * 4u : (uint32_t)var->offset;
+}
+
 static bool get_active_uniform_info(GLProgram *prog, GLuint index, ActiveUniformInfo *info) {
   GX2VertexShader *vs;
   GX2PixelShader *ps;
@@ -648,11 +656,11 @@ static bool get_active_uniform_info(GLProgram *prog, GLuint index, ActiveUniform
       info->size = (GLint)shader_var_element_count(vs->uniformVars[i].count);
       info->type = shader_var_type_to_gl_enum(vs->uniformVars[i].type);
       info->block_index = GetStageUniformBlockIndex(prog, vs->uniformVars[i].block, false);
-      info->offset = (GLint)vs->uniformVars[i].offset;
+      info->offset = (GLint)uniform_var_offset(&vs->uniformVars[i]);
       info->location = vs->uniformVars[i].block < 0
                            ? make_direct_uniform_location(false, (uint32_t)vs->uniformVars[i].offset)
                            : (GLint)(((uint32_t)vs->uniformVars[i].block << 16) |
-                                     ((uint32_t)vs->uniformVars[i].offset & 0xFFFFu));
+                                     (uniform_var_offset(&vs->uniformVars[i]) & 0xFFFFu));
       return info->type != 0;
     }
   }
@@ -664,12 +672,12 @@ static bool get_active_uniform_info(GLProgram *prog, GLuint index, ActiveUniform
       info->size = (GLint)shader_var_element_count(ps->uniformVars[i].count);
       info->type = shader_var_type_to_gl_enum(ps->uniformVars[i].type);
       info->block_index = GetStageUniformBlockIndex(prog, ps->uniformVars[i].block, true);
-      info->offset = (GLint)ps->uniformVars[i].offset;
+      info->offset = (GLint)uniform_var_offset(&ps->uniformVars[i]);
       info->location = ps->uniformVars[i].block < 0
                            ? make_direct_uniform_location(true, (uint32_t)ps->uniformVars[i].offset)
                            : (GLint)(GL_LOCATION_STAGE_PIXEL |
                                      ((uint32_t)ps->uniformVars[i].block << 16) |
-                                     ((uint32_t)ps->uniformVars[i].offset & 0xFFFFu));
+                                     (uniform_var_offset(&ps->uniformVars[i]) & 0xFFFFu));
       return info->type != 0;
     }
   }
@@ -780,13 +788,13 @@ static bool get_uniform_var_by_location(GLProgram *prog, GLint location,
       GLint candidate = vs->uniformVars[i].block < 0
                             ? make_direct_uniform_location(false, (uint32_t)vs->uniformVars[i].offset)
                             : (GLint)(((uint32_t)vs->uniformVars[i].block << 16) |
-                                      ((uint32_t)vs->uniformVars[i].offset & 0xFFFFu));
+                                      (uniform_var_offset(&vs->uniformVars[i]) & 0xFFFFu));
       if (candidate != location) continue;
       if (pixel_stage) *pixel_stage = false;
       if (type) *type = vs->uniformVars[i].type;
       if (element_count) *element_count = shader_var_element_count(vs->uniformVars[i].count);
       if (block_index) *block_index = vs->uniformVars[i].block >= 0 ? (uint32_t)vs->uniformVars[i].block : 0u;
-      if (offset) *offset = (uint32_t)vs->uniformVars[i].offset;
+      if (offset) *offset = uniform_var_offset(&vs->uniformVars[i]);
       if (word_count) {
         *word_count = shader_var_type_word_count(vs->uniformVars[i].type) *
                       shader_var_element_count(vs->uniformVars[i].count);
@@ -801,13 +809,13 @@ static bool get_uniform_var_by_location(GLProgram *prog, GLint location,
                             ? make_direct_uniform_location(true, (uint32_t)ps->uniformVars[i].offset)
                             : (GLint)(GL_LOCATION_STAGE_PIXEL |
                                       ((uint32_t)ps->uniformVars[i].block << 16) |
-                                      ((uint32_t)ps->uniformVars[i].offset & 0xFFFFu));
+                                      (uniform_var_offset(&ps->uniformVars[i]) & 0xFFFFu));
       if (candidate != location) continue;
       if (pixel_stage) *pixel_stage = true;
       if (type) *type = ps->uniformVars[i].type;
       if (element_count) *element_count = shader_var_element_count(ps->uniformVars[i].count);
       if (block_index) *block_index = ps->uniformVars[i].block >= 0 ? (uint32_t)ps->uniformVars[i].block : 0u;
-      if (offset) *offset = (uint32_t)ps->uniformVars[i].offset;
+      if (offset) *offset = uniform_var_offset(&ps->uniformVars[i]);
       if (word_count) {
         *word_count = shader_var_type_word_count(ps->uniformVars[i].type) *
                       shader_var_element_count(ps->uniformVars[i].count);
@@ -3852,12 +3860,12 @@ static void update_private_fragment_uniform(GLProgram *prog) {
       uint32_t index = (uint32_t)uniform->block;
       if (!prog->ps_blocks || index >= prog->ps_block_count ||
           !prog->ps_blocks[index].buffer ||
-          uniform->offset > prog->ps_blocks[index].size ||
-          sizeof(word) > prog->ps_blocks[index].size - uniform->offset) {
+          uniform_var_offset(uniform) > prog->ps_blocks[index].size ||
+          sizeof(word) > prog->ps_blocks[index].size - uniform_var_offset(uniform)) {
         continue;
       }
       uint32_t swapped = CPU_TO_GPU_32(word);
-      memcpy((uint8_t *)prog->ps_blocks[index].buffer + uniform->offset,
+      memcpy((uint8_t *)prog->ps_blocks[index].buffer + uniform_var_offset(uniform),
              &swapped, sizeof(swapped));
       DCFlushRange(prog->ps_blocks[index].buffer, prog->ps_blocks[index].size);
       continue;
