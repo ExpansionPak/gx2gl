@@ -640,7 +640,9 @@ static bool build_texture_attachment_read_surface(const GLAttachmentRef *attachm
                      ? (uint8_t *)source->image
                      : (source->mipmaps
                             ? (uint8_t *)source->mipmaps +
-                                  source->mipLevelOffset[attachment->level - 1]
+                                  (attachment->level == 1
+                                       ? 0
+                                       : source->mipLevelOffset[attachment->level - 1])
                             : NULL);
     if (!level_base) return false;
 

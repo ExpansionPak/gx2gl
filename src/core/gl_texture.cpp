@@ -1687,8 +1687,10 @@ static uint8_t *get_texture_level_ptr_from_gx2(const GX2Texture *texture,
   if (!texture->surface.mipmaps) {
     return NULL;
   }
+  /* GX2 keeps mip level 1 at the start of the mipmaps block: its
+     mipLevelOffset[0] is the offset from the base image instead. */
   return (uint8_t *)texture->surface.mipmaps +
-         texture->surface.mipLevelOffset[level - 1];
+         (level == 1 ? 0 : texture->surface.mipLevelOffset[level - 1]);
 }
 
 static uint8_t *get_texture_level_ptr(const GLTexture *tex, uint32_t level) {

@@ -512,7 +512,7 @@ static bool get_color_buffer_cpu_view(const GX2ColorBuffer *color_buffer,
                    ? (uint8_t *)source->image
                    : (source->mipmaps
                           ? (uint8_t *)source->mipmaps +
-                                source->mipLevelOffset[level - 1]
+                                (level == 1 ? 0 : source->mipLevelOffset[level - 1])
                           : NULL);
   if (!level_base) return false;
 
