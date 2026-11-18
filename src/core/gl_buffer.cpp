@@ -1,8 +1,11 @@
 #include "gl_buffer.h"
+#include "mem/gl_mem.h"
 #include "gl_vao.h"
 #include "endian/endian.h"
 
 #include <gx2r/buffer.h>
+#include <gx2/draw.h>
+#include <gx2/event.h>
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -141,9 +144,29 @@ static bool create_gx2r_buffer(GX2RBuffer *gx2, GLsizeiptr size,
   return true;
 }
 
+static void destroy_retired_gx2r_buffer(void *arg) {
+  GX2RBuffer *gx2 = (GX2RBuffer *)arg;
+  GX2RDestroyBufferEx(gx2, (GX2RResourceFlags)0);
+  free(gx2);
+}
+
+/*
+ * Draws already queued may still read the old storage (glBufferData every
+ * draw is the usual way to stream vertices), so it's destroyed once the
+ * frame's draws have run, not now. Freeing it right away let the next
+ * glBufferData reuse the same memory, and every draw read the last data.
+ */
 static void destroy_gx2r_buffer(GX2RBuffer *gx2, bool *owned) {
   if (!gx2 || !owned || !*owned) return;
-  GX2RDestroyBufferEx(gx2, (GX2RResourceFlags)0);
+
+  GX2RBuffer *retired = (GX2RBuffer *)malloc(sizeof(*retired));
+  if (retired) {
+    *retired = *gx2;
+    gl_mem_defer(destroy_retired_gx2r_buffer, retired);
+  } else {
+    GX2DrawDone();
+    GX2RDestroyBufferEx(gx2, (GX2RResourceFlags)0);
+  }
   memset(gx2, 0, sizeof(*gx2));
   *owned = false;
 }

@@ -378,13 +378,14 @@ static void free_gx2_texture_storage(GX2Texture *texture) {
   if (texture->surface.image) {
     log_texture_step("free_gx2_texture_storage: freeing image=%p",
                      texture->surface.image);
-    gl_mem_free(GL_MEM_TYPE_MEM2, texture->surface.image);
+    /* Queued draws may still sample it. */
+    gl_mem_free_deferred(GL_MEM_TYPE_MEM2, texture->surface.image);
     texture->surface.image = NULL;
   }
   if (texture->surface.mipmaps) {
     log_texture_step("free_gx2_texture_storage: freeing mipmaps=%p",
                      texture->surface.mipmaps);
-    gl_mem_free(GL_MEM_TYPE_MEM2, texture->surface.mipmaps);
+    gl_mem_free_deferred(GL_MEM_TYPE_MEM2, texture->surface.mipmaps);
     texture->surface.mipmaps = NULL;
   }
   log_texture_step("free_gx2_texture_storage: done");

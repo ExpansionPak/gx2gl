@@ -143,6 +143,8 @@ static void gx2gl_finish_frame(void)
         g_gx2gl_sdl.frame_tv_active = 0;
     }
     WHBGfxFinishRender();
+    /* The GPU is idle: release what the frame's draws were using. */
+    gl_mem_frame_end();
     g_gx2gl_sdl.frame_active = 0;
 }
 
@@ -275,6 +277,7 @@ void GX2GL_DeleteContext(GX2GL_Context context)
         g_gx2gl_sdl.context = NULL;
         g_gl_context = NULL;
     } else if (g_gx2gl_sdl.context_refs == 0) {
+        gl_mem_gpu_sync();
         gl_context_destroy(owned_context);
         gx2gl_finish_frame();
         g_gx2gl_sdl.context = NULL;

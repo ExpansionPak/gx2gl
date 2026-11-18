@@ -2329,6 +2329,17 @@ static void bind_stage_samplers(const GLint *sampler_units,
   }
 }
 
+/*
+ * The GPU reads a uniform block when it runs the draw, which is often
+ * after the CPU has changed the data for the next draw (glUniform*,
+ * glBufferData on a UBO). Bind a copy that stays as it is until the end of
+ * the frame instead.
+ */
+static void *frame_uniform_copy(void *data, uint32_t size) {
+  void *copy = gl_mem_frame_copy(data, size, 256);
+  return copy ? copy : data;
+}
+
 static bool bind_uniform_block_buffer(GLuint buffer_id, uint32_t offset, uint32_t available_size,
                                       uint32_t required_size, bool pixel_stage, uint32_t slot) {
   uint8_t *data;
@@ -2342,6 +2353,7 @@ static bool bind_uniform_block_buffer(GLuint buffer_id, uint32_t offset, uint32_
   data = (uint8_t *)gl_buffer_get_uniform_block_data(buffer_id, offset, required_size);
   if (!data) return false;
 
+  data = (uint8_t *)frame_uniform_copy(data, required_size);
   GX2Invalidate(GX2_INVALIDATE_MODE_UNIFORM_BLOCK, data, required_size);
   if (pixel_stage) GX2SetPixelUniformBlock(slot, required_size, data);
   else GX2SetVertexUniformBlock(slot, required_size, data);
@@ -2377,7 +2389,8 @@ static void bind_program_uniform_blocks(GLProgram *prog) {
       } else if (prog->vs_blocks && (uint32_t)block->vertex_block_index < prog->vs_block_count &&
                  prog->vs_blocks[block->vertex_block_index].buffer) {
         GX2SetVertexUniformBlock(gx2_location, prog->vs_blocks[block->vertex_block_index].size,
-                                 prog->vs_blocks[block->vertex_block_index].buffer);
+                                 frame_uniform_copy(prog->vs_blocks[block->vertex_block_index].buffer,
+                                                    prog->vs_blocks[block->vertex_block_index].size));
       }
     }
 
@@ -2397,7 +2410,8 @@ static void bind_program_uniform_blocks(GLProgram *prog) {
       } else if (prog->ps_blocks && (uint32_t)block->pixel_block_index < prog->ps_block_count &&
                  prog->ps_blocks[block->pixel_block_index].buffer) {
         GX2SetPixelUniformBlock(gx2_location, prog->ps_blocks[block->pixel_block_index].size,
-                                prog->ps_blocks[block->pixel_block_index].buffer);
+                                frame_uniform_copy(prog->ps_blocks[block->pixel_block_index].buffer,
+                                                   prog->ps_blocks[block->pixel_block_index].size));
       }
     }
   }
@@ -2412,7 +2426,8 @@ static void bind_program_uniform_blocks(GLProgram *prog) {
                   prog->vs_direct_uniform_shadow_size);
     GX2SetVertexUniformBlock(GX2GL_CAFEGLSL_VIRTUAL_UNIFORM_BLOCK_LOCATION,
                              prog->vs_direct_uniform_shadow_size,
-                             prog->vs_direct_uniform_shadow);
+                             frame_uniform_copy(prog->vs_direct_uniform_shadow,
+                                                prog->vs_direct_uniform_shadow_size));
   }
   if (stage_uses_virtual_uniform_block(prog, true) &&
       prog->ps_direct_uniform_shadow &&
@@ -2424,7 +2439,8 @@ static void bind_program_uniform_blocks(GLProgram *prog) {
                   prog->ps_direct_uniform_shadow_size);
     GX2SetPixelUniformBlock(GX2GL_CAFEGLSL_VIRTUAL_UNIFORM_BLOCK_LOCATION,
                             prog->ps_direct_uniform_shadow_size,
-                            prog->ps_direct_uniform_shadow);
+                            frame_uniform_copy(prog->ps_direct_uniform_shadow,
+                                               prog->ps_direct_uniform_shadow_size));
   }
 }
 
@@ -3057,6 +3073,7 @@ static void bind_program_geometry_stage(GLProgram *prog) {
     if (block->geometry_size > available) continue;
     void *data = gl_buffer_get_uniform_block_data(binding->buffer, offset, block->geometry_size);
     if (!data) continue;
+    data = frame_uniform_copy(data, block->geometry_size);
     GX2Invalidate(GX2_INVALIDATE_MODE_UNIFORM_BLOCK, data, block->geometry_size);
     GX2SetGeometryUniformBlock(gs->uniformBlocks[block->geometry_block_index].offset,
                                block->geometry_size, data);
@@ -3079,7 +3096,8 @@ static void bind_program_geometry_stage(GLProgram *prog) {
                     prog->gs_virtual_shadow_size);
     }
     GX2SetGeometryUniformBlock(prog->gs_virtual_slot, prog->gs_virtual_shadow_size,
-                               prog->gs_virtual_shadow);
+                               frame_uniform_copy(prog->gs_virtual_shadow,
+                                                  prog->gs_virtual_shadow_size));
   }
 }
 
