@@ -264,7 +264,17 @@ void GX2GL_DeleteContext(GX2GL_Context context)
         g_gx2gl_sdl.context_refs <= 0) return;
 
     g_gx2gl_sdl.context_refs -= 1;
-    if (g_gx2gl_sdl.context_refs == 0) {
+    if (g_gx2gl_sdl.context_refs == 0 && !ProcUIInForeground()) {
+        /* Leaving through HOME: WHB has already released the foreground and the
+         * GPU, so GX2DrawDone() in the teardown would never return. The
+         * process is about to end, so drop the context instead.
+         */
+        g_gx2gl_sdl.frame_active = 0;
+        g_gx2gl_sdl.frame_tv_active = 0;
+        g_gx2gl_sdl.frame_drc_active = 0;
+        g_gx2gl_sdl.context = NULL;
+        g_gl_context = NULL;
+    } else if (g_gx2gl_sdl.context_refs == 0) {
         gl_context_destroy(owned_context);
         gx2gl_finish_frame();
         g_gx2gl_sdl.context = NULL;
