@@ -29,6 +29,27 @@ GX2PixelShader *gx2gl_cafeglsl_compile_pixel_shader(const char *shader_source,
 void gx2gl_cafeglsl_free_vertex_shader(GX2VertexShader *shader);
 void gx2gl_cafeglsl_free_pixel_shader(GX2PixelShader *shader);
 
+/* A vertex + geometry + pixel shader compiled together for
+ * GX2_SHADER_MODE_GEOMETRY_SHADER. The vertex shader writes the GS input ring and
+ * only works with this geometry shader.
+ */
+typedef struct {
+    GX2VertexShader *vertex;
+    GX2GeometryShader *geometry;
+    GX2PixelShader *pixel;
+} gx2gl_cafeglsl_geometry_set_t;
+
+/* True when the loaded CafeGLSL can compile geometry shaders. */
+bool gx2gl_cafeglsl_supports_geometry_shaders(void);
+bool gx2gl_cafeglsl_compile_geometry_set(const char *vertex_source,
+                                         const char *geometry_source,
+                                         const char *pixel_source,
+                                         gx2gl_cafeglsl_geometry_set_t *out,
+                                         char *info_log_out,
+                                         int info_log_max_length,
+                                         gx2gl_cafeglsl_flag_t flags);
+void gx2gl_cafeglsl_free_geometry_set(gx2gl_cafeglsl_geometry_set_t *set);
+
 #ifdef __cplusplus
 }
 #endif

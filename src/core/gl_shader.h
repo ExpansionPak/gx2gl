@@ -96,6 +96,9 @@ GLuint gl_program_transform_feedback_binding_count(GLuint program);
 GLenum gl_program_transform_feedback_buffer_mode(GLuint program);
 
 void gl_bind_shaders(void);
+/* True when the bound program has a geometry shader, which then takes
+ * adjacency primitives directly. */
+GLboolean gl_bound_program_has_geometry_shader(void);
 void gl_bind_program_fetch_shader(void);
 void gl_bind_program_textures(void);
 

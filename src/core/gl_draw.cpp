@@ -4,6 +4,7 @@
 #include "core/gl_vao.h"
 #include "core/gl_buffer.h"
 #include "core/gl_framebuffer.h"
+#include "core/gl_shader.h"
 #include <gx2/draw.h>
 #include <gx2/enum.h>
 #include <stdint.h>
@@ -479,10 +480,11 @@ static void set_restart_index_for_draw(void) {
 static void draw_arrays_checked(GX2PrimitiveMode prim, GLint first,
                                 GLsizei count, GLsizei instancecount) {
   if (count == 0 || instancecount == 0) return;
-  if (prim == GX2_PRIMITIVE_MODE_LINES_ADJACENCY ||
-      prim == GX2_PRIMITIVE_MODE_LINE_STRIP_ADJACENCY ||
-      prim == GX2_PRIMITIVE_MODE_TRIANGLES_ADJACENCY ||
-      prim == GX2_PRIMITIVE_MODE_TRIANGLE_STRIP_ADJACENCY) {
+  if ((prim == GX2_PRIMITIVE_MODE_LINES_ADJACENCY ||
+       prim == GX2_PRIMITIVE_MODE_LINE_STRIP_ADJACENCY ||
+       prim == GX2_PRIMITIVE_MODE_TRIANGLES_ADJACENCY ||
+       prim == GX2_PRIMITIVE_MODE_TRIANGLE_STRIP_ADJACENCY) &&
+      !gl_bound_program_has_geometry_shader()) {
     uint32_t byte_count;
     if (!multiply_u32(count, sizeof(uint32_t), &byte_count)) {
       _gl_set_error(GL_OUT_OF_MEMORY);
@@ -513,10 +515,11 @@ static bool draw_elements_checked(GX2PrimitiveMode prim, GLsizei count,
 
   if (count == 0 || instancecount == 0) return true;
   if (!prepare_indices(count, indices, index_info, &prepared)) return false;
-  if (prim == GX2_PRIMITIVE_MODE_LINES_ADJACENCY ||
-      prim == GX2_PRIMITIVE_MODE_LINE_STRIP_ADJACENCY ||
-      prim == GX2_PRIMITIVE_MODE_TRIANGLES_ADJACENCY ||
-      prim == GX2_PRIMITIVE_MODE_TRIANGLE_STRIP_ADJACENCY) {
+  if ((prim == GX2_PRIMITIVE_MODE_LINES_ADJACENCY ||
+       prim == GX2_PRIMITIVE_MODE_LINE_STRIP_ADJACENCY ||
+       prim == GX2_PRIMITIVE_MODE_TRIANGLES_ADJACENCY ||
+       prim == GX2_PRIMITIVE_MODE_TRIANGLE_STRIP_ADJACENCY) &&
+      !gl_bound_program_has_geometry_shader()) {
     const bool ok = DrawAdjacencyWithoutGeometryShader(
         prim, count, &prepared, instancecount, basevertex,
         g_gl_context->primitive_restart_enabled);

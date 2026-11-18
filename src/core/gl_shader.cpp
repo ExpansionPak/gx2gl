@@ -14,6 +14,7 @@
 extern "C" {
 #endif
 #include <coreinit/cache.h>
+#include <coreinit/debug.h>
 #include <gx2/event.h>
 #include <gfd.h>
 #include <gx2/draw.h>
@@ -37,6 +38,11 @@ extern "C" {
 #define GL_LOCATION_KIND_SAMPLER 0x40000000u
 #define GL_LOCATION_KIND_DIRECT 0x20000000u
 #define GL_LOCATION_BLOCK_MASK 0x3FFFu
+/* A uniform or sampler only the geometry shader uses. Both kind bits set, which
+ * no vertex or pixel location ever has; the low bits index the program's
+ * geometry-only list.
+ */
+#define GL_LOCATION_GEOMETRY_ONLY (GL_LOCATION_KIND_SAMPLER | GL_LOCATION_KIND_DIRECT)
 #define GX2GL_INFO_LOG_CAPACITY 4096
 #define GX2GL_CAFEGLSL_VIRTUAL_UNIFORM_BLOCK_LOCATION 15u
 #define GX2GL_MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS 64u
@@ -162,8 +168,10 @@ typedef struct {
   char *name;
   int32_t vertex_block_index;
   int32_t pixel_block_index;
+  int32_t geometry_block_index;
   uint32_t vertex_size;
   uint32_t pixel_size;
+  uint32_t geometry_size;
   GLuint binding_point;
   bool implicit;
 } ProgramUniformBlock;
@@ -254,12 +262,32 @@ typedef struct {
   ProgramFetchShaderEntry fetch_shaders[GX2GL_FETCH_SHADER_CACHE_SIZE];
   uint32_t fetch_shader_clock;
   char *attrib_binding_names[GL33_MAX_VERTEX_ATTRIBS];
+  /* Set when the program links with a geometry shader. The program owns all
+   * three stages; owned_group points at its vertex and pixel shaders.
+   */
+  gx2gl_cafeglsl_geometry_set_t geometry_set;
+  /* Loose geometry uniforms, mirrored from the program's uniform values. */
+  uint8_t *gs_virtual_shadow;
+  uint32_t gs_virtual_shadow_size;
+  uint32_t gs_virtual_slot;
+  GLint *gs_uniform_sources;     /* per gs->uniformVars: location to mirror, or -1 */
+  GLint *gs_sampler_sources;     /* per gs->samplerVars: location giving the unit */
+  GLenum *gs_sampler_targets;    /* per gs->samplerVars */
+  uint32_t *gs_only_entries;     /* geometry-only uniforms: index | 0x80000000 for samplers */
+  uint32_t gs_only_count;
 } GLProgram;
 
 static GLShader g_shaders[MAX_SHADERS];
 static GLProgram g_programs[MAX_PROGRAMS];
 static bool g_shader_mode_valid = false;
 static GX2ShaderMode g_shader_mode = GX2_SHADER_MODE_UNIFORM_REGISTER;
+
+/* Geometry shader mode clears SQ_CONFIG.DX9_CONSTS, so it reads uniforms from
+ * blocks exactly like GX2_SHADER_MODE_UNIFORM_BLOCK.
+ */
+static bool shader_mode_uses_blocks(GX2ShaderMode mode) {
+  return mode == GX2_SHADER_MODE_UNIFORM_BLOCK || mode == GX2_SHADER_MODE_GEOMETRY_SHADER;
+}
 
 static bool is_private_fragment_uniform(const char *name) {
   return name && strcmp(name, "_gx2gl_frag_coord_height") == 0;
@@ -286,6 +314,8 @@ static GLint make_direct_uniform_location(bool pixel_stage, uint32_t offset);
 static bool location_is_sampler(GLint l);
 static bool location_is_pixel(GLint l);
 static bool location_is_direct(GLint l);
+static bool location_is_geometry_only(GLint l);
+static void free_program_geometry_state(GLProgram *prog);
 static bool stage_uses_virtual_uniform_block(const GLProgram *prog,
                                              bool pixel_stage);
 static void free_program_uniform_blocks(GLProgram *prog);
@@ -538,7 +568,7 @@ static uint32_t get_active_uniform_count(GLProgram *prog) {
     for (uint32_t i = 0; i < ps->uniformVarCount; ++i)
       if (is_private_fragment_uniform(ps->uniformVars[i].name)) --count;
   }
-  return count + prog->SourceUniformCount;
+  return count + prog->gs_only_count + prog->SourceUniformCount;
 }
 
 static GLsizei get_active_uniform_max_name_length(GLProgram *prog) {
@@ -678,6 +708,27 @@ static bool get_active_uniform_info(GLProgram *prog, GLuint index, ActiveUniform
                            : (GLint)(GL_LOCATION_STAGE_PIXEL |
                                      ((uint32_t)ps->uniformVars[i].block << 16) |
                                      (uniform_var_offset(&ps->uniformVars[i]) & 0xFFFFu));
+      return info->type != 0;
+    }
+  }
+  if (prog->gs_only_count && prog->geometry_set.geometry) {
+    const GX2GeometryShader *gs = prog->geometry_set.geometry;
+    for (uint32_t i = 0; i < prog->gs_only_count; ++i, ++cursor) {
+      if (cursor != index) continue;
+      const uint32_t entry = prog->gs_only_entries[i];
+      const uint32_t var = entry & 0x7FFFFFFFu;
+      info->location = (GLint)(GL_LOCATION_GEOMETRY_ONLY | i);
+      if (entry & 0x80000000u) {
+        info->name = gs->samplerVars[var].name;
+        info->size = 1;
+        info->type = sampler_var_type_to_gl_enum(gs->samplerVars[var].type);
+        info->is_sampler = true;
+      } else {
+        info->name = gs->uniformVars[var].name;
+        info->size = (GLint)shader_var_element_count(gs->uniformVars[var].count);
+        info->type = shader_var_type_to_gl_enum(gs->uniformVars[var].type);
+        info->offset = (GLint)uniform_var_offset(&gs->uniformVars[var]);
+      }
       return info->type != 0;
     }
   }
@@ -1099,13 +1150,13 @@ static bool initialize_program_direct_uniform_shadows(GLProgram *prog, GX2Vertex
       size_bytes = shader_var_type_storage_word_count(vs->uniformVars[i].type) *
                    shader_var_element_count(vs->uniformVars[i].count) *
                    sizeof(uint32_t);
-      if (vs->mode == GX2_SHADER_MODE_UNIFORM_BLOCK &&
+      if (shader_mode_uses_blocks(vs->mode) &&
           shader_var_element_count(vs->uniformVars[i].count) > 1u &&
           (vs->uniformVars[i].type == GX2_SHADER_VAR_TYPE_FLOAT ||
            vs->uniformVars[i].type == GX2_SHADER_VAR_TYPE_FLOAT2 ||
            vs->uniformVars[i].type == GX2_SHADER_VAR_TYPE_FLOAT3))
         size_bytes = 16u * shader_var_element_count(vs->uniformVars[i].count);
-      end_offset = vs->mode == GX2_SHADER_MODE_UNIFORM_BLOCK
+      end_offset = shader_mode_uses_blocks(vs->mode)
                        ? (uint32_t)vs->uniformVars[i].offset + size_bytes
                        : (uint32_t)vs->uniformVars[i].offset *
                                  sizeof(uint32_t) +
@@ -1123,13 +1174,13 @@ static bool initialize_program_direct_uniform_shadows(GLProgram *prog, GX2Vertex
       size_bytes = shader_var_type_storage_word_count(ps->uniformVars[i].type) *
                    shader_var_element_count(ps->uniformVars[i].count) *
                    sizeof(uint32_t);
-      if (ps->mode == GX2_SHADER_MODE_UNIFORM_BLOCK &&
+      if (shader_mode_uses_blocks(ps->mode) &&
           shader_var_element_count(ps->uniformVars[i].count) > 1u &&
           (ps->uniformVars[i].type == GX2_SHADER_VAR_TYPE_FLOAT ||
            ps->uniformVars[i].type == GX2_SHADER_VAR_TYPE_FLOAT2 ||
            ps->uniformVars[i].type == GX2_SHADER_VAR_TYPE_FLOAT3))
         size_bytes = 16u * shader_var_element_count(ps->uniformVars[i].count);
-      end_offset = ps->mode == GX2_SHADER_MODE_UNIFORM_BLOCK
+      end_offset = shader_mode_uses_blocks(ps->mode)
                        ? (uint32_t)ps->uniformVars[i].offset + size_bytes
                        : (uint32_t)ps->uniformVars[i].offset *
                                  sizeof(uint32_t) +
@@ -1193,6 +1244,7 @@ static void clear_program_runtime_state(GLProgram *prog) {
   }
   release_compiled_shader(prog->linked_vertex_binary);
   release_compiled_shader(prog->linked_pixel_binary);
+  free_program_geometry_state(prog);
 
   memset(&prog->owned_group, 0, sizeof(prog->owned_group));
   memset(prog->fetch_shaders, 0, sizeof(prog->fetch_shaders));
@@ -1330,6 +1382,7 @@ static ProgramUniformBlock *append_program_uniform_block(GLProgram *prog, const 
   }
   block->vertex_block_index = -1;
   block->pixel_block_index = -1;
+  block->geometry_block_index = -1;
   block->binding_point = 0;
   block->implicit = implicit;
   ++prog->uniform_block_count;
@@ -1912,8 +1965,8 @@ static GX2ShaderMode choose_shader_mode(const GLProgram *prog) {
   if (vs && ps && vs->mode == ps->mode) {
     return vs->mode;
   }
-  if ((vs && vs->mode == GX2_SHADER_MODE_UNIFORM_BLOCK) ||
-      (ps && ps->mode == GX2_SHADER_MODE_UNIFORM_BLOCK)) {
+  if ((vs && shader_mode_uses_blocks(vs->mode)) ||
+      (ps && shader_mode_uses_blocks(ps->mode))) {
     return GX2_SHADER_MODE_UNIFORM_BLOCK;
   }
 
@@ -1928,9 +1981,16 @@ static GX2ShaderMode choose_shader_mode(const GLProgram *prog) {
   return has_uniform_blocks ? GX2_SHADER_MODE_UNIFORM_BLOCK : GX2_SHADER_MODE_UNIFORM_REGISTER;
 }
 
-static bool location_is_sampler(GLint l) { return (((uint32_t)l & GL_LOCATION_KIND_SAMPLER) != 0u); }
+static bool location_is_geometry_only(GLint l) {
+  return l != -1 && (((uint32_t)l & GL_LOCATION_GEOMETRY_ONLY) == GL_LOCATION_GEOMETRY_ONLY);
+}
+static bool location_is_sampler(GLint l) {
+  return (((uint32_t)l & GL_LOCATION_KIND_SAMPLER) != 0u) && !location_is_geometry_only(l);
+}
 static bool location_is_pixel(GLint l) { return (((uint32_t)l & GL_LOCATION_STAGE_PIXEL) != 0u); }
-static bool location_is_direct(GLint l) { return (((uint32_t)l & GL_LOCATION_KIND_DIRECT) != 0u); }
+static bool location_is_direct(GLint l) {
+  return (((uint32_t)l & GL_LOCATION_KIND_DIRECT) != 0u) && !location_is_geometry_only(l);
+}
 
 static bool stage_uses_virtual_uniform_block(const GLProgram *prog,
                                              bool pixel_stage) {
@@ -1941,8 +2001,8 @@ static bool stage_uses_virtual_uniform_block(const GLProgram *prog,
   vs = prog->group->vertexShader;
   ps = prog->group->pixelShader;
   return pixel_stage
-             ? ps && ps->mode == GX2_SHADER_MODE_UNIFORM_BLOCK
-             : vs && vs->mode == GX2_SHADER_MODE_UNIFORM_BLOCK;
+             ? ps && shader_mode_uses_blocks(ps->mode)
+             : vs && shader_mode_uses_blocks(vs->mode);
 }
 
 static bool write_uniform_storage_words(GLProgram *prog, GLint location,
@@ -2042,6 +2102,10 @@ static bool update_uniform_words(GLint location, const uint32_t *data,
   location = resolve_uniform_location(prog, location);
   if (location_is_sampler(location)) return false;
   set_program_uniform_value_shadow(prog, location, data, (uint32_t)count_words);
+  if (location_is_geometry_only(location)) {
+    /* Copied into the geometry shader's uniforms at every draw. */
+    return true;
+  }
   return write_uniform_storage_words(prog, location, data, count_words,
                                      extra_offset_bytes);
 }
@@ -2105,7 +2169,8 @@ static bool update_uniform_matrix(GLint location, GLsizei count,
   }
 
   set_program_uniform_value_shadow(prog, location, logical, logical_word_count);
-  bool ok = write_uniform_storage_words(prog, location, storage,
+  bool ok = location_is_geometry_only(location) ||
+            write_uniform_storage_words(prog, location, storage,
                                         (GLsizei)storage_word_count, 0);
   if (logical != logical_stack) free(logical);
   if (storage != storage_stack) free(storage);
@@ -2190,10 +2255,12 @@ static uint32_t ComposeTextureComponentMap(uint32_t CompMap,
   return Result;
 }
 
+enum { GX2GL_STAGE_VERTEX = 0, GX2GL_STAGE_PIXEL = 1, GX2GL_STAGE_GEOMETRY = 2 };
+
 static void bind_stage_samplers(const GLint *sampler_units,
                                 const GLint *sampler_bindings,
                                 const GLenum *sampler_targets,
-                                bool pixel_stage) {
+                                int stage) {
   for (uint32_t location = 0; location < MAX_PROGRAM_SAMPLERS; ++location) {
     GLint shader_slot = sampler_units[location];
     GLint texture_unit;
@@ -2217,7 +2284,7 @@ static void bind_stage_samplers(const GLint *sampler_units,
     gl_framebuffer_sync_texture_for_sampling(tex_id);
 
     tex = gl_get_gx2_texture(tex_id);
-    if (pixel_stage && location == 0) {
+    if (stage == GX2GL_STAGE_PIXEL && location == 0) {
       static int Samples = 0;
       if (Samples++ < 24) {
         FILE *Trace = fopen("/vol/external01/gx2gl/texture_format_probe.txt", "a");
@@ -2249,9 +2316,12 @@ static void bind_stage_samplers(const GLint *sampler_units,
     sampler_id = g_gl_context->bound_sampler[texture_unit];
     sampler = gl_get_gx2_sampler(sampler_id ? sampler_id : tex_id, sampler_id != 0);
 
-    if (pixel_stage) {
+    if (stage == GX2GL_STAGE_PIXEL) {
       GX2SetPixelTexture(BoundTexture, location);
       if (sampler) GX2SetPixelSampler(sampler, location);
+    } else if (stage == GX2GL_STAGE_GEOMETRY) {
+      GX2SetGeometryTexture(BoundTexture, location);
+      if (sampler) GX2SetGeometrySampler(sampler, location);
     } else {
       GX2SetVertexTexture(BoundTexture, location);
       if (sampler) GX2SetVertexSampler(sampler, location);
@@ -2753,6 +2823,382 @@ static char *concatenate_shader_source(GLsizei count, const GLchar *const *strin
   return combined;
 }
 
+/* ---- Geometry shaders ------------------------------------------------------
+ *
+ * A program with a geometry shader is compiled at link time: CafeGLSL needs all
+ * three stages together, because the vertex shader has to write the GS input
+ * ring in the layout the geometry shader reads. The vertex and pixel shaders of
+ * that set go through the normal uniform, sampler and attribute paths. The
+ * geometry shader's own uniforms are mirrored by name from them, or, for names
+ * only the geometry shader uses, from geometry-only locations.
+ */
+
+static void *g_gs_input_ring = NULL;
+static uint32_t g_gs_input_ring_size = 0;
+static void *g_gs_output_ring = NULL;
+static uint32_t g_gs_output_ring_size = 0;
+
+static void free_geometry_rings(void) {
+  if (g_gs_input_ring) gl_mem_free(GL_MEM_TYPE_MEM2, g_gs_input_ring);
+  if (g_gs_output_ring) gl_mem_free(GL_MEM_TYPE_MEM2, g_gs_output_ring);
+  g_gs_input_ring = g_gs_output_ring = NULL;
+  g_gs_input_ring_size = g_gs_output_ring_size = 0;
+}
+
+static bool grow_geometry_ring(void **ring, uint32_t *ring_size, uint32_t size) {
+  if (size <= *ring_size) return true;
+  void *grown = gl_mem_alloc(GL_MEM_TYPE_MEM2, size, 256);
+  if (!grown) return false;
+  if (*ring) {
+    GX2DrawDone(); /* earlier draws may still use the old ring */
+    gl_mem_free(GL_MEM_TYPE_MEM2, *ring);
+  }
+  *ring = grown;
+  *ring_size = size;
+  return true;
+}
+
+static void free_program_geometry_state(GLProgram *prog) {
+  if (!prog) return;
+  gx2gl_cafeglsl_free_geometry_set(&prog->geometry_set);
+  if (prog->gs_virtual_shadow) gl_mem_free(GL_MEM_TYPE_MEM2, prog->gs_virtual_shadow);
+  free(prog->gs_uniform_sources);
+  free(prog->gs_sampler_sources);
+  free(prog->gs_sampler_targets);
+  free(prog->gs_only_entries);
+  prog->gs_virtual_shadow = NULL;
+  prog->gs_virtual_shadow_size = 0;
+  prog->gs_virtual_slot = 0;
+  prog->gs_uniform_sources = NULL;
+  prog->gs_sampler_sources = NULL;
+  prog->gs_sampler_targets = NULL;
+  prog->gs_only_entries = NULL;
+  prog->gs_only_count = 0;
+}
+
+
+/* The location of a vertex or pixel uniform (or sampler) with this name. */
+static GLint find_stage_uniform_location(GLProgram *prog, const char *name, bool sampler) {
+  const uint32_t count = get_active_uniform_count(prog);
+  for (uint32_t i = 0; i < count; ++i) {
+    ActiveUniformInfo info;
+    if (!get_active_uniform_info(prog, i, &info) || !info.name || info.is_sampler != sampler)
+      continue;
+    if (strcmp(info.name, name) != 0 || location_is_geometry_only(info.location)) continue;
+    return info.location;
+  }
+  return -1;
+}
+
+static GLint add_geometry_only_entry(GLProgram *prog, uint32_t entry) {
+  uint32_t *grown = (uint32_t *)realloc(prog->gs_only_entries,
+                                        (prog->gs_only_count + 1u) * sizeof(uint32_t));
+  if (!grown) return -1;
+  prog->gs_only_entries = grown;
+  grown[prog->gs_only_count] = entry;
+  return (GLint)(GL_LOCATION_GEOMETRY_ONLY | prog->gs_only_count++);
+}
+
+static bool build_program_geometry_state(GLProgram *prog, const char *geometry_source) {
+  const GX2GeometryShader *gs = prog->geometry_set.geometry;
+  int32_t loose_block = -1;
+
+  for (uint32_t i = 0; i < gs->uniformBlockCount; ++i) {
+    const GX2UniformBlock *shader_block = &gs->uniformBlocks[i];
+    if (is_loose_uniform_block(shader_block)) {
+      loose_block = (int32_t)i;
+      prog->gs_virtual_slot = shader_block->offset;
+      prog->gs_virtual_shadow_size = (shader_block->size + 15u) & ~15u;
+      continue;
+    }
+    ProgramUniformBlock *block = find_program_uniform_block(prog, shader_block->name);
+    if (!block) block = append_program_uniform_block(prog, shader_block->name, false);
+    if (!block) return false;
+    block->geometry_block_index = (int32_t)i;
+    block->geometry_size = shader_block->size;
+  }
+
+  if (gs->uniformVarCount) {
+    prog->gs_uniform_sources = (GLint *)malloc(gs->uniformVarCount * sizeof(GLint));
+    if (!prog->gs_uniform_sources) return false;
+  }
+  for (uint32_t i = 0; i < gs->uniformVarCount; ++i) {
+    const GX2UniformVar *var = &gs->uniformVars[i];
+    GLint source = -1;
+    /* Members of the application's blocks come from the bound buffer. */
+    if (var->block < 0 || var->block == loose_block) {
+      source = find_stage_uniform_location(prog, var->name, false);
+      if (source == -1) source = add_geometry_only_entry(prog, i);
+      if (source == -1) return false;
+    }
+    prog->gs_uniform_sources[i] = source;
+  }
+
+  if (gs->samplerVarCount) {
+    prog->gs_sampler_sources = (GLint *)malloc(gs->samplerVarCount * sizeof(GLint));
+    prog->gs_sampler_targets = (GLenum *)malloc(gs->samplerVarCount * sizeof(GLenum));
+    if (!prog->gs_sampler_sources || !prog->gs_sampler_targets) return false;
+  }
+  for (uint32_t i = 0; i < gs->samplerVarCount; ++i) {
+    const GX2SamplerVar *var = &gs->samplerVars[i];
+    GLint source = find_stage_uniform_location(prog, var->name, true);
+    if (source == -1) source = add_geometry_only_entry(prog, 0x80000000u | i);
+    if (source == -1) return false;
+    prog->gs_sampler_sources[i] = source;
+    prog->gs_sampler_targets[i] = sampler_var_type_to_texture_target(
+        ResolveSamplerType(var->type, geometry_source, var->name));
+  }
+
+  if (prog->gs_virtual_shadow_size) {
+    prog->gs_virtual_shadow =
+        (uint8_t *)gl_mem_alloc(GL_MEM_TYPE_MEM2, prog->gs_virtual_shadow_size, 256);
+    if (!prog->gs_virtual_shadow) return false;
+    memset(prog->gs_virtual_shadow, 0, prog->gs_virtual_shadow_size);
+    DCFlushRange(prog->gs_virtual_shadow, prog->gs_virtual_shadow_size);
+  }
+  return true;
+}
+
+static const ProgramUniformValueShadow *find_uniform_value_shadow(const GLProgram *prog,
+                                                                  GLint location) {
+  for (uint32_t i = 0; i < prog->uniform_value_shadow_count; ++i) {
+    if (prog->uniform_value_shadows[i].location == location &&
+        prog->uniform_value_shadows[i].words)
+      return &prog->uniform_value_shadows[i];
+  }
+  return NULL;
+}
+
+static uint32_t shader_var_matrix_columns(GX2ShaderVarType type) {
+  switch (type) {
+  case GX2_SHADER_VAR_TYPE_FLOAT2X2:
+  case GX2_SHADER_VAR_TYPE_FLOAT2X3:
+  case GX2_SHADER_VAR_TYPE_FLOAT2X4:
+    return 2;
+  case GX2_SHADER_VAR_TYPE_FLOAT3X2:
+  case GX2_SHADER_VAR_TYPE_FLOAT3X3:
+  case GX2_SHADER_VAR_TYPE_FLOAT3X4:
+    return 3;
+  case GX2_SHADER_VAR_TYPE_FLOAT4X2:
+  case GX2_SHADER_VAR_TYPE_FLOAT4X3:
+  case GX2_SHADER_VAR_TYPE_FLOAT4X4:
+    return 4;
+  default:
+    return 0;
+  }
+}
+
+/* Lays the values glUniform* stored out the way a std140 block holds them:
+ * array elements and matrix columns each start on 16 bytes.
+ */
+static bool write_geometry_uniform(uint8_t *shadow, uint32_t shadow_size,
+                                   const GX2UniformVar *var,
+                                   const uint32_t *words, uint32_t word_count) {
+  bool changed = false;
+  const uint32_t elements = shader_var_element_count(var->count);
+  const uint32_t columns = shader_var_matrix_columns(var->type);
+  const uint32_t element_words = shader_var_type_word_count(var->type);
+  const uint32_t rows = columns ? element_words / columns : element_words;
+  const uint32_t vectors = columns ? columns : 1u;
+  const bool padded = columns || elements > 1u;
+  uint32_t source = 0;
+
+  if (!element_words) return false;
+  for (uint32_t element = 0; element < elements; ++element) {
+    for (uint32_t vector = 0; vector < vectors; ++vector) {
+      const uint32_t base = uniform_var_offset(var) +
+                            (padded ? (element * vectors + vector) * 16u
+                                    : element * element_words * 4u);
+      for (uint32_t row = 0; row < rows; ++row, ++source) {
+        if (source >= word_count) return changed;
+        const uint32_t offset = base + row * 4u;
+        if (offset + 4u > shadow_size) return changed;
+        const uint32_t swapped = CPU_TO_GPU_32(words[source]);
+        /* Only touch memory that changes: an earlier draw may still read it. */
+        if (memcmp(shadow + offset, &swapped, sizeof(swapped)) != 0) {
+          memcpy(shadow + offset, &swapped, sizeof(swapped));
+          changed = true;
+        }
+      }
+    }
+  }
+  return changed;
+}
+
+static void bind_program_geometry_stage(GLProgram *prog) {
+  const GX2GeometryShader *gs = prog->geometry_set.geometry;
+  const GX2VertexShader *vs = prog->geometry_set.vertex;
+
+  if (!grow_geometry_ring(&g_gs_input_ring, &g_gs_input_ring_size,
+                          GX2CalcGeometryShaderInputRingBufferSize(vs->ringItemsize)) ||
+      !grow_geometry_ring(&g_gs_output_ring, &g_gs_output_ring_size,
+                          GX2CalcGeometryShaderOutputRingBufferSize(gs->ringItemSize))) {
+    OSReport("[gx2gl] out of memory for the geometry shader rings\n");
+    return;
+  }
+  GX2SetGeometryShaderInputRingBuffer(g_gs_input_ring, g_gs_input_ring_size);
+  GX2SetGeometryShaderOutputRingBuffer(g_gs_output_ring, g_gs_output_ring_size);
+  GX2SetGeometryShader(gs);
+
+  for (uint32_t i = 0; i < prog->uniform_block_count; ++i) {
+    const ProgramUniformBlock *block = &prog->uniform_blocks[i];
+    if (block->implicit || block->geometry_block_index < 0 ||
+        block->binding_point >= GL33_MAX_UNIFORM_BUFFER_BINDINGS)
+      continue;
+    const gl_uniform_buffer_binding_t *binding =
+        &g_gl_context->uniform_buffer_bindings[block->binding_point];
+    if (!binding->buffer) continue;
+    GLsizeiptr total_size = gl_buffer_get_size(binding->buffer);
+    uint32_t offset = binding->whole_buffer ? 0u : (uint32_t)binding->offset;
+    uint32_t available = total_size > (GLsizeiptr)offset
+                             ? (binding->whole_buffer ? (uint32_t)(total_size - (GLsizeiptr)offset)
+                                                      : (uint32_t)binding->size)
+                             : 0u;
+    if (block->geometry_size > available) continue;
+    void *data = gl_buffer_get_uniform_block_data(binding->buffer, offset, block->geometry_size);
+    if (!data) continue;
+    GX2Invalidate(GX2_INVALIDATE_MODE_UNIFORM_BLOCK, data, block->geometry_size);
+    GX2SetGeometryUniformBlock(gs->uniformBlocks[block->geometry_block_index].offset,
+                               block->geometry_size, data);
+  }
+
+  if (prog->gs_virtual_shadow) {
+    bool changed = false;
+    for (uint32_t i = 0; i < gs->uniformVarCount; ++i) {
+      const GLint source = prog->gs_uniform_sources[i];
+      if (source == -1) continue;
+      const ProgramUniformValueShadow *value = find_uniform_value_shadow(prog, source);
+      if (value)
+        changed |= write_geometry_uniform(prog->gs_virtual_shadow,
+                                          prog->gs_virtual_shadow_size, &gs->uniformVars[i],
+                                          value->words, value->word_count);
+    }
+    if (changed) {
+      DCFlushRange(prog->gs_virtual_shadow, prog->gs_virtual_shadow_size);
+      GX2Invalidate(GX2_INVALIDATE_MODE_UNIFORM_BLOCK, prog->gs_virtual_shadow,
+                    prog->gs_virtual_shadow_size);
+    }
+    GX2SetGeometryUniformBlock(prog->gs_virtual_slot, prog->gs_virtual_shadow_size,
+                               prog->gs_virtual_shadow);
+  }
+}
+
+static void bind_program_geometry_samplers(GLProgram *prog) {
+  const GX2GeometryShader *gs = prog->geometry_set.geometry;
+  GLint units[MAX_PROGRAM_SAMPLERS];
+  GLint bindings[MAX_PROGRAM_SAMPLERS];
+  GLenum targets[MAX_PROGRAM_SAMPLERS];
+
+  memset(units, -1, sizeof(units));
+  for (uint32_t i = 0; i < gs->samplerVarCount && i < MAX_PROGRAM_SAMPLERS; ++i) {
+    const uint32_t location = gs->samplerVars[i].location;
+    const GLint source = prog->gs_sampler_sources[i];
+    GLint unit = 0;
+    if (location_is_sampler(source)) {
+      unit = get_sampler_uniform_binding(prog, source);
+    } else if (const ProgramUniformValueShadow *value = find_uniform_value_shadow(prog, source)) {
+      unit = (GLint)value->words[0];
+    }
+    if (location < MAX_PROGRAM_SAMPLERS) units[location] = (GLint)i;
+    bindings[i] = unit;
+    targets[i] = prog->gs_sampler_targets[i];
+  }
+  bind_stage_samplers(units, bindings, targets, GX2GL_STAGE_GEOMETRY);
+}
+
+/* Trial-compiles a geometry shader between stand-in stages so glCompileShader
+ * reports its errors. The real set is compiled when the program links.
+ */
+static bool check_geometry_shader_source(const char *prepared_source, char *log, int log_size) {
+  static const char kStandInVertex[] =
+      "#version 330 core\nvoid main() { gl_Position = vec4(0.0); }\n";
+  static const char kStandInPixel[] =
+      "#version 330 core\nout vec4 gx2gl_color;\nvoid main() { gx2gl_color = vec4(0.0); }\n";
+  gx2gl_cafeglsl_geometry_set_t set;
+  if (!gx2gl_cafeglsl_compile_geometry_set(kStandInVertex, prepared_source, kStandInPixel,
+                                           &set, log, log_size, GX2GL_CAFEGLSL_FLAG_NONE))
+    return false;
+  gx2gl_cafeglsl_free_geometry_set(&set);
+  return true;
+}
+
+static void link_program_with_geometry_shader(GLProgram *prog) {
+  GLShader *shaders[3] = {&g_shaders[prog->attached_vertex_shader],
+                          &g_shaders[prog->attached_geometry_shader],
+                          &g_shaders[prog->attached_pixel_shader]};
+  static const GLenum kTypes[3] = {GL_VERTEX_SHADER, GL_GEOMETRY_SHADER, GL_FRAGMENT_SHADER};
+  char *sources[3] = {NULL, NULL, NULL};
+  char log[GX2GL_INFO_LOG_CAPACITY];
+  gx2gl_cafeglsl_geometry_set_t set;
+
+  log[0] = '\0';
+  for (GLShader *shader : shaders) {
+    if (!shader->compile_succeeded || !shader->source) {
+      replace_owned_string(&prog->info_log,
+                           "All attached shaders must compile successfully before linking.");
+      clear_program_runtime_state(prog);
+      return;
+    }
+  }
+  if (prog->tf_pending_count) {
+    replace_owned_string(&prog->info_log,
+                         "Transform feedback with a geometry shader is not supported by gx2gl yet.");
+    clear_program_runtime_state(prog);
+    return;
+  }
+
+  bool ok = true;
+  for (int i = 0; i < 3 && ok; ++i) {
+    sources[i] = gx2gl_prepare_shader_source_for_cafeglsl_ex(shaders[i]->source, kTypes[i],
+                                                             log, (int)sizeof(log));
+    ok = sources[i] != NULL;
+  }
+  ok = ok && gx2gl_cafeglsl_compile_geometry_set(sources[0], sources[1], sources[2], &set,
+                                                 log, (int)sizeof(log),
+                                                 GX2GL_CAFEGLSL_FLAG_NONE);
+  for (char *source : sources) free(source);
+  if (!ok) {
+    replace_owned_string(&prog->info_log,
+                         log[0] ? log : "CafeGLSL failed to compile the geometry shader program.");
+    clear_program_runtime_state(prog);
+    return;
+  }
+
+  invalidate_shader_program_memory(set.vertex->program, set.vertex->size);
+  invalidate_shader_program_memory(set.geometry->program, set.geometry->size);
+  invalidate_shader_program_memory(set.geometry->vertexProgram, set.geometry->vertexProgramSize);
+  invalidate_shader_program_memory(set.pixel->program, set.pixel->size);
+
+  memset(&prog->owned_group, 0, sizeof(prog->owned_group));
+  prog->owned_group.vertexShader = set.vertex;
+  prog->owned_group.pixelShader = set.pixel;
+  if (!initialize_program_from_group(prog, &prog->owned_group, true, false)) {
+    gx2gl_cafeglsl_free_geometry_set(&set);
+    replace_owned_string(&prog->info_log,
+                         "Failed to build the GX2 shader group or fetch shader for this program.");
+    clear_program_runtime_state(prog);
+    return;
+  }
+
+  prog->geometry_set = set;
+  if (!build_program_geometry_state(prog, shaders[1]->source)) {
+    replace_owned_string(&prog->info_log,
+                         "Out of memory setting up the geometry shader for this program.");
+    clear_program_runtime_state(prog);
+    return;
+  }
+  replace_owned_string(&prog->info_log, "");
+}
+
+GLboolean gl_bound_program_has_geometry_shader(void) {
+  if (!g_gl_context) return GL_FALSE;
+  const GLuint prog_id = g_gl_context->bound_program;
+  return is_valid_program(prog_id) && g_programs[prog_id].linked &&
+                 g_programs[prog_id].geometry_set.geometry
+             ? GL_TRUE
+             : GL_FALSE;
+}
+
 void gl_shader_init(void) {
   memset(g_shaders, 0, sizeof(g_shaders));
   memset(g_programs, 0, sizeof(g_programs));
@@ -2775,6 +3221,7 @@ void gl_shader_shutdown(void) {
   memset(g_shaders, 0, sizeof(g_shaders));
   g_shader_mode_valid = false;
   g_shader_mode = GX2_SHADER_MODE_UNIFORM_REGISTER;
+  free_geometry_rings();
   gx2gl_cafeglsl_shutdown();
 }
 GLuint _gl_CreateShader(GLenum type) {
@@ -2897,9 +3344,9 @@ void _gl_CompileShader(GLuint s) {
                                        new_binary->pixel_shader->size);
     }
   } else {
-    snprintf(info_log_buffer, sizeof(info_log_buffer),
-             "Geometry shaders are not supported by gx2gl yet.");
-    shader->compile_succeeded = false;
+    shader->compile_succeeded =
+        check_geometry_shader_source(prepared_source, info_log_buffer,
+                                     (int)sizeof(info_log_buffer));
   }
 
   if (shader->compile_succeeded) {
@@ -3026,8 +3473,7 @@ void _gl_LinkProgram(GLuint p) {
   }
 
   if (prog->attached_geometry_shader) {
-    replace_owned_string(&prog->info_log, "Geometry shaders are not supported by gx2gl yet.");
-    clear_program_runtime_state(prog);
+    link_program_with_geometry_shader(prog);
     return;
   }
 
@@ -3635,7 +4081,7 @@ void _gl_GetActiveUniformBlockiv(GLuint p, GLuint i, GLenum n, GLint *v) {
     break;
   }
   case GL_UNIFORM_BLOCK_REFERENCED_BY_GEOMETRY_SHADER:
-    *v = GL_FALSE;
+    *v = block->geometry_block_index >= 0 ? GL_TRUE : GL_FALSE;
     break;
   case GL_UNIFORM_BLOCK_REFERENCED_BY_VERTEX_SHADER:
     *v = block->vertex_block_index >= 0 ? GL_TRUE : GL_FALSE;
@@ -3871,7 +4317,7 @@ static void update_private_fragment_uniform(GLProgram *prog) {
       continue;
     }
 
-    uint32_t offset = shader->mode == GX2_SHADER_MODE_UNIFORM_BLOCK
+    uint32_t offset = shader_mode_uses_blocks(shader->mode)
                           ? (uint32_t)uniform->offset
                           : (uint32_t)uniform->offset * sizeof(word);
     if (!prog->ps_direct_uniform_shadow ||
@@ -3879,7 +4325,7 @@ static void update_private_fragment_uniform(GLProgram *prog) {
         sizeof(word) > prog->ps_direct_uniform_shadow_size - offset) {
       continue;
     }
-    uint32_t value = shader->mode == GX2_SHADER_MODE_UNIFORM_BLOCK
+    uint32_t value = shader_mode_uses_blocks(shader->mode)
                          ? CPU_TO_GPU_32(word) : word;
     memcpy(prog->ps_direct_uniform_shadow + offset, &value, sizeof(value));
   }
@@ -3919,6 +4365,7 @@ void gl_bind_shaders(void) {
   }
   if (prog->group->vertexShader) GX2SetVertexShader(prog->group->vertexShader);
   if (prog->group->pixelShader) GX2SetPixelShader(prog->group->pixelShader);
+  if (prog->geometry_set.geometry) bind_program_geometry_stage(prog);
   if (shader_mode == GX2_SHADER_MODE_UNIFORM_BLOCK ||
       shader_mode == GX2_SHADER_MODE_GEOMETRY_SHADER) {
     GX2Invalidate(GX2_INVALIDATE_MODE_SHADER, NULL, 0xFFFFFFFFu);
@@ -3946,9 +4393,10 @@ void gl_bind_program_textures(void) {
   if (!prog->group || !prog->linked) return;
 
   bind_stage_samplers(prog->pixel_sampler_units, prog->pixel_sampler_bindings,
-                      prog->pixel_sampler_targets, true);
+                      prog->pixel_sampler_targets, GX2GL_STAGE_PIXEL);
   bind_stage_samplers(prog->vertex_sampler_units, prog->vertex_sampler_bindings,
-                      prog->vertex_sampler_targets, false);
+                      prog->vertex_sampler_targets, GX2GL_STAGE_VERTEX);
+  if (prog->geometry_set.geometry) bind_program_geometry_samplers(prog);
 }
 
 #ifdef __cplusplus
