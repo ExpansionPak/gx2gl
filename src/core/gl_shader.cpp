@@ -1334,6 +1334,14 @@ static bool is_cafeglsl_implicit_uniform_block(const GX2UniformBlock *block) {
          block->offset == GX2GL_CAFEGLSL_VIRTUAL_UNIFORM_BLOCK_LOCATION;
 }
 
+/* CafeGLSL's block for loose uniforms: "__cafe_loose_uniforms" at binding 0 in
+ * 0.3, an unnamed block at slot 15 before that.
+ */
+static bool is_loose_uniform_block(const GX2UniformBlock *block) {
+  return is_cafeglsl_implicit_uniform_block(block) ||
+         (block && block->name && strcmp(block->name, "__cafe_loose_uniforms") == 0);
+}
+
 static void build_program_uniform_blocks(GLProgram *prog) {
   GX2VertexShader *vs;
   GX2PixelShader *ps;
@@ -1348,7 +1356,7 @@ static void build_program_uniform_blocks(GLProgram *prog) {
   if (vs) {
     for (uint32_t i = 0; i < vs->uniformBlockCount; ++i) {
       const GX2UniformBlock *shader_block = &vs->uniformBlocks[i];
-      bool implicit = is_cafeglsl_implicit_uniform_block(shader_block);
+      bool implicit = is_loose_uniform_block(shader_block);
       ProgramUniformBlock *block = implicit ? find_program_implicit_uniform_block(prog)
                                             : find_program_uniform_block(prog, shader_block->name);
       if (!block) block = append_program_uniform_block(prog, shader_block->name, implicit);
@@ -1364,7 +1372,7 @@ static void build_program_uniform_blocks(GLProgram *prog) {
   if (ps) {
     for (uint32_t i = 0; i < ps->uniformBlockCount; ++i) {
       const GX2UniformBlock *shader_block = &ps->uniformBlocks[i];
-      bool implicit = is_cafeglsl_implicit_uniform_block(shader_block);
+      bool implicit = is_loose_uniform_block(shader_block);
       ProgramUniformBlock *block = implicit ? find_program_implicit_uniform_block(prog)
                                             : find_program_uniform_block(prog, shader_block->name);
       if (!block) block = append_program_uniform_block(prog, shader_block->name, implicit);
@@ -2273,8 +2281,11 @@ static void bind_program_uniform_blocks(GLProgram *prog) {
       binding = &g_gl_context->uniform_buffer_bindings[block->binding_point];
     }
 
+    /* A block's GX2 slot is its binding (GX2UniformBlock::offset); the table
+     * CafeGLSL returns is sorted by name, so its index is not the slot. */
     if (block->vertex_block_index >= 0) {
-      uint32_t gx2_location = (uint32_t)block->vertex_block_index;
+      uint32_t gx2_location =
+          prog->group->vertexShader->uniformBlocks[block->vertex_block_index].offset;
       if (binding && binding->buffer != 0) {
         GLsizeiptr total_size = gl_buffer_get_size(binding->buffer);
         uint32_t bind_offset = binding->whole_buffer ? 0u : (uint32_t)binding->offset;
@@ -2293,7 +2304,8 @@ static void bind_program_uniform_blocks(GLProgram *prog) {
     }
 
     if (block->pixel_block_index >= 0) {
-      uint32_t gx2_location = (uint32_t)block->pixel_block_index;
+      uint32_t gx2_location =
+          prog->group->pixelShader->uniformBlocks[block->pixel_block_index].offset;
       if (binding && binding->buffer != 0) {
         GLsizeiptr total_size = gl_buffer_get_size(binding->buffer);
         uint32_t bind_offset = binding->whole_buffer ? 0u : (uint32_t)binding->offset;
