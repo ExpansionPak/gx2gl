@@ -1715,6 +1715,15 @@ static void init_sampler_state(GX2Sampler *sampler, GLenum min_filter,
                          map_mip_filter(min_filter));
   GX2InitSamplerClamping(sampler, map_wrap(wrap_s), map_wrap(wrap_t),
                          map_wrap(wrap_r));
+  /* GL's defaults are -1000 and 1000. GX2 stores these as unsigned 4.6
+     fixed point and doesn't clamp them: -1000 became the largest minimum
+     LOD, so every mipmapped texture showed only its smallest level. */
+  if (!(min_lod >= 0.0f)) min_lod = 0.0f;
+  if (min_lod > 15.0f) min_lod = 15.0f;
+  if (!(max_lod >= 0.0f)) max_lod = 0.0f;
+  if (max_lod > 15.0f) max_lod = 15.0f;
+  if (lod_bias < -31.0f) lod_bias = -31.0f;
+  if (lod_bias > 31.0f) lod_bias = 31.0f;
   GX2InitSamplerLOD(sampler, min_lod, max_lod, lod_bias);
   GX2InitSamplerBorderType(sampler, map_border_type(border_color));
   if (compare_mode == GL_COMPARE_REF_TO_TEXTURE) {
