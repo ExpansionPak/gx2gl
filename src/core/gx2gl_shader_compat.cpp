@@ -477,6 +477,29 @@ static bool reserve_interface_locations(bool used_locations[], int location,
   return true;
 }
 
+static int assign_lowest_interface_location(bool used_locations[], int span,
+                                            int max_locations) {
+  if (max_locations <= 0 || max_locations > kMaxShaderInterfaceLocations ||
+      span <= 0 || span > max_locations) {
+    return -1;
+  }
+
+  for (int location = 0; location <= max_locations - span; ++location) {
+    bool free_range = true;
+    for (int i = 0; i < span; ++i) {
+      if (used_locations[location + i]) {
+        free_range = false;
+        break;
+      }
+    }
+    if (free_range) {
+      reserve_interface_locations(used_locations, location, span);
+      return location;
+    }
+  }
+  return -1;
+}
+
 static int assign_interface_location(bool used_locations[],
                                      const std::string &name, int span,
                                      int max_locations) {
@@ -1440,8 +1463,19 @@ static char *lower_source_for_cafeglsl(const char *source,
                       interface_decl.storage == "out"
                   ? 8
                   : kMaxShaderInterfaceLocations;
-          int location = assign_interface_location(
-              used_locations, interface_decl.name, span, max_locations);
+          /* Fragment outputs are draw buffer indices: like desktop GL,
+           * give them the lowest free ones in declaration order, so a
+           * shader's only output lands in draw buffer 0. Hashing the name
+           * (as for varyings) sent e.g. "outColor" to buffer 6.
+           */
+          const bool fragment_output = shader_type == GL_FRAGMENT_SHADER &&
+                                       interface_decl.storage == "out";
+          int location = fragment_output
+                             ? assign_lowest_interface_location(
+                                   used_locations, span, max_locations)
+                             : assign_interface_location(
+                                   used_locations, interface_decl.name, span,
+                                   max_locations);
           if (location < 0) {
             char message[256];
             snprintf(message, sizeof(message),
