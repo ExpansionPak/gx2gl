@@ -1746,6 +1746,24 @@ static void init_sampler_object(GLSampler *sampler) {
                      sampler->compare_mode, sampler->compare_func);
 }
 
+/*
+ * Writes back what the CPU wrote into a texture's storage (clearing it,
+ * copying preserved levels, generating mipmaps) so the GPU sees it, not
+ * whatever the memory held before.
+ */
+static void flush_texture_storage(GX2Texture *texture) {
+  if (texture->surface.image && texture->surface.imageSize) {
+    DCFlushRange(texture->surface.image, texture->surface.imageSize);
+    GX2Invalidate(GX2_INVALIDATE_MODE_CPU_TEXTURE, texture->surface.image,
+                  texture->surface.imageSize);
+  }
+  if (texture->surface.mipmaps && texture->surface.mipmapSize) {
+    DCFlushRange(texture->surface.mipmaps, texture->surface.mipmapSize);
+    GX2Invalidate(GX2_INVALIDATE_MODE_CPU_TEXTURE, texture->surface.mipmaps,
+                  texture->surface.mipmapSize);
+  }
+}
+
 static bool rebuild_texture_storage(GLTexture *tex, GLsizei width,
                                     GLsizei height, GLsizei depth,
                                     GLint internalformat,
@@ -1877,6 +1895,8 @@ static bool rebuild_texture_storage(GLTexture *tex, GLsizei width,
   } else {
     clear_texture_level_state(tex);
   }
+
+  flush_texture_storage(&tex->gx2_texture);
 
   log_texture_step("rebuild_texture_storage: before GX2InitTextureRegs");
   GX2InitTextureRegs(&tex->gx2_texture);
@@ -7863,6 +7883,7 @@ void _gl_GenerateMipmap(GLenum target) {
     }
   }
 
+  flush_texture_storage(&tex->gx2_texture);
   update_texture_view(tex);
   tex->complete = true;
   if (texture_name != 0) {
