@@ -19,7 +19,7 @@ extern "C" {
 #endif
 extern GX2GL_FrameStats g_gl_frame_stats;
 void gl_stats_end_frame(uint32_t finish_us);
-/* Waiting for the frame gl_stats_end_frame() closed to be shown. */
+/* Waiting for the previous frame to be shown, in this frame. */
 void gl_stats_set_vsync(uint32_t vsync_us);
 #ifdef __cplusplus
 }

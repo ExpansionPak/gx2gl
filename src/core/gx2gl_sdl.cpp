@@ -8,6 +8,7 @@
 #include "mem/gl_mem.h"
 
 #include <gx2/event.h>
+#include <gx2/event.h>
 #include <gx2/swap.h>
 #include <proc_ui/procui.h>
 #include <whb/gfx.h>
@@ -131,9 +132,39 @@ static void gx2gl_apply_default_framebuffer_target(void)
                                                                          : GL_FALSE);
 }
 
+/*
+ * Waits until the frame swapped last is on screen, so that copying this one
+ * into the scan buffers doesn't overwrite it. WHBGfxBeginRender() waits for
+ * that before the next frame starts instead: a frame that missed a vsync
+ * then also cost the CPU the time until the next one (35 ms of work became
+ * 50 ms frames). Waiting here, just before the copy, the CPU builds the next
+ * frame while the last one waits for its vsync.
+ */
+static int g_gx2gl_flip_waited;
+
+static void gx2gl_wait_for_last_flip(void)
+{
+    uint32_t swap_count, flip_count;
+    OSTime last_flip, last_vsync;
+    gl_stats_time_t start;
+
+    if (g_gx2gl_flip_waited) return;
+    g_gx2gl_flip_waited = 1;
+
+    start = GL_STATS_NOW();
+    for (int waits = 0; waits < 10; ++waits) {
+        GX2GetSwapStatus(&swap_count, &flip_count, &last_flip, &last_vsync);
+        if (flip_count >= swap_count) break;
+        GX2WaitForVsync();
+    }
+    gl_stats_set_vsync(GL_STATS_US(GL_STATS_NOW() - start));
+}
+
 static void gx2gl_finish_frame(void)
 {
     if (!g_gx2gl_sdl.frame_active) return;
+
+    gx2gl_wait_for_last_flip();
 
     if (g_gx2gl_sdl.frame_drc_active) {
         WHBGfxFinishRenderDRC();
@@ -162,9 +193,8 @@ int GX2GL_BeginFrame(void)
     if (target == GX2GL_RENDER_TARGET_NONE) return -1;
 
     gx2gl_apply_default_framebuffer_target();
-    gl_stats_time_t vsync_start = GL_STATS_NOW();
-    WHBGfxBeginRender(); /* waits until the last frame is on screen */
-    gl_stats_set_vsync(GL_STATS_US(GL_STATS_NOW() - vsync_start));
+    /* Not WHBGfxBeginRender(): see gx2gl_wait_for_last_flip(). */
+    g_gx2gl_flip_waited = 0;
     if (target == GX2GL_RENDER_TARGET_TV) {
         WHBGfxBeginRenderTV();
         g_gx2gl_sdl.frame_tv_active = 1;
@@ -305,6 +335,7 @@ int GX2GL_Present(void)
                     g_gx2gl_sdl.automatic_drc_enabled &&
                     g_gx2gl_sdl.frame_tv_active;
     if (mirror_to_drc) {
+        gx2gl_wait_for_last_flip();
         WHBGfxFinishRenderTV();
         g_gx2gl_sdl.frame_tv_active = 0;
         GX2GL_CopyToDRC();
