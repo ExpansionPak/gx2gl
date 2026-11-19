@@ -10,7 +10,8 @@ extern "C" {
 /*
  * What a frame spent inside gx2gl: how many calls of each kind, and the CPU
  * time they took in microseconds. finish_us is GX2GL_Present() waiting for
- * the GPU to finish the frame (and for vsync).
+ * the GPU to finish the frame, vsync_us waiting for it to be on screen
+ * before the next frame starts.
  */
 typedef struct GX2GL_FrameStats
 {
@@ -23,7 +24,9 @@ typedef struct GX2GL_FrameStats
     uint32_t shader_compiles, program_links, shader_us;
     uint32_t program_switches, program_switch_us;
     uint32_t clears, clear_us;
+    uint32_t other_calls, other_us; /* every other GL call */
     uint32_t finish_us;
+    uint32_t vsync_us; /* GX2GL_Present() waiting for the previous frame to be shown */
 } GX2GL_FrameStats;
 
 /* The counts of the last frame GX2GL_Present() finished. */

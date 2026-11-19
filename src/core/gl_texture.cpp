@@ -3076,6 +3076,34 @@ static void copy_texture_row_unswapped(uint8_t *dst, const uint8_t *src,
       }
       return;
     }
+    /* The common 8-bit cases, without going through floats: the generic
+     * loop below costs a few nanoseconds per texel, which is 100+ ms for a
+     * 1024x512 lightmap on the Wii U. Same results. */
+    if (info->dst_bytes_per_texel == 4 && info->src_type == GL_UNSIGNED_BYTE &&
+        info->src_bytes_per_component == 1) {
+      if (info->src_format == GL_RGBA && info->src_bytes_per_texel == 4) {
+        memcpy(dst, src, texel_count * 4u);
+        return;
+      }
+      if (info->src_format == GL_BGRA && info->src_bytes_per_texel == 4) {
+        for (uint32_t i = 0; i < texel_count; ++i) {
+          const uint8_t *s = src + (size_t)i * 4u;
+          uint8_t *d = dst + (size_t)i * 4u;
+          d[0] = s[2]; d[1] = s[1]; d[2] = s[0]; d[3] = s[3];
+        }
+        return;
+      }
+      if ((info->src_format == GL_RGB || info->src_format == GL_BGR) &&
+          info->src_bytes_per_texel == 3) {
+        const uint32_t r = info->src_format == GL_BGR ? 2u : 0u;
+        for (uint32_t i = 0; i < texel_count; ++i) {
+          const uint8_t *s = src + (size_t)i * 3u;
+          uint8_t *d = dst + (size_t)i * 4u;
+          d[0] = s[r]; d[1] = s[1]; d[2] = s[2u - r]; d[3] = 255u;
+        }
+        return;
+      }
+    }
     if (info->dst_bytes_per_texel == 4 &&
         (info->src_format == GL_RED || info->src_format == GL_RG ||
          info->src_format == GL_RGB || info->src_format == GL_RGBA ||
@@ -4439,8 +4467,28 @@ static bool generate_mipmap_level(GLTexture *tex, uint32_t dst_level,
       uint8_t *dst_row = dst_slice + (uint32_t)y * dst_row_bytes;
       uint32_t src_y0 = (uint32_t)y * 2u;
       uint32_t src_y_count = src_y0 + 1u < (uint32_t)src_layout.height ? 2u : 1u;
+      GLsizei x_start = 0;
 
-      for (GLsizei x = 0; x < dst_layout.width; ++x) {
+      /* RGBA8 2x2 boxes in one go; the general loop below does the rest. */
+      if (info->bytes_per_component == 1 && info->dst_bytes_per_texel == 4 &&
+          info->dst_components == 4 && src_z_count == 1 && src_y_count == 2) {
+        const uint8_t *r0 = src_base + src_z0 * src_layout.slice_size +
+                            src_y0 * src_row_bytes;
+        const uint8_t *r1 = r0 + src_row_bytes;
+        GLsizei full = (GLsizei)(src_layout.width / 2u);
+        if (full > dst_layout.width) full = dst_layout.width;
+        for (GLsizei x = 0; x < full; ++x) {
+          const uint8_t *a = r0 + (uint32_t)x * 8u;
+          const uint8_t *b = r1 + (uint32_t)x * 8u;
+          uint8_t *d = dst_row + (uint32_t)x * 4u;
+          for (uint32_t c = 0; c < 4; ++c) {
+            d[c] = (uint8_t)(((uint32_t)a[c] + a[c + 4] + b[c] + b[c + 4] + 2u) / 4u);
+          }
+        }
+        x_start = full;
+      }
+
+      for (GLsizei x = x_start; x < dst_layout.width; ++x) {
         uint32_t src_x0 = (uint32_t)x * 2u;
         uint32_t src_x_count =
             src_x0 + 1u < (uint32_t)src_layout.width ? 2u : 1u;

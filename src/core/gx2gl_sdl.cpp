@@ -162,7 +162,9 @@ int GX2GL_BeginFrame(void)
     if (target == GX2GL_RENDER_TARGET_NONE) return -1;
 
     gx2gl_apply_default_framebuffer_target();
-    WHBGfxBeginRender();
+    gl_stats_time_t vsync_start = GL_STATS_NOW();
+    WHBGfxBeginRender(); /* waits until the last frame is on screen */
+    gl_stats_set_vsync(GL_STATS_US(GL_STATS_NOW() - vsync_start));
     if (target == GX2GL_RENDER_TARGET_TV) {
         WHBGfxBeginRenderTV();
         g_gx2gl_sdl.frame_tv_active = 1;
