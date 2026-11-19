@@ -1,3 +1,4 @@
+#include "gl_stats.h"
 #include "gx2gl/gx2gl_sdl.h"
 
 #include "core/gl_context.h"
@@ -142,7 +143,9 @@ static void gx2gl_finish_frame(void)
         WHBGfxFinishRenderTV();
         g_gx2gl_sdl.frame_tv_active = 0;
     }
+    gl_stats_time_t finish_start = GL_STATS_NOW();
     WHBGfxFinishRender();
+    gl_stats_end_frame(GL_STATS_US(GL_STATS_NOW() - finish_start));
     /* The GPU is idle: release what the frame's draws were using. */
     gl_mem_frame_end();
     g_gx2gl_sdl.frame_active = 0;

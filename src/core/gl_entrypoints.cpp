@@ -5,6 +5,7 @@
 #include "gl_vao.h"
 #include "state/gl_state.h"
 #include <stddef.h>
+#include "gl_stats.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -16,8 +17,8 @@ GLboolean glIsBuffer(GLuint b) { return g_gl_context ? g_gl_context->dispatch.gl
 void glBindBuffer(GLenum t, GLuint b) { if(g_gl_context) g_gl_context->dispatch.glBindBuffer(t, b); }
 void glBindBufferBase(GLenum t, GLuint i, GLuint b) { if(g_gl_context) g_gl_context->dispatch.glBindBufferBase(t, i, b); }
 void glBindBufferRange(GLenum t, GLuint i, GLuint b, GLintptr o, GLsizeiptr s) { if(g_gl_context) g_gl_context->dispatch.glBindBufferRange(t, i, b, o, s); }
-void glBufferData(GLenum t, GLsizeiptr s, const GLvoid *d, GLenum u) { if(g_gl_context) g_gl_context->dispatch.glBufferData(t, s, d, u); }
-void glBufferSubData(GLenum t, GLintptr o, GLsizeiptr s, const GLvoid *d) { if(g_gl_context) g_gl_context->dispatch.glBufferSubData(t, o, s, d); }
+void glBufferData(GLenum t, GLsizeiptr s, const GLvoid *d, GLenum u) { if(g_gl_context) { g_gl_frame_stats.buffer_bytes += (uint32_t)s; GL_STATS_TIMED(buffer_uploads, buffer_us, g_gl_context->dispatch.glBufferData(t, s, d, u)); } }
+void glBufferSubData(GLenum t, GLintptr o, GLsizeiptr s, const GLvoid *d) { if(g_gl_context) { g_gl_frame_stats.buffer_bytes += (uint32_t)s; GL_STATS_TIMED(buffer_uploads, buffer_us, g_gl_context->dispatch.glBufferSubData(t, o, s, d)); } }
 void glGetBufferParameteriv(GLenum t, GLenum p, GLint *v) { if(g_gl_context) g_gl_context->dispatch.glGetBufferParameteriv(t, p, v); }
 void glGetBufferPointerv(GLenum t, GLenum p, GLvoid **v) { if(g_gl_context) g_gl_context->dispatch.glGetBufferPointerv(t, p, v); }
 void* glMapBuffer(GLenum t, GLenum a) { return g_gl_context ? g_gl_context->dispatch.glMapBuffer(t, a) : NULL; }
@@ -30,20 +31,20 @@ void glClearColor(GLclampf r, GLclampf g, GLclampf b, GLclampf a) { if(g_gl_cont
 void glClearDepth(GLclampd d) { if(g_gl_context) g_gl_context->dispatch.glClearDepth(d); }
 void glClearDepthf(GLclampf d) { glClearDepth((GLclampd)d); }
 void glClearStencil(GLint s) { if(g_gl_context) g_gl_context->dispatch.glClearStencil(s); }
-void glClear(GLbitfield m) { if(g_gl_context) g_gl_context->dispatch.glClear(m); }
+void glClear(GLbitfield m) { if(g_gl_context) GL_STATS_TIMED(clears, clear_us, g_gl_context->dispatch.glClear(m)); }
 void glGenTextures(GLsizei n, GLuint *t) { if(g_gl_context) g_gl_context->dispatch.glGenTextures(n, t); }
 void glDeleteTextures(GLsizei n, const GLuint *t) { if(g_gl_context) g_gl_context->dispatch.glDeleteTextures(n, t); }
 GLboolean glIsTexture(GLuint t) { return g_gl_context ? g_gl_context->dispatch.glIsTexture(t) : GL_FALSE; }
 void glGenSamplers(GLsizei n, GLuint *s) { if(g_gl_context) g_gl_context->dispatch.glGenSamplers(n, s); }
 void glDeleteSamplers(GLsizei n, const GLuint *s) { if(g_gl_context) g_gl_context->dispatch.glDeleteSamplers(n, s); }
 GLboolean glIsSampler(GLuint s) { return g_gl_context ? g_gl_context->dispatch.glIsSampler(s) : GL_FALSE; }
-void glBindTexture(GLenum t, GLuint i) { if(g_gl_context) g_gl_context->dispatch.glBindTexture(t, i); }
+void glBindTexture(GLenum t, GLuint i) { if(g_gl_context) GL_STATS_TIMED(texture_binds, texture_bind_us, g_gl_context->dispatch.glBindTexture(t, i)); }
 void glBindSampler(GLuint u, GLuint s) { if(g_gl_context) g_gl_context->dispatch.glBindSampler(u, s); }
 void glActiveTexture(GLenum t) { if(g_gl_context) g_gl_context->dispatch.glActiveTexture(t); }
-void glTexImage2D(GLenum t, GLint l, GLint i, GLsizei w, GLsizei h, GLint b, GLenum f, GLenum p, const GLvoid *px) { if(g_gl_context) g_gl_context->dispatch.glTexImage2D(t, l, i, w, h, b, f, p, px); }
-void glTexImage3D(GLenum t, GLint l, GLint i, GLsizei w, GLsizei h, GLsizei d, GLint b, GLenum f, GLenum p, const GLvoid *px) { if(g_gl_context) g_gl_context->dispatch.glTexImage3D(t, l, i, w, h, d, b, f, p, px); }
-void glTexSubImage2D(GLenum t, GLint l, GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLenum p, const GLvoid *px) { if(g_gl_context) g_gl_context->dispatch.glTexSubImage2D(t, l, x, y, w, h, f, p, px); }
-void glTexSubImage3D(GLenum t, GLint l, GLint x, GLint y, GLint z, GLsizei w, GLsizei h, GLsizei d, GLenum f, GLenum p, const GLvoid *px) { if(g_gl_context) g_gl_context->dispatch.glTexSubImage3D(t, l, x, y, z, w, h, d, f, p, px); }
+void glTexImage2D(GLenum t, GLint l, GLint i, GLsizei w, GLsizei h, GLint b, GLenum f, GLenum p, const GLvoid *px) { if(g_gl_context) GL_STATS_TIMED(texture_uploads, texture_upload_us, g_gl_context->dispatch.glTexImage2D(t, l, i, w, h, b, f, p, px)); }
+void glTexImage3D(GLenum t, GLint l, GLint i, GLsizei w, GLsizei h, GLsizei d, GLint b, GLenum f, GLenum p, const GLvoid *px) { if(g_gl_context) GL_STATS_TIMED(texture_uploads, texture_upload_us, g_gl_context->dispatch.glTexImage3D(t, l, i, w, h, d, b, f, p, px)); }
+void glTexSubImage2D(GLenum t, GLint l, GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLenum p, const GLvoid *px) { if(g_gl_context) GL_STATS_TIMED(texture_uploads, texture_upload_us, g_gl_context->dispatch.glTexSubImage2D(t, l, x, y, w, h, f, p, px)); }
+void glTexSubImage3D(GLenum t, GLint l, GLint x, GLint y, GLint z, GLsizei w, GLsizei h, GLsizei d, GLenum f, GLenum p, const GLvoid *px) { if(g_gl_context) GL_STATS_TIMED(texture_uploads, texture_upload_us, g_gl_context->dispatch.glTexSubImage3D(t, l, x, y, z, w, h, d, f, p, px)); }
 void glTexParameteri(GLenum t, GLenum p, GLint v) { if(g_gl_context) g_gl_context->dispatch.glTexParameteri(t, p, v); }
 void glTexParameterf(GLenum t, GLenum p, GLfloat v) { if(g_gl_context) g_gl_context->dispatch.glTexParameterf(t, p, v); }
 void glTexParameteriv(GLenum t, GLenum p, const GLint *v) { if(g_gl_context) g_gl_context->dispatch.glTexParameteriv(t, p, v); }
@@ -56,21 +57,21 @@ void glSamplerParameteri(GLuint s, GLenum p, GLint v) { if(g_gl_context) g_gl_co
 void glSamplerParameterf(GLuint s, GLenum p, GLfloat v) { if(g_gl_context) g_gl_context->dispatch.glSamplerParameterf(s, p, v); }
 void glGetSamplerParameteriv(GLuint s, GLenum p, GLint *v) { if(g_gl_context) g_gl_context->dispatch.glGetSamplerParameteriv(s, p, v); }
 void glGetSamplerParameterfv(GLuint s, GLenum p, GLfloat *v) { if(g_gl_context) g_gl_context->dispatch.glGetSamplerParameterfv(s, p, v); }
-void glGenerateMipmap(GLenum t) { if(g_gl_context) g_gl_context->dispatch.glGenerateMipmap(t); }
+void glGenerateMipmap(GLenum t) { if(g_gl_context) GL_STATS_TIMED(mipmap_generations, mipmap_us, g_gl_context->dispatch.glGenerateMipmap(t)); }
 GLuint glCreateShader(GLenum t) { return g_gl_context ? g_gl_context->dispatch.glCreateShader(t) : 0; }
 void glDeleteShader(GLuint s) { if(g_gl_context) g_gl_context->dispatch.glDeleteShader(s); }
 GLboolean glIsShader(GLuint s) { return g_gl_context ? g_gl_context->dispatch.glIsShader(s) : GL_FALSE; }
 void glShaderSource(GLuint s, GLsizei c, const GLchar *const *str, const GLint *l) { if(g_gl_context) g_gl_context->dispatch.glShaderSource(s, c, str, l); }
 void glGetShaderSource(GLuint s, GLsizei b, GLsizei *l, GLchar *src) { if(g_gl_context) g_gl_context->dispatch.glGetShaderSource(s, b, l, src); }
-void glCompileShader(GLuint s) { if(g_gl_context) g_gl_context->dispatch.glCompileShader(s); }
+void glCompileShader(GLuint s) { if(g_gl_context) GL_STATS_TIMED(shader_compiles, shader_us, g_gl_context->dispatch.glCompileShader(s)); }
 GLuint glCreateProgram(void) { return g_gl_context ? g_gl_context->dispatch.glCreateProgram() : 0; }
 void glDeleteProgram(GLuint p) { if(g_gl_context) g_gl_context->dispatch.glDeleteProgram(p); }
 GLboolean glIsProgram(GLuint p) { return g_gl_context ? g_gl_context->dispatch.glIsProgram(p) : GL_FALSE; }
 void glAttachShader(GLuint p, GLuint s) { if(g_gl_context) g_gl_context->dispatch.glAttachShader(p, s); }
 void glDetachShader(GLuint p, GLuint s) { if(g_gl_context) g_gl_context->dispatch.glDetachShader(p, s); }
-void glLinkProgram(GLuint p) { if(g_gl_context) g_gl_context->dispatch.glLinkProgram(p); }
+void glLinkProgram(GLuint p) { if(g_gl_context) GL_STATS_TIMED(program_links, shader_us, g_gl_context->dispatch.glLinkProgram(p)); }
 void glValidateProgram(GLuint p) { if(g_gl_context) g_gl_context->dispatch.glValidateProgram(p); }
-void glUseProgram(GLuint p) { if(g_gl_context) g_gl_context->dispatch.glUseProgram(p); }
+void glUseProgram(GLuint p) { if(g_gl_context) GL_STATS_TIMED(program_switches, program_switch_us, g_gl_context->dispatch.glUseProgram(p)); }
 void glGetShaderiv(GLuint s, GLenum p, GLint *v) { if(g_gl_context) g_gl_context->dispatch.glGetShaderiv(s, p, v); }
 void glGetProgramiv(GLuint p, GLenum n, GLint *v) { if(g_gl_context) g_gl_context->dispatch.glGetProgramiv(p, n, v); }
 void glGetShaderInfoLog(GLuint s, GLsizei m, GLsizei *l, GLchar *i) { if(g_gl_context) g_gl_context->dispatch.glGetShaderInfoLog(s, m, l, i); }
@@ -83,39 +84,39 @@ GLint glGetUniformLocation(GLuint p, const GLchar *n) { return g_gl_context ? g_
 GLint glGetAttribLocation(GLuint p, const GLchar *n) { return g_gl_context ? g_gl_context->dispatch.glGetAttribLocation(p, n) : -1; }
 GLuint glGetUniformBlockIndex(GLuint p, const GLchar *n) { return g_gl_context ? g_gl_context->dispatch.glGetUniformBlockIndex(p, n) : GL_INVALID_INDEX; }
 void glUniformBlockBinding(GLuint p, GLuint i, GLuint b) { if(g_gl_context) g_gl_context->dispatch.glUniformBlockBinding(p, i, b); }
-void glUniform1f(GLint l, GLfloat v) { if(g_gl_context) g_gl_context->dispatch.glUniform1f(l, v); }
-void glUniform1fv(GLint l, GLsizei c, const GLfloat *v) { if(g_gl_context) g_gl_context->dispatch.glUniform1fv(l, c, v); }
-void glUniform1i(GLint l, GLint v) { if(g_gl_context) g_gl_context->dispatch.glUniform1i(l, v); }
-void glUniform1iv(GLint l, GLsizei c, const GLint *v) { if(g_gl_context) g_gl_context->dispatch.glUniform1iv(l, c, v); }
-void glUniform2f(GLint l, GLfloat v0, GLfloat v1) { if(g_gl_context) g_gl_context->dispatch.glUniform2f(l, v0, v1); }
-void glUniform2fv(GLint l, GLsizei c, const GLfloat *v) { if(g_gl_context) g_gl_context->dispatch.glUniform2fv(l, c, v); }
-void glUniform2i(GLint l, GLint v0, GLint v1) { if(g_gl_context) g_gl_context->dispatch.glUniform2i(l, v0, v1); }
-void glUniform2iv(GLint l, GLsizei c, const GLint *v) { if(g_gl_context) g_gl_context->dispatch.glUniform2iv(l, c, v); }
-void glUniform3f(GLint l, GLfloat v0, GLfloat v1, GLfloat v2) { if(g_gl_context) g_gl_context->dispatch.glUniform3f(l, v0, v1, v2); }
-void glUniform3fv(GLint l, GLsizei c, const GLfloat *v) { if(g_gl_context) g_gl_context->dispatch.glUniform3fv(l, c, v); }
-void glUniform3i(GLint l, GLint v0, GLint v1, GLint v2) { if(g_gl_context) g_gl_context->dispatch.glUniform3i(l, v0, v1, v2); }
-void glUniform3iv(GLint l, GLsizei c, const GLint *v) { if(g_gl_context) g_gl_context->dispatch.glUniform3iv(l, c, v); }
-void glUniform4f(GLint l, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3) { if(g_gl_context) g_gl_context->dispatch.glUniform4f(l, v0, v1, v2, v3); }
-void glUniform4fv(GLint l, GLsizei c, const GLfloat *v) { if(g_gl_context) g_gl_context->dispatch.glUniform4fv(l, c, v); }
-void glUniform4i(GLint l, GLint v0, GLint v1, GLint v2, GLint v3) { if(g_gl_context) g_gl_context->dispatch.glUniform4i(l, v0, v1, v2, v3); }
-void glUniform4iv(GLint l, GLsizei c, const GLint *v) { if(g_gl_context) g_gl_context->dispatch.glUniform4iv(l, c, v); }
-void glUniform1ui(GLint l, GLuint v) { if(g_gl_context) g_gl_context->dispatch.glUniform1ui(l, v); }
-void glUniform2ui(GLint l, GLuint v0, GLuint v1) { if(g_gl_context) g_gl_context->dispatch.glUniform2ui(l, v0, v1); }
-void glUniform3ui(GLint l, GLuint v0, GLuint v1, GLuint v2) { if(g_gl_context) g_gl_context->dispatch.glUniform3ui(l, v0, v1, v2); }
-void glUniform4ui(GLint l, GLuint v0, GLuint v1, GLuint v2, GLuint v3) { if(g_gl_context) g_gl_context->dispatch.glUniform4ui(l, v0, v1, v2, v3); }
-void glUniform1uiv(GLint l, GLsizei c, const GLuint *v) { if(g_gl_context) g_gl_context->dispatch.glUniform1uiv(l, c, v); }
-void glUniform2uiv(GLint l, GLsizei c, const GLuint *v) { if(g_gl_context) g_gl_context->dispatch.glUniform2uiv(l, c, v); }
-void glUniform3uiv(GLint l, GLsizei c, const GLuint *v) { if(g_gl_context) g_gl_context->dispatch.glUniform3uiv(l, c, v); }
-void glUniform4uiv(GLint l, GLsizei c, const GLuint *v) { if(g_gl_context) g_gl_context->dispatch.glUniform4uiv(l, c, v); }
-void glUniformMatrix2fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) { if(g_gl_context) g_gl_context->dispatch.glUniformMatrix2fv(l, c, t, v); }
-void glUniformMatrix3fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) { if(g_gl_context) g_gl_context->dispatch.glUniformMatrix3fv(l, c, t, v); }
-void glUniformMatrix4fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) { if(g_gl_context) g_gl_context->dispatch.glUniformMatrix4fv(l, c, t, v); }
-void glUniformMatrix2x3fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) { if(g_gl_context) g_gl_context->dispatch.glUniformMatrix2x3fv(l, c, t, v); }
-void glUniformMatrix3x2fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) { if(g_gl_context) g_gl_context->dispatch.glUniformMatrix3x2fv(l, c, t, v); }
-void glUniformMatrix2x4fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) { if(g_gl_context) g_gl_context->dispatch.glUniformMatrix2x4fv(l, c, t, v); }
-void glUniformMatrix4x2fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) { if(g_gl_context) g_gl_context->dispatch.glUniformMatrix4x2fv(l, c, t, v); }
-void glUniformMatrix3x4fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) { if(g_gl_context) g_gl_context->dispatch.glUniformMatrix3x4fv(l, c, t, v); }
-void glUniformMatrix4x3fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) { if(g_gl_context) g_gl_context->dispatch.glUniformMatrix4x3fv(l, c, t, v); }
+void glUniform1f(GLint l, GLfloat v) { if(g_gl_context) GL_STATS_TIMED(uniform_calls, uniform_us, g_gl_context->dispatch.glUniform1f(l, v)); }
+void glUniform1fv(GLint l, GLsizei c, const GLfloat *v) { if(g_gl_context) GL_STATS_TIMED(uniform_calls, uniform_us, g_gl_context->dispatch.glUniform1fv(l, c, v)); }
+void glUniform1i(GLint l, GLint v) { if(g_gl_context) GL_STATS_TIMED(uniform_calls, uniform_us, g_gl_context->dispatch.glUniform1i(l, v)); }
+void glUniform1iv(GLint l, GLsizei c, const GLint *v) { if(g_gl_context) GL_STATS_TIMED(uniform_calls, uniform_us, g_gl_context->dispatch.glUniform1iv(l, c, v)); }
+void glUniform2f(GLint l, GLfloat v0, GLfloat v1) { if(g_gl_context) GL_STATS_TIMED(uniform_calls, uniform_us, g_gl_context->dispatch.glUniform2f(l, v0, v1)); }
+void glUniform2fv(GLint l, GLsizei c, const GLfloat *v) { if(g_gl_context) GL_STATS_TIMED(uniform_calls, uniform_us, g_gl_context->dispatch.glUniform2fv(l, c, v)); }
+void glUniform2i(GLint l, GLint v0, GLint v1) { if(g_gl_context) GL_STATS_TIMED(uniform_calls, uniform_us, g_gl_context->dispatch.glUniform2i(l, v0, v1)); }
+void glUniform2iv(GLint l, GLsizei c, const GLint *v) { if(g_gl_context) GL_STATS_TIMED(uniform_calls, uniform_us, g_gl_context->dispatch.glUniform2iv(l, c, v)); }
+void glUniform3f(GLint l, GLfloat v0, GLfloat v1, GLfloat v2) { if(g_gl_context) GL_STATS_TIMED(uniform_calls, uniform_us, g_gl_context->dispatch.glUniform3f(l, v0, v1, v2)); }
+void glUniform3fv(GLint l, GLsizei c, const GLfloat *v) { if(g_gl_context) GL_STATS_TIMED(uniform_calls, uniform_us, g_gl_context->dispatch.glUniform3fv(l, c, v)); }
+void glUniform3i(GLint l, GLint v0, GLint v1, GLint v2) { if(g_gl_context) GL_STATS_TIMED(uniform_calls, uniform_us, g_gl_context->dispatch.glUniform3i(l, v0, v1, v2)); }
+void glUniform3iv(GLint l, GLsizei c, const GLint *v) { if(g_gl_context) GL_STATS_TIMED(uniform_calls, uniform_us, g_gl_context->dispatch.glUniform3iv(l, c, v)); }
+void glUniform4f(GLint l, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3) { if(g_gl_context) GL_STATS_TIMED(uniform_calls, uniform_us, g_gl_context->dispatch.glUniform4f(l, v0, v1, v2, v3)); }
+void glUniform4fv(GLint l, GLsizei c, const GLfloat *v) { if(g_gl_context) GL_STATS_TIMED(uniform_calls, uniform_us, g_gl_context->dispatch.glUniform4fv(l, c, v)); }
+void glUniform4i(GLint l, GLint v0, GLint v1, GLint v2, GLint v3) { if(g_gl_context) GL_STATS_TIMED(uniform_calls, uniform_us, g_gl_context->dispatch.glUniform4i(l, v0, v1, v2, v3)); }
+void glUniform4iv(GLint l, GLsizei c, const GLint *v) { if(g_gl_context) GL_STATS_TIMED(uniform_calls, uniform_us, g_gl_context->dispatch.glUniform4iv(l, c, v)); }
+void glUniform1ui(GLint l, GLuint v) { if(g_gl_context) GL_STATS_TIMED(uniform_calls, uniform_us, g_gl_context->dispatch.glUniform1ui(l, v)); }
+void glUniform2ui(GLint l, GLuint v0, GLuint v1) { if(g_gl_context) GL_STATS_TIMED(uniform_calls, uniform_us, g_gl_context->dispatch.glUniform2ui(l, v0, v1)); }
+void glUniform3ui(GLint l, GLuint v0, GLuint v1, GLuint v2) { if(g_gl_context) GL_STATS_TIMED(uniform_calls, uniform_us, g_gl_context->dispatch.glUniform3ui(l, v0, v1, v2)); }
+void glUniform4ui(GLint l, GLuint v0, GLuint v1, GLuint v2, GLuint v3) { if(g_gl_context) GL_STATS_TIMED(uniform_calls, uniform_us, g_gl_context->dispatch.glUniform4ui(l, v0, v1, v2, v3)); }
+void glUniform1uiv(GLint l, GLsizei c, const GLuint *v) { if(g_gl_context) GL_STATS_TIMED(uniform_calls, uniform_us, g_gl_context->dispatch.glUniform1uiv(l, c, v)); }
+void glUniform2uiv(GLint l, GLsizei c, const GLuint *v) { if(g_gl_context) GL_STATS_TIMED(uniform_calls, uniform_us, g_gl_context->dispatch.glUniform2uiv(l, c, v)); }
+void glUniform3uiv(GLint l, GLsizei c, const GLuint *v) { if(g_gl_context) GL_STATS_TIMED(uniform_calls, uniform_us, g_gl_context->dispatch.glUniform3uiv(l, c, v)); }
+void glUniform4uiv(GLint l, GLsizei c, const GLuint *v) { if(g_gl_context) GL_STATS_TIMED(uniform_calls, uniform_us, g_gl_context->dispatch.glUniform4uiv(l, c, v)); }
+void glUniformMatrix2fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) { if(g_gl_context) GL_STATS_TIMED(uniform_calls, uniform_us, g_gl_context->dispatch.glUniformMatrix2fv(l, c, t, v)); }
+void glUniformMatrix3fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) { if(g_gl_context) GL_STATS_TIMED(uniform_calls, uniform_us, g_gl_context->dispatch.glUniformMatrix3fv(l, c, t, v)); }
+void glUniformMatrix4fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) { if(g_gl_context) GL_STATS_TIMED(uniform_calls, uniform_us, g_gl_context->dispatch.glUniformMatrix4fv(l, c, t, v)); }
+void glUniformMatrix2x3fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) { if(g_gl_context) GL_STATS_TIMED(uniform_calls, uniform_us, g_gl_context->dispatch.glUniformMatrix2x3fv(l, c, t, v)); }
+void glUniformMatrix3x2fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) { if(g_gl_context) GL_STATS_TIMED(uniform_calls, uniform_us, g_gl_context->dispatch.glUniformMatrix3x2fv(l, c, t, v)); }
+void glUniformMatrix2x4fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) { if(g_gl_context) GL_STATS_TIMED(uniform_calls, uniform_us, g_gl_context->dispatch.glUniformMatrix2x4fv(l, c, t, v)); }
+void glUniformMatrix4x2fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) { if(g_gl_context) GL_STATS_TIMED(uniform_calls, uniform_us, g_gl_context->dispatch.glUniformMatrix4x2fv(l, c, t, v)); }
+void glUniformMatrix3x4fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) { if(g_gl_context) GL_STATS_TIMED(uniform_calls, uniform_us, g_gl_context->dispatch.glUniformMatrix3x4fv(l, c, t, v)); }
+void glUniformMatrix4x3fv(GLint l, GLsizei c, GLboolean t, const GLfloat *v) { if(g_gl_context) GL_STATS_TIMED(uniform_calls, uniform_us, g_gl_context->dispatch.glUniformMatrix4x3fv(l, c, t, v)); }
 void glGetUniformfv(GLuint p, GLint l, GLfloat *v) { if(g_gl_context) g_gl_context->dispatch.glGetUniformfv(p, l, v); }
 void glGetUniformiv(GLuint p, GLint l, GLint *v) { if(g_gl_context) g_gl_context->dispatch.glGetUniformiv(p, l, v); }
 void glGetUniformuiv(GLuint p, GLint l, GLuint *v) { if(g_gl_context) g_gl_context->dispatch.glGetUniformuiv(p, l, v); }
@@ -211,10 +212,10 @@ void glGetActiveUniformBlockiv(GLuint p, GLuint i, GLenum n, GLint *v) { if(g_gl
 void glGetActiveUniformBlockName(GLuint p, GLuint i, GLsizei s, GLsizei *l, GLchar *n) { if(g_gl_context) g_gl_context->dispatch.glGetActiveUniformBlockName(p, i, s, l, n); }
 void glGetActiveUniformsiv(GLuint p, GLsizei c, const GLuint *i, GLenum n, GLint *v) { if(g_gl_context) g_gl_context->dispatch.glGetActiveUniformsiv(p, c, i, n, v); }
 void glGetActiveUniformName(GLuint p, GLuint i, GLsizei s, GLsizei *l, GLchar *n) { if(g_gl_context) g_gl_context->dispatch.glGetActiveUniformName(p, i, s, l, n); }
-void glDrawArrays(GLenum m, GLint f, GLsizei c) { if(g_gl_context) g_gl_context->dispatch.glDrawArrays(m, f, c); }
-void glDrawArraysInstanced(GLenum m, GLint f, GLsizei c, GLsizei i) { if(g_gl_context) g_gl_context->dispatch.glDrawArraysInstanced(m, f, c, i); }
-void glDrawElements(GLenum m, GLsizei c, GLenum t, const GLvoid *i) { if(g_gl_context) g_gl_context->dispatch.glDrawElements(m, c, t, i); }
-void glDrawElementsInstanced(GLenum m, GLsizei c, GLenum t, const GLvoid *i, GLsizei s) { if(g_gl_context) g_gl_context->dispatch.glDrawElementsInstanced(m, c, t, i, s); }
+void glDrawArrays(GLenum m, GLint f, GLsizei c) { if(g_gl_context) GL_STATS_TIMED(draws, draw_us, g_gl_context->dispatch.glDrawArrays(m, f, c)); }
+void glDrawArraysInstanced(GLenum m, GLint f, GLsizei c, GLsizei i) { if(g_gl_context) GL_STATS_TIMED(draws, draw_us, g_gl_context->dispatch.glDrawArraysInstanced(m, f, c, i)); }
+void glDrawElements(GLenum m, GLsizei c, GLenum t, const GLvoid *i) { if(g_gl_context) GL_STATS_TIMED(draws, draw_us, g_gl_context->dispatch.glDrawElements(m, c, t, i)); }
+void glDrawElementsInstanced(GLenum m, GLsizei c, GLenum t, const GLvoid *i, GLsizei s) { if(g_gl_context) GL_STATS_TIMED(draws, draw_us, g_gl_context->dispatch.glDrawElementsInstanced(m, c, t, i, s)); }
 void glBlendFunc(GLenum s, GLenum d) { if(g_gl_context) g_gl_context->dispatch.glBlendFunc(s, d); }
 void glBlendEquation(GLenum m) { if(g_gl_context) g_gl_context->dispatch.glBlendEquation(m); }
 void glBlendEquationSeparate(GLenum r, GLenum a) { if(g_gl_context) g_gl_context->dispatch.glBlendEquationSeparate(r, a); }
