@@ -1690,11 +1690,27 @@ static bool calc_level_layout(GLenum target, GX2SurfaceFormat format,
   surface.use = GX2_SURFACE_USE_TEXTURE;
   surface.tileMode = GX2_TILE_MODE_LINEAR_ALIGNED;
 
+  const uint32_t level_width = surface.width;
+  const uint32_t level_height = surface.height;
+
+  /* The GPU's address library pads mip levels after the first to power
+     of two sizes (that's how GX2 lays out mipLevelOffset[]), so levels of
+     a non-power-of-two texture have a wider pitch than the same size as
+     a texture of its own. Without this their rows were written at the
+     wrong place and the levels sampled black or as garbage. */
+  if (level > 0) {
+    uint32_t pow2_width = 1, pow2_height = 1;
+    while (pow2_width < surface.width) pow2_width <<= 1;
+    while (pow2_height < surface.height) pow2_height <<= 1;
+    surface.width = pow2_width;
+    surface.height = pow2_height;
+  }
+
   GX2CalcSurfaceSizeAndAlignment(&surface);
 
   layout->dim = dim;
-  layout->width = (GLsizei)surface.width;
-  layout->height = (GLsizei)surface.height;
+  layout->width = (GLsizei)level_width;
+  layout->height = (GLsizei)level_height;
   layout->depth = (GLsizei)surface.depth;
   layout->pitch = surface.pitch;
   layout->image_size = surface.imageSize;
