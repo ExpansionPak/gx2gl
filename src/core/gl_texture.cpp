@@ -1190,9 +1190,35 @@ static uint32_t RgtcTextureChannels(GLint Format) {
          Format == GL_COMPRESSED_SIGNED_RG_RGTC2 ? 2u : 1u;
 }
 
+static bool get_texture_format_info_impl(GLint internalformat, GLenum format,
+                                         GLenum type, bool validate_upload,
+                                         TextureFormatInfo *info);
+
+/*
+ * Many of the unsized formats below don't set src_bytes_per_component.
+ * The row converter reads component i at i * src_bytes_per_component, so
+ * with 0 every component came from the first byte: GL_RGBA uploads stored
+ * (R, R, R, R) and lost their alpha (Yamagi Quake II's HUD, water and
+ * explosions). Derive it from the texel size when it's missing.
+ */
 static bool get_texture_format_info(GLint internalformat, GLenum format,
                                     GLenum type, bool validate_upload,
                                     TextureFormatInfo *info) {
+  if (!get_texture_format_info_impl(internalformat, format, type,
+                                    validate_upload, info)) {
+    return false;
+  }
+  if (info->src_bytes_per_component == 0 && info->src_components > 0 &&
+      info->src_bytes_per_texel >= info->src_components) {
+    info->src_bytes_per_component =
+        info->src_bytes_per_texel / info->src_components;
+  }
+  return true;
+}
+
+static bool get_texture_format_info_impl(GLint internalformat, GLenum format,
+                                         GLenum type, bool validate_upload,
+                                         TextureFormatInfo *info) {
   memset(info, 0, sizeof(*info));
   info->src_format = format;
   info->src_type = type;
