@@ -8,6 +8,9 @@ extern "C" {
 #endif
 
 void gl_flush_state(void);
+/* Whether draws go to the default framebuffer (shown top row first) rather
+ * than a framebuffer object (stored bottom row first, like textures). */
+bool gl_draw_target_is_window(void);
 void gl_restore_after_gpu_clear(void);
 GLboolean gl_get_multisample_position(GLsizei samples, GLuint index,
                                       GLfloat *position);

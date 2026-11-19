@@ -7,6 +7,7 @@
 #include "gl_vao.h"
 #include "endian/endian.h"
 #include "mem/gl_mem.h"
+#include "state/gl_state.h"
 #include "gl_texture.h"
 #include "Platform/WiiU_Log.hpp"
 
@@ -4314,8 +4315,15 @@ static void update_private_fragment_uniform(GLProgram *prog) {
   float height = color ? (float)color->surface.height
                        : (depth ? (float)depth->surface.height
                                 : (float)g_gl_context->viewport.height);
-  uint32_t word;
-  memcpy(&word, &height, sizeof(word));
+  /* gl_FragCoord.y = x + y * the hardware's: flipped on the default
+   * framebuffer only (see emit_viewport_state()). */
+  float transform[2] = {height, -1.0f};
+  if (!gl_draw_target_is_window()) {
+    transform[0] = 0.0f;
+    transform[1] = 1.0f;
+  }
+  uint32_t words[2];
+  memcpy(words, transform, sizeof(words));
   for (uint32_t i = 0; i < shader->uniformVarCount; ++i) {
     const GX2UniformVar *uniform = &shader->uniformVars[i];
     if (!is_private_fragment_uniform(uniform->name)) continue;
@@ -4325,27 +4333,30 @@ static void update_private_fragment_uniform(GLProgram *prog) {
       if (!prog->ps_blocks || index >= prog->ps_block_count ||
           !prog->ps_blocks[index].buffer ||
           uniform_var_offset(uniform) > prog->ps_blocks[index].size ||
-          sizeof(word) > prog->ps_blocks[index].size - uniform_var_offset(uniform)) {
+          sizeof(words) > prog->ps_blocks[index].size - uniform_var_offset(uniform)) {
         continue;
       }
-      uint32_t swapped = CPU_TO_GPU_32(word);
+      uint32_t swapped[2] = {CPU_TO_GPU_32(words[0]), CPU_TO_GPU_32(words[1])};
       memcpy((uint8_t *)prog->ps_blocks[index].buffer + uniform_var_offset(uniform),
-             &swapped, sizeof(swapped));
+             swapped, sizeof(swapped));
       DCFlushRange(prog->ps_blocks[index].buffer, prog->ps_blocks[index].size);
       continue;
     }
 
     uint32_t offset = shader_mode_uses_blocks(shader->mode)
                           ? (uint32_t)uniform->offset
-                          : (uint32_t)uniform->offset * sizeof(word);
+                          : (uint32_t)uniform->offset * sizeof(uint32_t);
     if (!prog->ps_direct_uniform_shadow ||
         offset > prog->ps_direct_uniform_shadow_size ||
-        sizeof(word) > prog->ps_direct_uniform_shadow_size - offset) {
+        sizeof(words) > prog->ps_direct_uniform_shadow_size - offset) {
       continue;
     }
-    uint32_t value = shader_mode_uses_blocks(shader->mode)
-                         ? CPU_TO_GPU_32(word) : word;
-    memcpy(prog->ps_direct_uniform_shadow + offset, &value, sizeof(value));
+    uint32_t values[2] = {words[0], words[1]};
+    if (shader_mode_uses_blocks(shader->mode)) {
+      values[0] = CPU_TO_GPU_32(words[0]);
+      values[1] = CPU_TO_GPU_32(words[1]);
+    }
+    memcpy(prog->ps_direct_uniform_shadow + offset, values, sizeof(values));
   }
 
 

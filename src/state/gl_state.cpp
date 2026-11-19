@@ -291,8 +291,11 @@ static bool valid_front_face(GLenum mode) {
   return mode == GL_CW || mode == GL_CCW;
 }
 
+/* Framebuffer objects are rendered with y flipped: see emit_viewport_state(). */
 static GX2FrontFace map_front_face(GLenum mode) {
-  return mode == GL_CW ? GX2_FRONT_FACE_CW : GX2_FRONT_FACE_CCW;
+  bool cw = mode == GL_CW;
+  if (!gl_draw_target_is_window()) cw = !cw;
+  return cw ? GX2_FRONT_FACE_CW : GX2_FRONT_FACE_CCW;
 }
 
 static bool valid_polygon_mode(GLenum mode) {
@@ -1157,18 +1160,44 @@ static void emit_multisample_state(void) {
   GX2SetAAMaskReg(&mask_reg);
 }
 
+/*
+ * The default framebuffer is shown top row first, so GL's bottom-left origin
+ * is flipped there. What is rendered into a framebuffer object is sampled as
+ * a texture, whose first row is t = 0 (the bottom in GL), so there GL's y is
+ * the row as it is, and NDC +y has to point down the memory: the viewport's
+ * y scale is negated, which also reverses the winding the rasterizer sees.
+ */
+bool gl_draw_target_is_window(void) {
+  return g_gl_context && g_gl_context->bound_framebuffer == 0;
+}
+
 static void emit_viewport_state(void) {
   GLRect target = draw_target_rect();
-  GLfloat flipped_y = (GLfloat)target.height -
-                      (GLfloat)g_gl_context->viewport.y -
-                      (GLfloat)g_gl_context->viewport.height;
 
-  GX2SetViewport((GLfloat)g_gl_context->viewport.x,
-                 flipped_y,
-                 (GLfloat)g_gl_context->viewport.width,
-                 (GLfloat)g_gl_context->viewport.height,
-                 g_gl_context->viewport.near_z,
-                 g_gl_context->viewport.far_z);
+  if (gl_draw_target_is_window()) {
+    GLfloat flipped_y = (GLfloat)target.height -
+                        (GLfloat)g_gl_context->viewport.y -
+                        (GLfloat)g_gl_context->viewport.height;
+
+    GX2SetViewport((GLfloat)g_gl_context->viewport.x,
+                   flipped_y,
+                   (GLfloat)g_gl_context->viewport.width,
+                   (GLfloat)g_gl_context->viewport.height,
+                   g_gl_context->viewport.near_z,
+                   g_gl_context->viewport.far_z);
+    return;
+  }
+
+  GX2ViewportReg reg;
+  GX2InitViewportReg(&reg,
+                     (GLfloat)g_gl_context->viewport.x,
+                     (GLfloat)g_gl_context->viewport.y,
+                     (GLfloat)g_gl_context->viewport.width,
+                     (GLfloat)g_gl_context->viewport.height,
+                     g_gl_context->viewport.near_z,
+                     g_gl_context->viewport.far_z);
+  reg.pa_cl_vport_yscale ^= 0x80000000u; /* the float's sign */
+  GX2SetViewportReg(&reg);
 }
 
 static void emit_scissor_state(void) {
@@ -1185,7 +1214,9 @@ static void emit_scissor_state(void) {
   }
 
   GX2SetScissor((uint32_t)scissor.x,
-                (uint32_t)(target.height - (scissor.y + scissor.height)),
+                gl_draw_target_is_window()
+                    ? (uint32_t)(target.height - (scissor.y + scissor.height))
+                    : (uint32_t)scissor.y,
                 (uint32_t)scissor.width,
                 (uint32_t)scissor.height);
 }
@@ -1301,7 +1332,7 @@ void gl_flush_state(void) {
     GX2SetLineWidth(g_gl_context->line_width);
   }
   if (dirty & (GL_DIRTY_CULL | GL_DIRTY_POLYGON_MODE |
-               GL_DIRTY_PROVOKING_VERTEX)) {
+               GL_DIRTY_PROVOKING_VERTEX | GL_DIRTY_FRAMEBUFFER)) {
     emit_raster_state();
   }
   if (dirty & GL_DIRTY_RASTERIZER_DISCARD) {

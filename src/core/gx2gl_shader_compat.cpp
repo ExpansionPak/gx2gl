@@ -964,7 +964,8 @@ static std::string lower_fragment_coordinates(const std::string &source) {
          "uniform vec4 _gx2gl_frag_coord_height;\n"
          "vec4 _gx2gl_fragment_coord() {\n"
          "  vec4 coordinate = gl_FragCoord;\n"
-         "  coordinate.y = _gx2gl_frag_coord_height.x - coordinate.y;\n"
+         "  coordinate.y = _gx2gl_frag_coord_height.x +\n"
+         "                 _gx2gl_frag_coord_height.y * coordinate.y;\n"
          "  return coordinate;\n"
          "}\n"
          "#define gl_FragCoord _gx2gl_fragment_coord()\n" +

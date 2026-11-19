@@ -96,6 +96,18 @@ typedef struct {
     bool dirty;
 } GLFramebuffer;
 
+
+/*
+ * The row of the read framebuffer's surface that holds GL row y: the default
+ * framebuffer is stored top row first, framebuffer objects bottom row first
+ * (like textures; see emit_viewport_state()).
+ */
+static GLint read_row(GLint surface_height, GLint y) {
+    return g_gl_context && g_gl_context->bound_read_framebuffer == 0
+               ? surface_height - 1 - y
+               : y;
+}
+
 static GLFramebuffer g_framebuffers[MAX_FRAMEBUFFERS];
 static GLRenderbuffer g_renderbuffers[MAX_RENDERBUFFERS];
 static bool g_default_framebuffer_uses_drc = false;
@@ -1890,7 +1902,7 @@ static GLboolean ReadSignedNormalizedColor(GLint x, GLint y,
                         Source->format == GX2_SURFACE_FORMAT_SNORM_R16_G16_B16_A16;
     if (Success) {
         for (GLsizei Row = 0; Row < height; ++Row) {
-            GLint SourceY = (GLint)Source->height - 1 - (y + Row);
+            GLint SourceY = read_row((GLint)Source->height, y + Row);
             for (GLsizei Column = 0; Column < width; ++Column) {
                 GLint SourceX = x + Column;
                 size_t DestinationIndex = ((size_t)Row * (size_t)width +
@@ -1984,7 +1996,7 @@ static GLboolean ReadFloatingColor(GLint X, GLint Y, GLsizei Width,
     const bool OpaqueAlpha = InternalFormat == GL_RGB16F ||
                              InternalFormat == GL_RGB32F;
     for (GLsizei Row = 0; Row < Height; ++Row) {
-        const GLint SourceY = (GLint)Source->height - 1 - (Y + Row);
+        const GLint SourceY = read_row((GLint)Source->height, Y + Row);
         for (GLsizei Column = 0; Column < Width; ++Column) {
             float *Pixel = Destination +
                 ((size_t)Row * (size_t)Width + (size_t)Column) * 4u;
@@ -2133,7 +2145,7 @@ static GLboolean ReadIntegerColor(GLint X, GLint Y, GLsizei Width,
         InternalFormat == GL_RGB32I || InternalFormat == GL_RGB8UI ||
         InternalFormat == GL_RGB16UI || InternalFormat == GL_RGB32UI;
     for (GLsizei Row = 0; Row < Height; ++Row) {
-        const GLint SourceY = (GLint)Source->height - 1 - (Y + Row);
+        const GLint SourceY = read_row((GLint)Source->height, Y + Row);
         for (GLsizei Column = 0; Column < Width; ++Column) {
             const GLint SourceX = X + Column;
             int64_t *Pixel = Destination +
@@ -3015,16 +3027,28 @@ static uint32_t surface_bytes_per_pixel(GX2SurfaceFormat format) {
     }
 }
 
-static uint8_t *surface_texel(GX2Surface *surface, GLint x, GLint y) {
+/* Blits write the draw framebuffer (surface_texel) and read the read
+ * framebuffer (surface_texel_const); either is flipped only when it's the
+ * default one. */
+static bool g_blit_flip_destination = true;
+static bool g_blit_flip_source = true;
+
+static uint8_t *surface_texel_rows(GX2Surface *surface, GLint x, GLint y,
+                                   bool flipped) {
     uint32_t bytes = surface_bytes_per_pixel(surface->format);
-    uint32_t surface_y = surface->height - 1u - (uint32_t)y;
+    uint32_t surface_y = flipped ? surface->height - 1u - (uint32_t)y
+                                 : (uint32_t)y;
     return (uint8_t *)surface->image +
            (((size_t)surface_y * (size_t)surface->pitch + (size_t)x) * bytes);
 }
 
+static uint8_t *surface_texel(GX2Surface *surface, GLint x, GLint y) {
+    return surface_texel_rows(surface, x, y, g_blit_flip_destination);
+}
+
 static const uint8_t *surface_texel_const(const GX2Surface *surface,
                                           GLint x, GLint y) {
-    return surface_texel((GX2Surface *)surface, x, y);
+    return surface_texel_rows((GX2Surface *)surface, x, y, g_blit_flip_source);
 }
 
 static void read_color_texel(const GX2Surface *surface, GLint internal_format,
@@ -3510,6 +3534,9 @@ void _gl_BlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
 
     if (srcX0 == srcX1 || srcY0 == srcY1 ||
         dstX0 == dstX1 || dstY0 == dstY1 || mask == 0) return;
+
+    g_blit_flip_source = g_gl_context->bound_read_framebuffer == 0;
+    g_blit_flip_destination = g_gl_context->bound_framebuffer == 0;
 
     if ((mask & GL_COLOR_BUFFER_BIT) && source_color_format != 0 &&
         source_color.aa != GX2_AA_MODE1X) {
@@ -4233,7 +4260,7 @@ GLboolean gl_read_color_pixels_red32(GLint x, GLint y,
 
     for (GLsizei row = 0; row < height; ++row) {
         GLint gl_y = y + row;
-        GLint src_y = (GLint)read_surface->height - 1 - gl_y;
+        GLint src_y = read_row((GLint)read_surface->height, gl_y);
         if (src_y < 0 || src_y >= (GLint)read_surface->height) continue;
 
         for (GLsizei col = 0; col < width; ++col) {
@@ -4410,7 +4437,7 @@ static GLboolean ReadNormalizedColor16(GLint x, GLint y, GLsizei width,
     } else {
         uint16_t *Destination = (uint16_t *)pixels;
         for (GLsizei Row = 0; Row < height; ++Row) {
-            GLint SourceY = (GLint)Source->height - 1 - (y + Row);
+            GLint SourceY = read_row((GLint)Source->height, y + Row);
             for (GLsizei Column = 0; Column < width; ++Column) {
                 uint16_t *Pixel = Destination +
                     ((size_t)Row * (size_t)width + (size_t)Column) * 4u;
@@ -4493,7 +4520,7 @@ GLboolean gl_read_color_pixels_rgba8(GLint x, GLint y, GLsizei width, GLsizei he
 
     for (GLsizei row = 0; row < height; ++row) {
         GLint gl_y = y + row;
-        GLint src_y = (GLint)read_surface->height - 1 - gl_y;
+        GLint src_y = read_row((GLint)read_surface->height, gl_y);
         if (src_y < 0 || src_y >= (GLint)read_surface->height) continue;
 
         for (GLsizei col = 0; col < width; ++col) {
