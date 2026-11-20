@@ -5,6 +5,7 @@
 #include "core/gl_texture.h"
 #include "core/gl_vao.h"
 #include "endian/endian.h"
+#include "mem/gl_mem.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -15,6 +16,7 @@ extern "C" {
 #include <gx2/mem.h>
 #include <gx2/registers.h>
 #include <gx2/state.h>
+#include <gx2/surface.h>
 #include <whb/gfx.h>
 
 typedef struct {
@@ -642,6 +644,83 @@ void gl_restore_after_gpu_clear(void) {
   if (g_gl_context) g_gl_context->dirty_flags = 0xFFFFFFFFu;
 }
 
+/*
+ * GX2ClearColor() clears the whole buffer, ignoring the scissor. With the
+ * scissor test on and a box smaller than the buffer, an RGBA8 buffer is
+ * cleared instead by copying a small tile of the clear colour over the box
+ * with GX2CopySurfaceEx(). Returns false where that doesn't apply (the
+ * caller clears the whole buffer then).
+ */
+static bool scissored_gpu_clear_color(GX2ColorBuffer *color,
+                                      const GLfloat *clear_color) {
+  enum { kTile = 128, kMaxRects = 512 };
+  GLRect rect;
+  GX2Surface tile;
+  static GX2Rect src_rects[kMaxRects];
+  static GX2Point dst_points[kMaxRects];
+  uint32_t count = 0;
+
+  if (!g_gl_context->scissor_test_enabled) return false;
+  if (color->surface.aa != GX2_AA_MODE1X ||
+      color->surface.format != GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8) {
+    return false;
+  }
+  for (int i = 0; i < 4; ++i) {
+    if (!g_gl_context->color_mask[i]) return false;
+  }
+  if (!current_clear_rect(&color->surface, &rect)) return true; /* nothing */
+  if (rect.x == 0 && rect.y == 0 && rect.width == (GLint)color->surface.width &&
+      rect.height == (GLint)color->surface.height) {
+    return false; /* the whole buffer anyway */
+  }
+
+  memset(&tile, 0, sizeof(tile));
+  tile.dim = GX2_SURFACE_DIM_TEXTURE_2D;
+  tile.width = kTile;
+  tile.height = kTile;
+  tile.depth = 1;
+  tile.mipLevels = 1;
+  tile.format = color->surface.format;
+  tile.aa = GX2_AA_MODE1X;
+  tile.use = GX2_SURFACE_USE_TEXTURE;
+  tile.tileMode = GX2_TILE_MODE_LINEAR_ALIGNED;
+  GX2CalcSurfaceSizeAndAlignment(&tile);
+
+  /* The GPU reads the tile later: it lives in the frame ring. */
+  static uint32_t texels[kTile * kTile];
+  uint32_t packed = CPU_TO_GPU_32(((uint32_t)clamp_clear_unorm8(clear_color[0]) << 24) |
+                                  ((uint32_t)clamp_clear_unorm8(clear_color[1]) << 16) |
+                                  ((uint32_t)clamp_clear_unorm8(clear_color[2]) << 8) |
+                                  (uint32_t)clamp_clear_unorm8(clear_color[3]));
+  if (tile.imageSize > sizeof(texels) || tile.pitch < kTile) return false;
+  for (uint32_t i = 0; i < tile.imageSize / 4u; ++i) texels[i] = packed;
+  tile.image = gl_mem_frame_copy(texels, tile.imageSize, tile.alignment);
+  if (!tile.image) return false;
+  GX2Invalidate(GX2_INVALIDATE_MODE_CPU_TEXTURE, tile.image, tile.imageSize);
+
+  /* Surface rows: the default framebuffer is stored top row first. */
+  GLint top = gl_draw_target_is_window()
+                  ? (GLint)color->surface.height - (rect.y + rect.height)
+                  : rect.y;
+  for (GLint y = 0; y < rect.height; y += kTile) {
+    for (GLint x = 0; x < rect.width; x += kTile) {
+      if (count == kMaxRects) return false;
+      GLint w = rect.width - x < kTile ? rect.width - x : kTile;
+      GLint h = rect.height - y < kTile ? rect.height - y : kTile;
+      src_rects[count].left = 0;
+      src_rects[count].top = 0;
+      src_rects[count].right = w;
+      src_rects[count].bottom = h;
+      dst_points[count].x = rect.x + x;
+      dst_points[count].y = top + y;
+      ++count;
+    }
+  }
+  GX2CopySurfaceEx(&tile, 0, 0, &color->surface, color->viewMip,
+                   color->viewFirstSlice, count, src_rects, dst_points);
+  return true;
+}
+
 void _gl_Clear(GLbitfield mask) {
   GX2DepthBuffer *depth;
   GX2ClearFlags depth_stencil_flags = (GX2ClearFlags)0;
@@ -662,7 +741,9 @@ void _gl_Clear(GLbitfield mask) {
       if (!gl_is_draw_color_buffer_enabled(i)) continue;
       if (!cpu_clear_draw_color_buffer(i, g_gl_context->clear_color)) {
         color = gl_get_draw_color_buffer(i);
-        if (color) {
+        if (color && scissored_gpu_clear_color(color, g_gl_context->clear_color)) {
+          gpu_clear = true;
+        } else if (color) {
           GX2ClearColor(color,
                         g_gl_context->clear_color[0],
                         g_gl_context->clear_color[1],
