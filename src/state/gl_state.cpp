@@ -688,10 +688,13 @@ static bool scissored_gpu_clear_color(GX2ColorBuffer *color,
 
   /* The GPU reads the tile later: it lives in the frame ring. */
   static uint32_t texels[kTile * kTile];
-  uint32_t packed = CPU_TO_GPU_32(((uint32_t)clamp_clear_unorm8(clear_color[0]) << 24) |
-                                  ((uint32_t)clamp_clear_unorm8(clear_color[1]) << 16) |
-                                  ((uint32_t)clamp_clear_unorm8(clear_color[2]) << 8) |
-                                  (uint32_t)clamp_clear_unorm8(clear_color[3]));
+  /* R, G, B, A in memory order, as the buffer is read. */
+  uint8_t rgba[4] = {clamp_clear_unorm8(clear_color[0]),
+                     clamp_clear_unorm8(clear_color[1]),
+                     clamp_clear_unorm8(clear_color[2]),
+                     clamp_clear_unorm8(clear_color[3])};
+  uint32_t packed;
+  memcpy(&packed, rgba, sizeof(packed));
   if (tile.imageSize > sizeof(texels) || tile.pitch < kTile) return false;
   for (uint32_t i = 0; i < tile.imageSize / 4u; ++i) texels[i] = packed;
   tile.image = gl_mem_frame_copy(texels, tile.imageSize, tile.alignment);

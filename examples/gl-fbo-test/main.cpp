@@ -128,7 +128,7 @@ int main(int, char **)
    GLint screen[4];
    glGetIntegerv(GL_VIEWPORT, screen);
    Log("screen %dx%d", screen[2], screen[3]);
-   const int square = screen[3] / 4;
+   const int square = screen[2] / 11;
    const int gap = square / 8;
    const int pair_width = 2 * square + gap;
    const int left = (screen[2] - 4 * pair_width - 3 * 2 * gap) / 2;
