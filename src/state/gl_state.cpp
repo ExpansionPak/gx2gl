@@ -463,32 +463,15 @@ static bool current_clear_rect(GX2Surface *surface, GLRect *rect) {
   return rect->width > 0 && rect->height > 0;
 }
 
+/* RGBA8 texels are R, G, B, A in memory order (as uploads store them). */
 static void write_rgba8_clear_pixel(GX2Surface *surface, GLint x, GLint y,
                                     const uint8_t clear[4]) {
   uint8_t *dst = (uint8_t *)surface->image +
                  (((size_t)y * (size_t)surface->pitch) + (size_t)x) * 4u;
-  uint32_t packed;
-  uint32_t native;
-  uint8_t old[4];
 
-  memcpy(&packed, dst, sizeof(packed));
-  native = GPU_TO_CPU_32(packed);
-  old[0] = (uint8_t)(native >> 24);
-  old[1] = (uint8_t)(native >> 16);
-  old[2] = (uint8_t)(native >> 8);
-  old[3] = (uint8_t)native;
-
-  if (g_gl_context->color_mask[0]) old[0] = clear[0];
-  if (g_gl_context->color_mask[1]) old[1] = clear[1];
-  if (g_gl_context->color_mask[2]) old[2] = clear[2];
-  if (g_gl_context->color_mask[3]) old[3] = clear[3];
-
-  native = ((uint32_t)old[0] << 24) |
-           ((uint32_t)old[1] << 16) |
-           ((uint32_t)old[2] << 8) |
-           (uint32_t)old[3];
-  packed = CPU_TO_GPU_32(native);
-  memcpy(dst, &packed, sizeof(packed));
+  for (int i = 0; i < 4; ++i) {
+    if (g_gl_context->color_mask[i]) dst[i] = clear[i];
+  }
 }
 
 static bool get_color_buffer_cpu_view(const GX2ColorBuffer *color_buffer,
