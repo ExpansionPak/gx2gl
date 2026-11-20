@@ -13,6 +13,7 @@ extern "C" {
 #include <coreinit/cache.h>
 #include <gx2/clear.h>
 #include <gx2/context.h>
+#include <gx2/displaylist.h>
 #include <gx2/mem.h>
 #include <gx2/registers.h>
 #include <gx2/state.h>
@@ -339,6 +340,8 @@ static uint32_t dirty_for_cap(GLenum cap) {
     return GL_DIRTY_PRIMITIVE_RESTART;
   case GL_RASTERIZER_DISCARD:
     return GL_DIRTY_RASTERIZER_DISCARD;
+  case GL_PROGRAM_POINT_SIZE:
+    return GL_DIRTY_POINT_SIZE;
   case GL_POLYGON_OFFSET_FILL:
   case GL_POLYGON_OFFSET_LINE:
   case GL_POLYGON_OFFSET_POINT:
@@ -1238,6 +1241,55 @@ bool gl_draw_target_is_window(void) {
   return g_gl_context && g_gl_context->bound_framebuffer == 0;
 }
 
+/*
+ * Points. GX2 leaves the sprite texture coordinate generation and the
+ * size limits to the application: without them gl_PointCoord is never
+ * generated, and a size written to gl_PointSize is clamped to nothing.
+ *
+ * SPI_INTERP_CONTROL_0 has no GX2 function, so it's written with a
+ * SET_CONTEXT_REG packet in a small display list: sprite coordinates on,
+ * (s, t, 0, 1) for inputs the compiler marked as gl_PointCoord, the flat
+ * shading the compiler's flat inputs rely on, and t flipped (TOP_1) when
+ * the rasterizer's top isn't where GL_POINT_SPRITE_COORD_ORIGIN puts t = 0:
+ * framebuffer objects are rendered upside down to the rasterizer (see
+ * emit_viewport_state()).
+ */
+static void emit_point_state(void) {
+  /* One display list per TOP_1 value; the GPU reads them later. */
+  alignas(32) static uint32_t lists[2][8];
+  static bool built;
+  if (!built) {
+    for (int top1 = 0; top1 < 2; ++top1) {
+      uint32_t value = (1u << 0)            /* FLAT_SHADE_ENA */
+                     | (1u << 1)            /* PNT_SPRITE_ENA */
+                     | (2u << 2)            /* OVRD_X = s */
+                     | (3u << 5)            /* OVRD_Y = t */
+                     | (0u << 8)            /* OVRD_Z = 0 */
+                     | (1u << 11)           /* OVRD_W = 1 */
+                     | ((uint32_t)top1 << 14); /* PNT_SPRITE_TOP_1 */
+      lists[top1][0] = 0xC0016900u;          /* type 3 SET_CONTEXT_REG, 2 dwords */
+      lists[top1][1] = (0x286D4u - 0x28000u) >> 2;
+      lists[top1][2] = value;
+      for (int i = 3; i < 8; ++i) lists[top1][i] = 0x80000000u; /* type 2 NOP */
+    }
+    DCFlushRange(lists, sizeof(lists));
+    built = true;
+  }
+
+  bool upper_left = g_gl_context->point_sprite_coord_origin != GL_LOWER_LEFT;
+  bool rasterizer_top_is_gl_top = gl_draw_target_is_window();
+  int top1 = upper_left != rasterizer_top_is_gl_top ? 1 : 0;
+  GX2CallDisplayList(lists[top1], sizeof(lists[top1]));
+
+  GX2SetPointSize(g_gl_context->point_size, g_gl_context->point_size);
+  if (g_gl_context->vertex_program_point_size_enabled) {
+    GX2SetPointLimits(0.0f, 2048.0f);
+  } else {
+    /* glPointSize() applies even if the shader writes gl_PointSize. */
+    GX2SetPointLimits(g_gl_context->point_size, g_gl_context->point_size);
+  }
+}
+
 static void emit_viewport_state(void) {
   GLRect target = draw_target_rect();
 
@@ -1392,8 +1444,8 @@ void gl_flush_state(void) {
   if (dirty & GL_DIRTY_DEPTH_STENCIL) {
     emit_depth_stencil_state();
   }
-  if (dirty & GL_DIRTY_POINT_SIZE) {
-    GX2SetPointSize(g_gl_context->point_size, g_gl_context->point_size);
+  if (dirty & (GL_DIRTY_POINT_SIZE | GL_DIRTY_FRAMEBUFFER)) {
+    emit_point_state();
   }
   if (dirty & GL_DIRTY_LINE_WIDTH) {
     GX2SetLineWidth(g_gl_context->line_width);

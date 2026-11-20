@@ -11,6 +11,10 @@
  *      above: blue at the bottom.
  *   F4 scissor: grey, with a magenta square in the bottom left quarter
  *      (glClear inside a scissor box at y = 0).
+ *   F5 point sprites (GL_POINTS, gl_PointSize, gl_PointCoord): three round
+ *      dots coloured (gl_PointCoord.x, gl_PointCoord.y, 0): black at the
+ *      top left of each dot, red at the right, green at the bottom (with
+ *      GL's default upper-left origin for gl_PointCoord).
  *
  * glReadPixels of the framebuffer object and of the screen are logged: both
  * must read green at the bottom and red at the top of F1.
@@ -52,6 +56,21 @@ void main() {
                   ? vec4(0.0, 0.3, 1.0, 1.0) : vec4(1.0);
 }
 )";
+static const char kPointVS[] = R"(
+#version 330 core
+layout(location = 0) in vec2 aPosition;
+uniform float uPointSize;
+void main() { gl_PointSize = uPointSize; gl_Position = vec4(aPosition, 0.0, 1.0); }
+)";
+static const char kPointFS[] = R"(
+#version 330 core
+out vec4 fragColor;
+void main() {
+   vec2 offsetFromCenter = 2.0 * (gl_PointCoord - vec2(0.5, 0.5));
+   if (dot(offsetFromCenter, offsetFromCenter) > 1.0) discard;
+   fragColor = vec4(gl_PointCoord.x, gl_PointCoord.y, 0.0, 1.0);
+}
+)";
 static const char kTextureFS[] = R"(
 #version 330 core
 in vec2 passTexCoord;
@@ -82,6 +101,7 @@ int main(int, char **)
    const GLuint vs = CompileShader("vs", GL_VERTEX_SHADER, kVS);
    const GLuint colour = LinkProgram("colour", vs, 0, CompileShader("colour-fs", GL_FRAGMENT_SHADER, kColourFS), false);
    const GLuint frag_coord = LinkProgram("fragcoord", vs, 0, CompileShader("fragcoord-fs", GL_FRAGMENT_SHADER, kFragCoordFS), false);
+   const GLuint points = LinkProgram("points", CompileShader("point-vs", GL_VERTEX_SHADER, kPointVS), 0, CompileShader("point-fs", GL_FRAGMENT_SHADER, kPointFS), false);
    const GLuint textured = LinkProgram("texture", vs, 0, CompileShader("texture-fs", GL_FRAGMENT_SHADER, kTextureFS), false);
    glUseProgram(textured);
    glUniform1i(glGetUniformLocation(textured, "tex"), 0);
@@ -98,6 +118,8 @@ int main(int, char **)
       -0.8f, 0.8f, 0, 0,  0.8f, 0.8f, 0, 0,  0, -0.8f, 0, 0,
       /* 18: the whole viewport, texture coordinates (0,0) at the bottom left */
       -1, -1, 0, 0,  1, -1, 1, 0,  1, 1, 1, 1,  -1, -1, 0, 0,  1, 1, 1, 1,  -1, 1, 0, 1,
+      /* 24: three points */
+      -0.5f, 0.5f, 0, 0,  0.4f, 0.3f, 0, 0,  -0.1f, -0.5f, 0, 0,
    };
    GLuint vao, vbo;
    glGenVertexArrays(1, &vao);
@@ -111,10 +133,10 @@ int main(int, char **)
    glEnableVertexAttribArray(1);
 
    /* One texture and framebuffer object per test. */
-   GLuint textures[4], fbos[4];
-   glGenTextures(4, textures);
-   glGenFramebuffers(4, fbos);
-   for (int i = 0; i < 4; ++i) {
+   GLuint textures[5], fbos[5];
+   glGenTextures(5, textures);
+   glGenFramebuffers(5, fbos);
+   for (int i = 0; i < 5; ++i) {
       glBindTexture(GL_TEXTURE_2D, textures[i]);
       glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, kFboSize, kFboSize, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
       glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
@@ -128,10 +150,10 @@ int main(int, char **)
    GLint screen[4];
    glGetIntegerv(GL_VIEWPORT, screen);
    Log("screen %dx%d", screen[2], screen[3]);
-   const int square = screen[2] / 11;
+   const int square = screen[2] / 14;
    const int gap = square / 8;
    const int pair_width = 2 * square + gap;
-   const int left = (screen[2] - 4 * pair_width - 3 * 2 * gap) / 2;
+   const int left = (screen[2] - 5 * pair_width - 4 * 2 * gap) / 2;
    const int bottom = (screen[3] - square) / 2;
    example::LogGLError("setup");
 
@@ -176,6 +198,16 @@ int main(int, char **)
          glClear(GL_COLOR_BUFFER_BIT);
          glDisable(GL_SCISSOR_TEST);
          break;
+      case 4:
+         glUseProgram(colour);
+         glUniform4f(glGetUniformLocation(colour, "uColour"), 0.2f, 0.2f, 0.25f, 1);
+         glDrawArrays(GL_TRIANGLES, 0, 12);
+         glEnable(GL_PROGRAM_POINT_SIZE);
+         glUseProgram(points);
+         glUniform1f(glGetUniformLocation(points, "uPointSize"), (float)size * 0.4f);
+         glDrawArrays(GL_POINTS, 24, 3);
+         glDisable(GL_PROGRAM_POINT_SIZE);
+         break;
       }
    };
 
@@ -183,7 +215,7 @@ int main(int, char **)
    while (WHBProcIsRunning()) {
       example::PollGamePad();
 
-      for (int i = 0; i < 4; ++i) {
+      for (int i = 0; i < 5; ++i) {
          glBindFramebuffer(GL_FRAMEBUFFER, fbos[i]);
          draw_test(i, 0, 0, kFboSize);
       }
@@ -200,7 +232,7 @@ int main(int, char **)
       glViewport(0, 0, screen[2], screen[3]);
       glClearColor(0.1f, 0.1f, 0.15f, 1.0f);
       glClear(GL_COLOR_BUFFER_BIT);
-      for (int i = 0; i < 4; ++i) {
+      for (int i = 0; i < 5; ++i) {
          const int x = left + i * (pair_width + 2 * gap);
          draw_test(i, x, bottom, square);
          glViewport(x + square + gap, bottom, square, square);
