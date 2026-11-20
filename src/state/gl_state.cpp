@@ -5,6 +5,7 @@
 #include "core/gl_texture.h"
 #include "core/gl_vao.h"
 #include "endian/endian.h"
+#include "mem/gl_mem.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -12,9 +13,11 @@ extern "C" {
 #include <coreinit/cache.h>
 #include <gx2/clear.h>
 #include <gx2/context.h>
+#include <gx2/displaylist.h>
 #include <gx2/mem.h>
 #include <gx2/registers.h>
 #include <gx2/state.h>
+#include <gx2/surface.h>
 #include <whb/gfx.h>
 
 typedef struct {
@@ -291,8 +294,11 @@ static bool valid_front_face(GLenum mode) {
   return mode == GL_CW || mode == GL_CCW;
 }
 
+/* Framebuffer objects are rendered with y flipped: see emit_viewport_state(). */
 static GX2FrontFace map_front_face(GLenum mode) {
-  return mode == GL_CW ? GX2_FRONT_FACE_CW : GX2_FRONT_FACE_CCW;
+  bool cw = mode == GL_CW;
+  if (!gl_draw_target_is_window()) cw = !cw;
+  return cw ? GX2_FRONT_FACE_CW : GX2_FRONT_FACE_CCW;
 }
 
 static bool valid_polygon_mode(GLenum mode) {
@@ -334,6 +340,8 @@ static uint32_t dirty_for_cap(GLenum cap) {
     return GL_DIRTY_PRIMITIVE_RESTART;
   case GL_RASTERIZER_DISCARD:
     return GL_DIRTY_RASTERIZER_DISCARD;
+  case GL_PROGRAM_POINT_SIZE:
+    return GL_DIRTY_POINT_SIZE;
   case GL_POLYGON_OFFSET_FILL:
   case GL_POLYGON_OFFSET_LINE:
   case GL_POLYGON_OFFSET_POINT:
@@ -458,32 +466,15 @@ static bool current_clear_rect(GX2Surface *surface, GLRect *rect) {
   return rect->width > 0 && rect->height > 0;
 }
 
+/* RGBA8 texels are R, G, B, A in memory order (as uploads store them). */
 static void write_rgba8_clear_pixel(GX2Surface *surface, GLint x, GLint y,
                                     const uint8_t clear[4]) {
   uint8_t *dst = (uint8_t *)surface->image +
                  (((size_t)y * (size_t)surface->pitch) + (size_t)x) * 4u;
-  uint32_t packed;
-  uint32_t native;
-  uint8_t old[4];
 
-  memcpy(&packed, dst, sizeof(packed));
-  native = GPU_TO_CPU_32(packed);
-  old[0] = (uint8_t)(native >> 24);
-  old[1] = (uint8_t)(native >> 16);
-  old[2] = (uint8_t)(native >> 8);
-  old[3] = (uint8_t)native;
-
-  if (g_gl_context->color_mask[0]) old[0] = clear[0];
-  if (g_gl_context->color_mask[1]) old[1] = clear[1];
-  if (g_gl_context->color_mask[2]) old[2] = clear[2];
-  if (g_gl_context->color_mask[3]) old[3] = clear[3];
-
-  native = ((uint32_t)old[0] << 24) |
-           ((uint32_t)old[1] << 16) |
-           ((uint32_t)old[2] << 8) |
-           (uint32_t)old[3];
-  packed = CPU_TO_GPU_32(native);
-  memcpy(dst, &packed, sizeof(packed));
+  for (int i = 0; i < 4; ++i) {
+    if (g_gl_context->color_mask[i]) dst[i] = clear[i];
+  }
 }
 
 static bool get_color_buffer_cpu_view(const GX2ColorBuffer *color_buffer,
@@ -512,7 +503,7 @@ static bool get_color_buffer_cpu_view(const GX2ColorBuffer *color_buffer,
                    ? (uint8_t *)source->image
                    : (source->mipmaps
                           ? (uint8_t *)source->mipmaps +
-                                source->mipLevelOffset[level - 1]
+                                (level == 1 ? 0 : source->mipLevelOffset[level - 1])
                           : NULL);
   if (!level_base) return false;
 
@@ -639,6 +630,86 @@ void gl_restore_after_gpu_clear(void) {
   if (g_gl_context) g_gl_context->dirty_flags = 0xFFFFFFFFu;
 }
 
+/*
+ * GX2ClearColor() clears the whole buffer, ignoring the scissor. With the
+ * scissor test on and a box smaller than the buffer, an RGBA8 buffer is
+ * cleared instead by copying a small tile of the clear colour over the box
+ * with GX2CopySurfaceEx(). Returns false where that doesn't apply (the
+ * caller clears the whole buffer then).
+ */
+static bool scissored_gpu_clear_color(GX2ColorBuffer *color,
+                                      const GLfloat *clear_color) {
+  enum { kTile = 128, kMaxRects = 512 };
+  GLRect rect;
+  GX2Surface tile;
+  static GX2Rect src_rects[kMaxRects];
+  static GX2Point dst_points[kMaxRects];
+  uint32_t count = 0;
+
+  if (!g_gl_context->scissor_test_enabled) return false;
+  if (color->surface.aa != GX2_AA_MODE1X ||
+      color->surface.format != GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8) {
+    return false;
+  }
+  for (int i = 0; i < 4; ++i) {
+    if (!g_gl_context->color_mask[i]) return false;
+  }
+  if (!current_clear_rect(&color->surface, &rect)) return true; /* nothing */
+  if (rect.x == 0 && rect.y == 0 && rect.width == (GLint)color->surface.width &&
+      rect.height == (GLint)color->surface.height) {
+    return false; /* the whole buffer anyway */
+  }
+
+  memset(&tile, 0, sizeof(tile));
+  tile.dim = GX2_SURFACE_DIM_TEXTURE_2D;
+  tile.width = kTile;
+  tile.height = kTile;
+  tile.depth = 1;
+  tile.mipLevels = 1;
+  tile.format = color->surface.format;
+  tile.aa = GX2_AA_MODE1X;
+  tile.use = GX2_SURFACE_USE_TEXTURE;
+  tile.tileMode = GX2_TILE_MODE_LINEAR_ALIGNED;
+  GX2CalcSurfaceSizeAndAlignment(&tile);
+
+  /* The GPU reads the tile later: it lives in the frame ring. */
+  static uint32_t texels[kTile * kTile];
+  /* R, G, B, A in memory order, as the buffer is read. */
+  uint8_t rgba[4] = {clamp_clear_unorm8(clear_color[0]),
+                     clamp_clear_unorm8(clear_color[1]),
+                     clamp_clear_unorm8(clear_color[2]),
+                     clamp_clear_unorm8(clear_color[3])};
+  uint32_t packed;
+  memcpy(&packed, rgba, sizeof(packed));
+  if (tile.imageSize > sizeof(texels) || tile.pitch < kTile) return false;
+  for (uint32_t i = 0; i < tile.imageSize / 4u; ++i) texels[i] = packed;
+  tile.image = gl_mem_frame_copy(texels, tile.imageSize, tile.alignment);
+  if (!tile.image) return false;
+  GX2Invalidate(GX2_INVALIDATE_MODE_CPU_TEXTURE, tile.image, tile.imageSize);
+
+  /* Surface rows: the default framebuffer is stored top row first. */
+  GLint top = gl_draw_target_is_window()
+                  ? (GLint)color->surface.height - (rect.y + rect.height)
+                  : rect.y;
+  for (GLint y = 0; y < rect.height; y += kTile) {
+    for (GLint x = 0; x < rect.width; x += kTile) {
+      if (count == kMaxRects) return false;
+      GLint w = rect.width - x < kTile ? rect.width - x : kTile;
+      GLint h = rect.height - y < kTile ? rect.height - y : kTile;
+      src_rects[count].left = 0;
+      src_rects[count].top = 0;
+      src_rects[count].right = w;
+      src_rects[count].bottom = h;
+      dst_points[count].x = rect.x + x;
+      dst_points[count].y = top + y;
+      ++count;
+    }
+  }
+  GX2CopySurfaceEx(&tile, 0, 0, &color->surface, color->viewMip,
+                   color->viewFirstSlice, count, src_rects, dst_points);
+  return true;
+}
+
 void _gl_Clear(GLbitfield mask) {
   GX2DepthBuffer *depth;
   GX2ClearFlags depth_stencil_flags = (GX2ClearFlags)0;
@@ -659,7 +730,9 @@ void _gl_Clear(GLbitfield mask) {
       if (!gl_is_draw_color_buffer_enabled(i)) continue;
       if (!cpu_clear_draw_color_buffer(i, g_gl_context->clear_color)) {
         color = gl_get_draw_color_buffer(i);
-        if (color) {
+        if (color && scissored_gpu_clear_color(color, g_gl_context->clear_color)) {
+          gpu_clear = true;
+        } else if (color) {
           GX2ClearColor(color,
                         g_gl_context->clear_color[0],
                         g_gl_context->clear_color[1],
@@ -1157,18 +1230,93 @@ static void emit_multisample_state(void) {
   GX2SetAAMaskReg(&mask_reg);
 }
 
+/*
+ * The default framebuffer is shown top row first, so GL's bottom-left origin
+ * is flipped there. What is rendered into a framebuffer object is sampled as
+ * a texture, whose first row is t = 0 (the bottom in GL), so there GL's y is
+ * the row as it is, and NDC +y has to point down the memory: the viewport's
+ * y scale is negated, which also reverses the winding the rasterizer sees.
+ */
+bool gl_draw_target_is_window(void) {
+  return g_gl_context && g_gl_context->bound_framebuffer == 0;
+}
+
+/*
+ * Points. GX2 leaves the sprite texture coordinate generation and the
+ * size limits to the application: without them gl_PointCoord is never
+ * generated, and a size written to gl_PointSize is clamped to nothing.
+ *
+ * SPI_INTERP_CONTROL_0 has no GX2 function, so it's written with a
+ * SET_CONTEXT_REG packet in a small display list: sprite coordinates on,
+ * (s, t, 0, 1) for inputs the compiler marked as gl_PointCoord, the flat
+ * shading the compiler's flat inputs rely on, and t flipped (TOP_1) when
+ * the rasterizer's top isn't where GL_POINT_SPRITE_COORD_ORIGIN puts t = 0:
+ * framebuffer objects are rendered upside down to the rasterizer (see
+ * emit_viewport_state()).
+ */
+static void emit_point_state(void) {
+  /* One display list per TOP_1 value; the GPU reads them later. */
+  alignas(32) static uint32_t lists[2][8];
+  static bool built;
+  if (!built) {
+    for (int top1 = 0; top1 < 2; ++top1) {
+      uint32_t value = (1u << 0)            /* FLAT_SHADE_ENA */
+                     | (1u << 1)            /* PNT_SPRITE_ENA */
+                     | (2u << 2)            /* OVRD_X = s */
+                     | (3u << 5)            /* OVRD_Y = t */
+                     | (0u << 8)            /* OVRD_Z = 0 */
+                     | (1u << 11)           /* OVRD_W = 1 */
+                     | ((uint32_t)top1 << 14); /* PNT_SPRITE_TOP_1 */
+      lists[top1][0] = 0xC0016900u;          /* type 3 SET_CONTEXT_REG, 2 dwords */
+      lists[top1][1] = (0x286D4u - 0x28000u) >> 2;
+      lists[top1][2] = value;
+      for (int i = 3; i < 8; ++i) lists[top1][i] = 0x80000000u; /* type 2 NOP */
+    }
+    DCFlushRange(lists, sizeof(lists));
+    built = true;
+  }
+
+  bool upper_left = g_gl_context->point_sprite_coord_origin != GL_LOWER_LEFT;
+  bool rasterizer_top_is_gl_top = gl_draw_target_is_window();
+  int top1 = upper_left != rasterizer_top_is_gl_top ? 1 : 0;
+  GX2CallDisplayList(lists[top1], sizeof(lists[top1]));
+
+  GX2SetPointSize(g_gl_context->point_size, g_gl_context->point_size);
+  if (g_gl_context->vertex_program_point_size_enabled) {
+    GX2SetPointLimits(0.0f, 2048.0f);
+  } else {
+    /* glPointSize() applies even if the shader writes gl_PointSize. */
+    GX2SetPointLimits(g_gl_context->point_size, g_gl_context->point_size);
+  }
+}
+
 static void emit_viewport_state(void) {
   GLRect target = draw_target_rect();
-  GLfloat flipped_y = (GLfloat)target.height -
-                      (GLfloat)g_gl_context->viewport.y -
-                      (GLfloat)g_gl_context->viewport.height;
 
-  GX2SetViewport((GLfloat)g_gl_context->viewport.x,
-                 flipped_y,
-                 (GLfloat)g_gl_context->viewport.width,
-                 (GLfloat)g_gl_context->viewport.height,
-                 g_gl_context->viewport.near_z,
-                 g_gl_context->viewport.far_z);
+  if (gl_draw_target_is_window()) {
+    GLfloat flipped_y = (GLfloat)target.height -
+                        (GLfloat)g_gl_context->viewport.y -
+                        (GLfloat)g_gl_context->viewport.height;
+
+    GX2SetViewport((GLfloat)g_gl_context->viewport.x,
+                   flipped_y,
+                   (GLfloat)g_gl_context->viewport.width,
+                   (GLfloat)g_gl_context->viewport.height,
+                   g_gl_context->viewport.near_z,
+                   g_gl_context->viewport.far_z);
+    return;
+  }
+
+  GX2ViewportReg reg;
+  GX2InitViewportReg(&reg,
+                     (GLfloat)g_gl_context->viewport.x,
+                     (GLfloat)g_gl_context->viewport.y,
+                     (GLfloat)g_gl_context->viewport.width,
+                     (GLfloat)g_gl_context->viewport.height,
+                     g_gl_context->viewport.near_z,
+                     g_gl_context->viewport.far_z);
+  reg.pa_cl_vport_yscale ^= 0x80000000u; /* the float's sign */
+  GX2SetViewportReg(&reg);
 }
 
 static void emit_scissor_state(void) {
@@ -1185,7 +1333,9 @@ static void emit_scissor_state(void) {
   }
 
   GX2SetScissor((uint32_t)scissor.x,
-                (uint32_t)(target.height - (scissor.y + scissor.height)),
+                gl_draw_target_is_window()
+                    ? (uint32_t)(target.height - (scissor.y + scissor.height))
+                    : (uint32_t)scissor.y,
                 (uint32_t)scissor.width,
                 (uint32_t)scissor.height);
 }
@@ -1294,14 +1444,14 @@ void gl_flush_state(void) {
   if (dirty & GL_DIRTY_DEPTH_STENCIL) {
     emit_depth_stencil_state();
   }
-  if (dirty & GL_DIRTY_POINT_SIZE) {
-    GX2SetPointSize(g_gl_context->point_size, g_gl_context->point_size);
+  if (dirty & (GL_DIRTY_POINT_SIZE | GL_DIRTY_FRAMEBUFFER)) {
+    emit_point_state();
   }
   if (dirty & GL_DIRTY_LINE_WIDTH) {
     GX2SetLineWidth(g_gl_context->line_width);
   }
   if (dirty & (GL_DIRTY_CULL | GL_DIRTY_POLYGON_MODE |
-               GL_DIRTY_PROVOKING_VERTEX)) {
+               GL_DIRTY_PROVOKING_VERTEX | GL_DIRTY_FRAMEBUFFER)) {
     emit_raster_state();
   }
   if (dirty & GL_DIRTY_RASTERIZER_DISCARD) {

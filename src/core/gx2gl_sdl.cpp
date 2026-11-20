@@ -1,3 +1,4 @@
+#include "gl_stats.h"
 #include "gx2gl/gx2gl_sdl.h"
 
 #include "core/gl_context.h"
@@ -6,6 +7,7 @@
 #include "gx2gl/present.h"
 #include "mem/gl_mem.h"
 
+#include <gx2/event.h>
 #include <gx2/event.h>
 #include <gx2/swap.h>
 #include <proc_ui/procui.h>
@@ -130,9 +132,39 @@ static void gx2gl_apply_default_framebuffer_target(void)
                                                                          : GL_FALSE);
 }
 
+/*
+ * Waits until the frame swapped last is on screen, so that copying this one
+ * into the scan buffers doesn't overwrite it. WHBGfxBeginRender() waits for
+ * that before the next frame starts instead: a frame that missed a vsync
+ * then also cost the CPU the time until the next one (35 ms of work became
+ * 50 ms frames). Waiting here, just before the copy, the CPU builds the next
+ * frame while the last one waits for its vsync.
+ */
+static int g_gx2gl_flip_waited;
+
+static void gx2gl_wait_for_last_flip(void)
+{
+    uint32_t swap_count, flip_count;
+    OSTime last_flip, last_vsync;
+    gl_stats_time_t start;
+
+    if (g_gx2gl_flip_waited) return;
+    g_gx2gl_flip_waited = 1;
+
+    start = GL_STATS_NOW();
+    for (int waits = 0; waits < 10; ++waits) {
+        GX2GetSwapStatus(&swap_count, &flip_count, &last_flip, &last_vsync);
+        if (flip_count >= swap_count) break;
+        GX2WaitForVsync();
+    }
+    gl_stats_set_vsync(GL_STATS_US(GL_STATS_NOW() - start));
+}
+
 static void gx2gl_finish_frame(void)
 {
     if (!g_gx2gl_sdl.frame_active) return;
+
+    gx2gl_wait_for_last_flip();
 
     if (g_gx2gl_sdl.frame_drc_active) {
         WHBGfxFinishRenderDRC();
@@ -142,7 +174,11 @@ static void gx2gl_finish_frame(void)
         WHBGfxFinishRenderTV();
         g_gx2gl_sdl.frame_tv_active = 0;
     }
+    gl_stats_time_t finish_start = GL_STATS_NOW();
     WHBGfxFinishRender();
+    gl_stats_end_frame(GL_STATS_US(GL_STATS_NOW() - finish_start));
+    /* The GPU is idle: release what the frame's draws were using. */
+    gl_mem_frame_end();
     g_gx2gl_sdl.frame_active = 0;
 }
 
@@ -157,7 +193,8 @@ int GX2GL_BeginFrame(void)
     if (target == GX2GL_RENDER_TARGET_NONE) return -1;
 
     gx2gl_apply_default_framebuffer_target();
-    WHBGfxBeginRender();
+    /* Not WHBGfxBeginRender(): see gx2gl_wait_for_last_flip(). */
+    g_gx2gl_flip_waited = 0;
     if (target == GX2GL_RENDER_TARGET_TV) {
         WHBGfxBeginRenderTV();
         g_gx2gl_sdl.frame_tv_active = 1;
@@ -264,7 +301,18 @@ void GX2GL_DeleteContext(GX2GL_Context context)
         g_gx2gl_sdl.context_refs <= 0) return;
 
     g_gx2gl_sdl.context_refs -= 1;
-    if (g_gx2gl_sdl.context_refs == 0) {
+    if (g_gx2gl_sdl.context_refs == 0 && !ProcUIInForeground()) {
+        /* Leaving through HOME: WHB has already released the foreground and the
+         * GPU, so GX2DrawDone() in the teardown would never return. The
+         * process is about to end, so drop the context instead.
+         */
+        g_gx2gl_sdl.frame_active = 0;
+        g_gx2gl_sdl.frame_tv_active = 0;
+        g_gx2gl_sdl.frame_drc_active = 0;
+        g_gx2gl_sdl.context = NULL;
+        g_gl_context = NULL;
+    } else if (g_gx2gl_sdl.context_refs == 0) {
+        gl_mem_gpu_sync();
         gl_context_destroy(owned_context);
         gx2gl_finish_frame();
         g_gx2gl_sdl.context = NULL;
@@ -287,6 +335,7 @@ int GX2GL_Present(void)
                     g_gx2gl_sdl.automatic_drc_enabled &&
                     g_gx2gl_sdl.frame_tv_active;
     if (mirror_to_drc) {
+        gx2gl_wait_for_last_flip();
         WHBGfxFinishRenderTV();
         g_gx2gl_sdl.frame_tv_active = 0;
         GX2GL_CopyToDRC();

@@ -378,13 +378,14 @@ static void free_gx2_texture_storage(GX2Texture *texture) {
   if (texture->surface.image) {
     log_texture_step("free_gx2_texture_storage: freeing image=%p",
                      texture->surface.image);
-    gl_mem_free(GL_MEM_TYPE_MEM2, texture->surface.image);
+    /* Queued draws may still sample it. */
+    gl_mem_free_deferred(GL_MEM_TYPE_MEM2, texture->surface.image);
     texture->surface.image = NULL;
   }
   if (texture->surface.mipmaps) {
     log_texture_step("free_gx2_texture_storage: freeing mipmaps=%p",
                      texture->surface.mipmaps);
-    gl_mem_free(GL_MEM_TYPE_MEM2, texture->surface.mipmaps);
+    gl_mem_free_deferred(GL_MEM_TYPE_MEM2, texture->surface.mipmaps);
     texture->surface.mipmaps = NULL;
   }
   log_texture_step("free_gx2_texture_storage: done");
@@ -1189,9 +1190,35 @@ static uint32_t RgtcTextureChannels(GLint Format) {
          Format == GL_COMPRESSED_SIGNED_RG_RGTC2 ? 2u : 1u;
 }
 
+static bool get_texture_format_info_impl(GLint internalformat, GLenum format,
+                                         GLenum type, bool validate_upload,
+                                         TextureFormatInfo *info);
+
+/*
+ * Many of the unsized formats below don't set src_bytes_per_component.
+ * The row converter reads component i at i * src_bytes_per_component, so
+ * with 0 every component came from the first byte: GL_RGBA uploads stored
+ * (R, R, R, R) and lost their alpha (Yamagi Quake II's HUD, water and
+ * explosions). Derive it from the texel size when it's missing.
+ */
 static bool get_texture_format_info(GLint internalformat, GLenum format,
                                     GLenum type, bool validate_upload,
                                     TextureFormatInfo *info) {
+  if (!get_texture_format_info_impl(internalformat, format, type,
+                                    validate_upload, info)) {
+    return false;
+  }
+  if (info->src_bytes_per_component == 0 && info->src_components > 0 &&
+      info->src_bytes_per_texel >= info->src_components) {
+    info->src_bytes_per_component =
+        info->src_bytes_per_texel / info->src_components;
+  }
+  return true;
+}
+
+static bool get_texture_format_info_impl(GLint internalformat, GLenum format,
+                                         GLenum type, bool validate_upload,
+                                         TextureFormatInfo *info) {
   memset(info, 0, sizeof(*info));
   info->src_format = format;
   info->src_type = type;
@@ -1663,11 +1690,27 @@ static bool calc_level_layout(GLenum target, GX2SurfaceFormat format,
   surface.use = GX2_SURFACE_USE_TEXTURE;
   surface.tileMode = GX2_TILE_MODE_LINEAR_ALIGNED;
 
+  const uint32_t level_width = surface.width;
+  const uint32_t level_height = surface.height;
+
+  /* The GPU's address library pads mip levels after the first to power
+     of two sizes (that's how GX2 lays out mipLevelOffset[]), so levels of
+     a non-power-of-two texture have a wider pitch than the same size as
+     a texture of its own. Without this their rows were written at the
+     wrong place and the levels sampled black or as garbage. */
+  if (level > 0) {
+    uint32_t pow2_width = 1, pow2_height = 1;
+    while (pow2_width < surface.width) pow2_width <<= 1;
+    while (pow2_height < surface.height) pow2_height <<= 1;
+    surface.width = pow2_width;
+    surface.height = pow2_height;
+  }
+
   GX2CalcSurfaceSizeAndAlignment(&surface);
 
   layout->dim = dim;
-  layout->width = (GLsizei)surface.width;
-  layout->height = (GLsizei)surface.height;
+  layout->width = (GLsizei)level_width;
+  layout->height = (GLsizei)level_height;
   layout->depth = (GLsizei)surface.depth;
   layout->pitch = surface.pitch;
   layout->image_size = surface.imageSize;
@@ -1687,8 +1730,10 @@ static uint8_t *get_texture_level_ptr_from_gx2(const GX2Texture *texture,
   if (!texture->surface.mipmaps) {
     return NULL;
   }
+  /* GX2 keeps mip level 1 at the start of the mipmaps block: its
+     mipLevelOffset[0] is the offset from the base image instead. */
   return (uint8_t *)texture->surface.mipmaps +
-         texture->surface.mipLevelOffset[level - 1];
+         (level == 1 ? 0 : texture->surface.mipLevelOffset[level - 1]);
 }
 
 static uint8_t *get_texture_level_ptr(const GLTexture *tex, uint32_t level) {
@@ -1712,6 +1757,15 @@ static void init_sampler_state(GX2Sampler *sampler, GLenum min_filter,
                          map_mip_filter(min_filter));
   GX2InitSamplerClamping(sampler, map_wrap(wrap_s), map_wrap(wrap_t),
                          map_wrap(wrap_r));
+  /* GL's defaults are -1000 and 1000. GX2 stores these as unsigned 4.6
+     fixed point and doesn't clamp them: -1000 became the largest minimum
+     LOD, so every mipmapped texture showed only its smallest level. */
+  if (!(min_lod >= 0.0f)) min_lod = 0.0f;
+  if (min_lod > 15.0f) min_lod = 15.0f;
+  if (!(max_lod >= 0.0f)) max_lod = 0.0f;
+  if (max_lod > 15.0f) max_lod = 15.0f;
+  if (lod_bias < -31.0f) lod_bias = -31.0f;
+  if (lod_bias > 31.0f) lod_bias = 31.0f;
   GX2InitSamplerLOD(sampler, min_lod, max_lod, lod_bias);
   GX2InitSamplerBorderType(sampler, map_border_type(border_color));
   if (compare_mode == GL_COMPARE_REF_TO_TEXTURE) {
@@ -1732,6 +1786,24 @@ static void init_sampler_object(GLSampler *sampler) {
                      sampler->wrap_r, sampler->min_lod, sampler->max_lod,
                      sampler->lod_bias, sampler->border_color,
                      sampler->compare_mode, sampler->compare_func);
+}
+
+/*
+ * Writes back what the CPU wrote into a texture's storage (clearing it,
+ * copying preserved levels, generating mipmaps) so the GPU sees it, not
+ * whatever the memory held before.
+ */
+static void flush_texture_storage(GX2Texture *texture) {
+  if (texture->surface.image && texture->surface.imageSize) {
+    DCFlushRange(texture->surface.image, texture->surface.imageSize);
+    GX2Invalidate(GX2_INVALIDATE_MODE_CPU_TEXTURE, texture->surface.image,
+                  texture->surface.imageSize);
+  }
+  if (texture->surface.mipmaps && texture->surface.mipmapSize) {
+    DCFlushRange(texture->surface.mipmaps, texture->surface.mipmapSize);
+    GX2Invalidate(GX2_INVALIDATE_MODE_CPU_TEXTURE, texture->surface.mipmaps,
+                  texture->surface.mipmapSize);
+  }
 }
 
 static bool rebuild_texture_storage(GLTexture *tex, GLsizei width,
@@ -1865,6 +1937,8 @@ static bool rebuild_texture_storage(GLTexture *tex, GLsizei width,
   } else {
     clear_texture_level_state(tex);
   }
+
+  flush_texture_storage(&tex->gx2_texture);
 
   log_texture_step("rebuild_texture_storage: before GX2InitTextureRegs");
   GX2InitTextureRegs(&tex->gx2_texture);
@@ -3001,6 +3075,34 @@ static void copy_texture_row_unswapped(uint8_t *dst, const uint8_t *src,
         Destination[3] = 1u;
       }
       return;
+    }
+    /* The common 8-bit cases, without going through floats: the generic
+     * loop below costs a few nanoseconds per texel, which is 100+ ms for a
+     * 1024x512 lightmap on the Wii U. Same results. */
+    if (info->dst_bytes_per_texel == 4 && info->src_type == GL_UNSIGNED_BYTE &&
+        info->src_bytes_per_component == 1) {
+      if (info->src_format == GL_RGBA && info->src_bytes_per_texel == 4) {
+        memcpy(dst, src, texel_count * 4u);
+        return;
+      }
+      if (info->src_format == GL_BGRA && info->src_bytes_per_texel == 4) {
+        for (uint32_t i = 0; i < texel_count; ++i) {
+          const uint8_t *s = src + (size_t)i * 4u;
+          uint8_t *d = dst + (size_t)i * 4u;
+          d[0] = s[2]; d[1] = s[1]; d[2] = s[0]; d[3] = s[3];
+        }
+        return;
+      }
+      if ((info->src_format == GL_RGB || info->src_format == GL_BGR) &&
+          info->src_bytes_per_texel == 3) {
+        const uint32_t r = info->src_format == GL_BGR ? 2u : 0u;
+        for (uint32_t i = 0; i < texel_count; ++i) {
+          const uint8_t *s = src + (size_t)i * 3u;
+          uint8_t *d = dst + (size_t)i * 4u;
+          d[0] = s[r]; d[1] = s[1]; d[2] = s[2u - r]; d[3] = 255u;
+        }
+        return;
+      }
     }
     if (info->dst_bytes_per_texel == 4 &&
         (info->src_format == GL_RED || info->src_format == GL_RG ||
@@ -4365,8 +4467,28 @@ static bool generate_mipmap_level(GLTexture *tex, uint32_t dst_level,
       uint8_t *dst_row = dst_slice + (uint32_t)y * dst_row_bytes;
       uint32_t src_y0 = (uint32_t)y * 2u;
       uint32_t src_y_count = src_y0 + 1u < (uint32_t)src_layout.height ? 2u : 1u;
+      GLsizei x_start = 0;
 
-      for (GLsizei x = 0; x < dst_layout.width; ++x) {
+      /* RGBA8 2x2 boxes in one go; the general loop below does the rest. */
+      if (info->bytes_per_component == 1 && info->dst_bytes_per_texel == 4 &&
+          info->dst_components == 4 && src_z_count == 1 && src_y_count == 2) {
+        const uint8_t *r0 = src_base + src_z0 * src_layout.slice_size +
+                            src_y0 * src_row_bytes;
+        const uint8_t *r1 = r0 + src_row_bytes;
+        GLsizei full = (GLsizei)(src_layout.width / 2u);
+        if (full > dst_layout.width) full = dst_layout.width;
+        for (GLsizei x = 0; x < full; ++x) {
+          const uint8_t *a = r0 + (uint32_t)x * 8u;
+          const uint8_t *b = r1 + (uint32_t)x * 8u;
+          uint8_t *d = dst_row + (uint32_t)x * 4u;
+          for (uint32_t c = 0; c < 4; ++c) {
+            d[c] = (uint8_t)(((uint32_t)a[c] + a[c + 4] + b[c] + b[c + 4] + 2u) / 4u);
+          }
+        }
+        x_start = full;
+      }
+
+      for (GLsizei x = x_start; x < dst_layout.width; ++x) {
         uint32_t src_x0 = (uint32_t)x * 2u;
         uint32_t src_x_count =
             src_x0 + 1u < (uint32_t)src_layout.width ? 2u : 1u;
@@ -7851,6 +7973,7 @@ void _gl_GenerateMipmap(GLenum target) {
     }
   }
 
+  flush_texture_storage(&tex->gx2_texture);
   update_texture_view(tex);
   tex->complete = true;
   if (texture_name != 0) {

@@ -15,6 +15,7 @@ extern "C" {
 typedef struct {
     uint32_t vertex_shader_count;
     uint32_t pixel_shader_count;
+    uint32_t geometry_set_count;
     bool release_requested;
     bool available;
 } GX2GLCafeGLSLState;
@@ -30,7 +31,8 @@ static void gx2gl_cafeglsl_unload(void) {
 static void gx2gl_cafeglsl_finish_deferred_release(void) {
     if (g_cafeglsl_state.release_requested &&
         g_cafeglsl_state.vertex_shader_count == 0 &&
-        g_cafeglsl_state.pixel_shader_count == 0) {
+        g_cafeglsl_state.pixel_shader_count == 0 &&
+        g_cafeglsl_state.geometry_set_count == 0) {
         gx2gl_cafeglsl_unload();
     }
 }
@@ -105,6 +107,70 @@ void gx2gl_cafeglsl_free_pixel_shader(GX2PixelShader *shader) {
     gx2gl_cafeglsl_finish_deferred_release();
 }
 
+#ifdef CAFEGLSL_HAS_GEOMETRY_SHADERS
+
+bool gx2gl_cafeglsl_supports_geometry_shaders(void) {
+    return true;
+}
+
+bool gx2gl_cafeglsl_compile_geometry_set(const char *vertex_source,
+                                         const char *geometry_source,
+                                         const char *pixel_source,
+                                         gx2gl_cafeglsl_geometry_set_t *out,
+                                         char *info_log_out,
+                                         int info_log_max_length,
+                                         gx2gl_cafeglsl_flag_t flags) {
+    if (!out) return false;
+    *out = (gx2gl_cafeglsl_geometry_set_t){NULL, NULL, NULL};
+    if (!gx2gl_cafeglsl_init()) return false;
+
+    GX2ShaderMode mode = CompileGeometryShaderSet(
+        vertex_source, geometry_source, pixel_source, GLSL_COMPILE_BLOCK,
+        &out->vertex, &out->geometry, &out->pixel, info_log_out,
+        info_log_max_length, static_cast<GLSL_COMPILER_FLAG>(flags));
+    if (mode == GLSL_SHADER_MODE_ERROR || !out->vertex || !out->geometry || !out->pixel) {
+        *out = (gx2gl_cafeglsl_geometry_set_t){NULL, NULL, NULL};
+        return false;
+    }
+    ++g_cafeglsl_state.geometry_set_count;
+    return true;
+}
+
+void gx2gl_cafeglsl_free_geometry_set(gx2gl_cafeglsl_geometry_set_t *set) {
+    if (!set || !set->geometry) return;
+    if (g_cafeglsl_state.available) {
+        FreeShaders(set->vertex, set->pixel);
+        FreeGeometryShader(set->geometry);
+        if (g_cafeglsl_state.geometry_set_count > 0)
+            --g_cafeglsl_state.geometry_set_count;
+    }
+    *set = (gx2gl_cafeglsl_geometry_set_t){NULL, NULL, NULL};
+    gx2gl_cafeglsl_finish_deferred_release();
+}
+
+#else
+
+bool gx2gl_cafeglsl_supports_geometry_shaders(void) {
+    return false;
+}
+
+bool gx2gl_cafeglsl_compile_geometry_set(const char *, const char *, const char *,
+                                         gx2gl_cafeglsl_geometry_set_t *out,
+                                         char *info_log_out, int info_log_max_length,
+                                         gx2gl_cafeglsl_flag_t) {
+    if (out) *out = (gx2gl_cafeglsl_geometry_set_t){NULL, NULL, NULL};
+    if (info_log_out && info_log_max_length > 0)
+        snprintf(info_log_out, (size_t)info_log_max_length, "%s",
+                 "This CafeGLSL build has no geometry shader support.");
+    return false;
+}
+
+void gx2gl_cafeglsl_free_geometry_set(gx2gl_cafeglsl_geometry_set_t *set) {
+    if (set) *set = (gx2gl_cafeglsl_geometry_set_t){NULL, NULL, NULL};
+}
+
+#endif
+
 #else
 
 extern "C" {
@@ -128,6 +194,10 @@ typedef GX2ShaderMode (*gx2gl_cafeglsl_compile_ps_v3_fn)(
 typedef void (*gx2gl_cafeglsl_free_vs_fn)(GX2VertexShader *);
 typedef void (*gx2gl_cafeglsl_free_ps_fn)(GX2PixelShader *);
 typedef void (*gx2gl_cafeglsl_destroy_fn)(void);
+typedef GX2ShaderMode (*gx2gl_cafeglsl_compile_gs_set_fn)(
+    const char *, const char *, const char *, int, GX2VertexShader **,
+    GX2GeometryShader **, GX2PixelShader **, char *, int, gx2gl_cafeglsl_flag_t);
+typedef void (*gx2gl_cafeglsl_free_gs_fn)(GX2GeometryShader *);
 
 typedef struct {
     OSDynLoad_Module module;
@@ -140,9 +210,12 @@ typedef struct {
     gx2gl_cafeglsl_free_vs_fn free_vertex_shader;
     gx2gl_cafeglsl_free_ps_fn free_pixel_shader;
     gx2gl_cafeglsl_destroy_fn destroy;
+    gx2gl_cafeglsl_compile_gs_set_fn compile_geometry_set;
+    gx2gl_cafeglsl_free_gs_fn free_geometry_shader;
     uint32_t api_version;
     uint32_t vertex_shader_count;
     uint32_t pixel_shader_count;
+    uint32_t geometry_set_count;
     bool release_requested;
     bool available;
 } GX2GLCafeGLSLState;
@@ -163,7 +236,8 @@ static void gx2gl_cafeglsl_unload(void) {
 static void gx2gl_cafeglsl_finish_deferred_release(void) {
     if (g_cafeglsl_state.release_requested &&
         g_cafeglsl_state.vertex_shader_count == 0 &&
-        g_cafeglsl_state.pixel_shader_count == 0) {
+        g_cafeglsl_state.pixel_shader_count == 0 &&
+        g_cafeglsl_state.geometry_set_count == 0) {
         gx2gl_cafeglsl_unload();
     }
 }
@@ -204,6 +278,16 @@ static bool gx2gl_cafeglsl_load_exports(OSDynLoad_Module module) {
         if (version && strncmp(version, "v0.3.", 5) == 0) {
             g_cafeglsl_state.api_version = 3;
         }
+    }
+
+    /* Optional: only CafeGLSL builds with geometry shader support export these. */
+    if (g_cafeglsl_state.api_version >= 3 &&
+        (OSDynLoad_FindExport(module, OS_DYNLOAD_EXPORT_FUNC, "CompileGeometryShaderSet",
+                              (void **)&g_cafeglsl_state.compile_geometry_set) != OS_DYNLOAD_OK ||
+         OSDynLoad_FindExport(module, OS_DYNLOAD_EXPORT_FUNC, "FreeGeometryShader",
+                              (void **)&g_cafeglsl_state.free_geometry_shader) != OS_DYNLOAD_OK)) {
+        g_cafeglsl_state.compile_geometry_set = NULL;
+        g_cafeglsl_state.free_geometry_shader = NULL;
     }
 
     if (g_cafeglsl_state.api_version >= 3) {
@@ -353,6 +437,56 @@ void gx2gl_cafeglsl_free_pixel_shader(GX2PixelShader *shader) {
         }
         gx2gl_cafeglsl_finish_deferred_release();
     }
+}
+
+bool gx2gl_cafeglsl_supports_geometry_shaders(void) {
+    return gx2gl_cafeglsl_init() && g_cafeglsl_state.compile_geometry_set &&
+           g_cafeglsl_state.free_geometry_shader;
+}
+
+bool gx2gl_cafeglsl_compile_geometry_set(const char *vertex_source,
+                                         const char *geometry_source,
+                                         const char *pixel_source,
+                                         gx2gl_cafeglsl_geometry_set_t *out,
+                                         char *info_log_out,
+                                         int info_log_max_length,
+                                         gx2gl_cafeglsl_flag_t flags) {
+    if (!out) return false;
+    *out = (gx2gl_cafeglsl_geometry_set_t){NULL, NULL, NULL};
+    if (!gx2gl_cafeglsl_supports_geometry_shaders()) {
+        if (info_log_out && info_log_max_length > 0) {
+            snprintf(info_log_out, (size_t)info_log_max_length, "%s",
+                     g_cafeglsl_last_error[0]
+                         ? g_cafeglsl_last_error
+                         : "The loaded CafeGLSL has no geometry shader support.");
+        }
+        return false;
+    }
+
+    GX2ShaderMode mode = g_cafeglsl_state.compile_geometry_set(
+        vertex_source, geometry_source, pixel_source, GX2GL_CAFEGLSL_COMPILE_BLOCK,
+        &out->vertex, &out->geometry, &out->pixel, info_log_out,
+        info_log_max_length, flags);
+    if ((uint32_t)mode == UINT32_MAX || !out->vertex || !out->geometry || !out->pixel) {
+        *out = (gx2gl_cafeglsl_geometry_set_t){NULL, NULL, NULL};
+        return false;
+    }
+    ++g_cafeglsl_state.geometry_set_count;
+    return true;
+}
+
+void gx2gl_cafeglsl_free_geometry_set(gx2gl_cafeglsl_geometry_set_t *set) {
+    if (!set || !set->geometry) return;
+    if (g_cafeglsl_state.available) {
+        g_cafeglsl_state.free_vertex_shader(set->vertex);
+        g_cafeglsl_state.free_pixel_shader(set->pixel);
+        g_cafeglsl_state.free_geometry_shader(set->geometry);
+        if (g_cafeglsl_state.geometry_set_count > 0) {
+            --g_cafeglsl_state.geometry_set_count;
+        }
+    }
+    *set = (gx2gl_cafeglsl_geometry_set_t){NULL, NULL, NULL};
+    gx2gl_cafeglsl_finish_deferred_release();
 }
 
 #endif

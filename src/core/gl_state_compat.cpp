@@ -132,6 +132,7 @@ void glPointParameterf(GLenum pname, GLfloat param) {
       return;
     }
     g_gl_context->point_sprite_coord_origin = (GLenum)(GLint)param;
+    g_gl_context->dirty_flags |= GL_DIRTY_POINT_SIZE;
     return;
 
   default:

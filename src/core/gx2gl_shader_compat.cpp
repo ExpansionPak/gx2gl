@@ -349,7 +349,11 @@ static bool parse_interface_declaration(const std::string &line,
       size = (size * 10) + digit;
     }
     if (size <= 0) {
-      return false;
+      /* "name[]": only geometry shader inputs, one element per input vertex. */
+      if (line.find_first_not_of(" \t\r", name_end + 1u) != close) {
+        return false;
+      }
+      size = 1;
     }
     decl->array_size = size;
   }
@@ -451,6 +455,8 @@ static const char *shader_stage_name(GLenum shader_type) {
     return "vertex";
   case GL_FRAGMENT_SHADER:
     return "fragment";
+  case GL_GEOMETRY_SHADER:
+    return "geometry";
   default:
     return "shader";
   }
@@ -469,6 +475,29 @@ static bool reserve_interface_locations(bool used_locations[], int location,
     used_locations[location + i] = true;
   }
   return true;
+}
+
+static int assign_lowest_interface_location(bool used_locations[], int span,
+                                            int max_locations) {
+  if (max_locations <= 0 || max_locations > kMaxShaderInterfaceLocations ||
+      span <= 0 || span > max_locations) {
+    return -1;
+  }
+
+  for (int location = 0; location <= max_locations - span; ++location) {
+    bool free_range = true;
+    for (int i = 0; i < span; ++i) {
+      if (used_locations[location + i]) {
+        free_range = false;
+        break;
+      }
+    }
+    if (free_range) {
+      reserve_interface_locations(used_locations, location, span);
+      return location;
+    }
+  }
+  return -1;
 }
 
 static int assign_interface_location(bool used_locations[],
@@ -512,8 +541,11 @@ static bool reserve_binding(bool used_bindings[], int max_bindings,
   return true;
 }
 
-static int assign_binding(bool used_bindings[], int max_bindings) {
-  for (int i = 0; i < max_bindings; ++i) {
+/* CafeGLSL 0.3 keeps uniform block binding 0 for a shader's loose uniforms, so
+ * blocks are assigned from 1 up. Samplers have no such slot and start at 0.
+ */
+static int assign_binding(bool used_bindings[], int max_bindings, bool uniform_block) {
+  for (int i = uniform_block ? 1 : 0; i < max_bindings; ++i) {
     if (!used_bindings[i]) {
       used_bindings[i] = true;
       return i;
@@ -932,7 +964,8 @@ static std::string lower_fragment_coordinates(const std::string &source) {
          "uniform vec4 _gx2gl_frag_coord_height;\n"
          "vec4 _gx2gl_fragment_coord() {\n"
          "  vec4 coordinate = gl_FragCoord;\n"
-         "  coordinate.y = _gx2gl_frag_coord_height.x - coordinate.y;\n"
+         "  coordinate.y = _gx2gl_frag_coord_height.x +\n"
+         "                 _gx2gl_frag_coord_height.y * coordinate.y;\n"
          "  return coordinate;\n"
          "}\n"
          "#define gl_FragCoord _gx2gl_fragment_coord()\n" +
@@ -1213,6 +1246,147 @@ static std::string LowerDoWhileContinue(const std::string &Source) {
   return Result;
 }
 
+/* Gives each unlocated `in`/`out` interface block (`out VS_OUT { ... } vs_out;`)
+ * an explicit location, picked from the block name like the plain varyings, so
+ * the stages agree on it. Members take consecutive locations from there.
+ */
+static bool IsIdentChar(char c) {
+  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+}
+
+static bool assign_interface_block_locations(std::string &source, GLenum shader_type,
+                                             bool used_input_locations[],
+                                             bool used_output_locations[],
+                                             char *info_log_out, int info_log_max_length) {
+  struct Insertion {
+    size_t position;
+    std::string text;
+  };
+  std::vector<Insertion> insertions;
+  size_t cursor = 0;
+
+  while (cursor < source.size()) {
+    const size_t brace = source.find('{', cursor);
+    if (brace == std::string::npos) break;
+    cursor = brace + 1u;
+
+    /* The block header: everything since the previous statement. */
+    size_t header_start = source.find_last_of(";{}", brace == 0 ? 0 : brace - 1u);
+    header_start = header_start == std::string::npos ? 0 : header_start + 1u;
+    std::string header = source.substr(header_start, brace - header_start);
+    /* Start after any preprocessor or comment line ahead of the header. */
+    for (size_t line_start = 0; line_start < header.size();) {
+      size_t line_end = header.find('\n', line_start);
+      if (line_end == std::string::npos) break;
+      const size_t first = header.find_first_not_of(" \t\r", line_start);
+      if (first < line_end && (header[first] == '#' || header.compare(first, 2, "//") == 0)) {
+        header_start += line_end + 1u;
+        header = header.substr(line_end + 1u);
+        line_start = 0;
+        continue;
+      }
+      line_start = line_end + 1u;
+    }
+
+    /* layout(...)? qualifiers* (in|out) Name */
+    size_t pos = 0;
+    size_t layout_open = std::string::npos;
+    std::string storage, name;
+    bool ok = true;
+    while (ok) {
+      pos = header.find_first_not_of(" \t\r\n", pos);
+      if (pos == std::string::npos) break;
+      if (header.compare(pos, 6, "layout") == 0 && !IsIdentChar(header[pos + 6 < header.size() ? pos + 6 : pos])) {
+        layout_open = header.find('(', pos);
+        const size_t close = layout_open == std::string::npos ? std::string::npos
+                                                              : header.find(')', layout_open);
+        if (close == std::string::npos) { ok = false; break; }
+        pos = close + 1u;
+        continue;
+      }
+      size_t end = pos;
+      while (end < header.size() && IsIdentChar(header[end])) ++end;
+      if (end == pos) { ok = false; break; }
+      const std::string word = header.substr(pos, end - pos);
+      if (storage.empty()) {
+        if (word == "in" || word == "out") {
+          storage = word;
+        } else if (word != "flat" && word != "smooth" && word != "noperspective" &&
+                   word != "centroid" && word != "sample" && word != "invariant") {
+          ok = false;
+        }
+      } else if (name.empty()) {
+        name = word;
+      } else {
+        ok = false;
+      }
+      pos = end;
+    }
+    if (!ok || storage.empty() || name.empty() || is_builtin_name(name)) continue;
+    if (layout_open != std::string::npos &&
+        header.find("location", layout_open) != std::string::npos)
+      continue;
+
+    const size_t close = source.find('}', brace);
+    if (close == std::string::npos) break;
+    int span = 0;
+    const std::string members = source.substr(brace + 1u, close - brace - 1u);
+    size_t member_start = 0;
+    while (member_start < members.size()) {
+      size_t member_end = members.find(';', member_start);
+      if (member_end == std::string::npos) member_end = members.size();
+      std::string member = members.substr(member_start, member_end - member_start);
+      member_start = member_end + 1u;
+      std::vector<std::string> words;
+      std::string word;
+      int array_size = 1;
+      for (size_t i = 0; i <= member.size(); ++i) {
+        const char c = i < member.size() ? member[i] : ' ';
+        if (IsIdentChar(c)) {
+          word += c;
+          continue;
+        }
+        if (!word.empty()) words.push_back(word);
+        word.clear();
+        if (c == '[') {
+          array_size = atoi(member.c_str() + i + 1u);
+          if (array_size <= 0) array_size = 1;
+          break;
+        }
+      }
+      if (words.size() < 2) continue;
+      const int type_span = shader_type_location_span(words[words.size() - 2]);
+      span += (type_span > 0 ? type_span : 1) * array_size;
+    }
+    if (span <= 0) continue;
+
+    bool *used = storage == "out" ? used_output_locations : used_input_locations;
+    const int location = assign_interface_location(used, name, span, kMaxShaderInterfaceLocations);
+    if (location < 0) {
+      char message[256];
+      snprintf(message, sizeof(message),
+               "Could not assign a CafeGLSL location for %s shader %s block '%s'.",
+               shader_stage_name(shader_type), storage.c_str(), name.c_str());
+      write_info_log(info_log_out, info_log_max_length, message);
+      return false;
+    }
+    char text[48];
+    if (layout_open != std::string::npos) {
+      snprintf(text, sizeof(text), "location = %d, ", location);
+      insertions.push_back({header_start + layout_open + 1u, text});
+    } else {
+      /* GLSL before 4.20 wants the layout ahead of the other qualifiers. */
+      snprintf(text, sizeof(text), "layout(location = %d) ", location);
+      insertions.push_back({header_start + header.find_first_not_of(" \t\r\n"), text});
+    }
+    cursor = close + 1u;
+  }
+
+  for (auto it = insertions.rbegin(); it != insertions.rend(); ++it)
+    source.insert(it->position, it->text);
+  return true;
+}
+
 static char *lower_source_for_cafeglsl(const char *source,
                                        GLenum shader_type,
                                        char *info_log_out,
@@ -1236,6 +1410,11 @@ static char *lower_source_for_cafeglsl(const char *source,
                    "locations/bindings.");
     return NULL;
   }
+  if (!assign_interface_block_locations(lowered_source, shader_type, used_input_locations,
+                                        used_output_locations, info_log_out,
+                                        info_log_max_length)) {
+    return NULL;
+  }
 
   while (line_start < lowered_source.size()) {
     size_t line_end = lowered_source.find('\n', line_start);
@@ -1257,7 +1436,8 @@ static char *lower_source_for_cafeglsl(const char *source,
           if ((uniform_decl.is_block || is_sampler_type(uniform_decl.type)) &&
               !uniform_decl.layout.has_binding) {
             int binding = assign_binding(used_bindings,
-                                         GL33_MAX_COMBINED_TEXTURE_IMAGE_UNITS);
+                                         GL33_MAX_COMBINED_TEXTURE_IMAGE_UNITS,
+                                         uniform_decl.is_block);
             if (binding < 0) {
               write_info_log(info_log_out, info_log_max_length,
                              "Shader has too many sampler or uniform block "
@@ -1272,15 +1452,31 @@ static char *lower_source_for_cafeglsl(const char *source,
           bool *used_locations =
               interface_decl.storage == "out" ? used_output_locations
                                               : used_input_locations;
+          /* A geometry shader input array has one element per input vertex,
+           * all at the same location as the vertex shader output.
+           */
+          const bool per_vertex_array = shader_type == GL_GEOMETRY_SHADER &&
+                                        interface_decl.storage == "in";
           int span = shader_type_location_span(interface_decl.type) *
-                     interface_decl.array_size;
+                     (per_vertex_array ? 1 : interface_decl.array_size);
           int max_locations =
               shader_type == GL_FRAGMENT_SHADER &&
                       interface_decl.storage == "out"
                   ? 8
                   : kMaxShaderInterfaceLocations;
-          int location = assign_interface_location(
-              used_locations, interface_decl.name, span, max_locations);
+          /* Fragment outputs are draw buffer indices: like desktop GL,
+           * give them the lowest free ones in declaration order, so a
+           * shader's only output lands in draw buffer 0. Hashing the name
+           * (as for varyings) sent e.g. "outColor" to buffer 6.
+           */
+          const bool fragment_output = shader_type == GL_FRAGMENT_SHADER &&
+                                       interface_decl.storage == "out";
+          int location = fragment_output
+                             ? assign_lowest_interface_location(
+                                   used_locations, span, max_locations)
+                             : assign_interface_location(
+                                   used_locations, interface_decl.name, span,
+                                   max_locations);
           if (location < 0) {
             char message[256];
             snprintf(message, sizeof(message),
